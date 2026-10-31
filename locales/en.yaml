@@ -65,7 +65,6 @@ kanban_empowered.waits.urgent: "🚨 URGENT: no escalation contact is configured
 kanban_empowered.inbound.which_item: "Which item? Reply \"<n> done\" with a number from 1 to {n}."
 kanban_empowered.inbound.changed: "This request has changed since that message; nothing was changed."
 kanban_empowered.inbound.expired: "This request has expired; nothing was changed."
-kanban_empowered.inbound.not_owner: "This request belongs to {owner}; only they can resolve it."
 kanban_empowered.inbound.error: "Something went wrong while processing this reply; check the card with: hermes kanban-empowered explain {id}"
 kanban_empowered.inbound.unblocked: "✅ Unblocked {board} · {id}."
 kanban_empowered.inbound.held.none: "Nothing else is waiting on it."

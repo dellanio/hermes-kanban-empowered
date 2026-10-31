@@ -4,16 +4,18 @@ Replies reach the plugin through Hermes' ``pre_gateway_dispatch`` hook, which ru
 the gateway's own authorization, so every sender must be treated as untrusted. The checks
 run in this fixed order and nothing about a card is read before all of them pass:
 
-1. the event is a direct Telegram message (not relayed, not from a bot, not synthetic)
-   replying to a message this plugin sent to that same chat (``sent_messages``);
-   the text must be a reply command (``[n] done|feito|liguei|ok|approved|aprovado``);
+1. the event is a direct Telegram message (not relayed, not from a bot, not synthetic, not
+   an interactive-prompt answer, allowed to drive gateway control) replying to a message
+   this plugin sent to that same chat (``sent_messages``), and its whole text is an explicit
+   confirmation (``[n] done|feito|liguei|ok|approved|aprovado`` plus optional punctuation);
 2. the sender's Telegram user id is the configured owner of the selected item
-   (``settings.owner_ids[settings.owner_for(board)]``). A sender who is some other
-   *configured* identity (e.g. the ``escalate_to`` contact replying to an escalated copy)
-   is told who owns the request; anybody else gets no answer at all and the message
-   continues to the normal gateway flow (where Hermes' own auth applies);
+   (``settings.owner_ids[settings.owner_for(board)]``). Anybody else, a configured identity
+   such as the ``escalate_to`` contact included, gets ``None``: no answer, nothing consumed,
+   no state change, and the message continues to the normal gateway flow;
 3. ``store.mark_update`` dedupes the update (a replay is consumed in silence);
 4. the message is younger than ``settings.reply_ttl_s``.
+
+From step 3 on the message is consumed: any later failure still returns skip.
 
 Only then is the card read: it must still be ``blocked`` with the same block version as
 the item in the message (the live latest ``blocked`` event id, and the tracked wait row
@@ -34,7 +36,13 @@ from .waits import block_version, held_behind
 log = logging.getLogger(__name__)
 
 SKIP = {"action": "skip", "reason": "kanban-empowered"}
-REPLY_RE = re.compile(r"^\s*([0-9]{1,4})?\s*(feito|done|liguei|ok|aprovado|approved)\b", re.IGNORECASE)
+# The whole message must be the confirmation: an optional item number ("2", "2.", "2)", "2 -"),
+# the word, optional trailing punctuation/emoji. "ok, but not yet" or "done?" is a conversation.
+REPLY_RE = re.compile(
+    r"^\s*(?:([0-9]{1,4})\s*[.):\-]?\s*)?(feito|done|liguei|ok|aprovado|approved)"
+    r"\s*[.!\u2705\U0001F44D\uFE0F]*\s*$",
+    re.IGNORECASE,
+)
 _ID_RE = re.compile(r"-?[1-9][0-9]{0,19}")
 _COMMENT_TEXT_MAX = 500
 
@@ -59,6 +67,31 @@ def _is_telegram(platform: Any) -> bool:
     return isinstance(value, str) and value.strip().lower() == "telegram"
 
 
+_logged_once: set[str] = set()
+
+
+def _log_once(key: str, msg: str, *args: Any) -> None:
+    if key not in _logged_once:
+        _logged_once.add(key)
+        log.warning(msg, *args)
+
+
+def is_candidate(event: Any) -> bool:
+    """Cheap, pure pre-filter (no I/O): could ``event`` be a reply to one of our reminders?"""
+    source = getattr(event, "source", None)
+    if source is None or not _is_telegram(getattr(source, "platform", None)):
+        return False
+    if getattr(event, "internal", False) or getattr(source, "is_bot", False):
+        return False
+    if getattr(source, "delivered_via_upstream_relay", False):
+        return False  # our bot's own adapter delivers replies directly; never trust a relayed identity
+    if getattr(event, "allow_gateway_control", True) is False:
+        return False
+    if getattr(event, "prompt_response", None):
+        return False
+    return _canonical_id(getattr(event, "reply_to_message_id", None)) is not None
+
+
 def _replied_to_our_bot(event: Any, telegram: Any) -> bool:
     """False only when the raw Telegram update shows the replied-to message was authored by
     someone other than the bot that sent our reminders (a gateway on a different bot token).
@@ -67,6 +100,11 @@ def _replied_to_our_bot(event: Any, telegram: Any) -> bool:
     raw = getattr(event, "raw_message", None)
     author = getattr(getattr(getattr(raw, "reply_to_message", None), "from_user", None), "id", None)
     if bot_id is None or author is None:
+        _log_once(
+            "bot_author_unchecked",
+            "kanban-empowered: cannot verify that replies answer this bot's own message "
+            "(no raw Telegram update or no bot token); relying on the chat/message lookup",
+        )
         return True
     return str(author) == str(bot_id)
 
@@ -133,19 +171,18 @@ def resolve_wait(
 def handle_inbound(event: Any, settings: Any, store: Any, api: Any, telegram: Any, now: float) -> Optional[dict]:
     """``{"action": "skip", ...}`` when this plugin consumed the message, ``None`` to let it through."""
     # -- 1. a direct Telegram reply to one of our messages, in that same chat ----------------
-    source = getattr(event, "source", None)
-    if source is None or not _is_telegram(getattr(source, "platform", None)):
+    if not is_candidate(event):
         return None
-    if getattr(event, "internal", False) or getattr(source, "is_bot", False):
-        return None
-    if getattr(source, "delivered_via_upstream_relay", False):
-        return None  # our bot's own adapter delivers replies directly; never trust a relayed identity
+    source = event.source
     chat = _canonical_id(getattr(source, "chat_id", None))
     sender = _canonical_id(getattr(source, "user_id", None))
     reply_to = _canonical_id(getattr(event, "reply_to_message_id", None))
     message = _canonical_id(getattr(event, "message_id", None))
     if chat is None or sender is None or reply_to is None or message is None:
         return None
+    match = REPLY_RE.match(getattr(event, "text", None) or "")
+    if match is None:
+        return None  # not an explicit confirmation: a normal message for the agent
     sent = store.get_sent_message(int(chat), int(reply_to))
     if sent is None or sent.get("kind") != "waits":
         return None
@@ -154,9 +191,6 @@ def handle_inbound(event: Any, settings: Any, store: Any, api: Any, telegram: An
     items = sent.get("items")
     if not isinstance(items, list) or not items:
         return None
-    match = REPLY_RE.match(getattr(event, "text", None) or "")
-    if match is None:
-        return None  # not a reply command: a normal message for the agent
     number = int(match.group(1)) if match.group(1) else None
     if number is not None:
         selected = items[number - 1] if 1 <= number <= len(items) else None
@@ -165,30 +199,30 @@ def handle_inbound(event: Any, settings: Any, store: Any, api: Any, telegram: An
 
     # -- 2. the sender is the configured owner of the selected item -------------------------
     scope = [selected] if selected is not None else items
-    owners = sorted({settings.owner_for(str(item["board"])) for item in scope})
-    owner_ids = {o: _canonical_id(settings.owner_ids.get(o)) for o in owners}
-    if sender not in {v for v in owner_ids.values() if v is not None}:
-        known = {_canonical_id(v) for v in settings.owner_ids.values()}
-        if sender not in known:
-            return None  # a stranger: no answer, nothing consumed, nothing read
-        if not store.mark_update(f"tg:{chat}:{message}", int(now)):
-            return _skip()
-        _reply(telegram, int(chat), int(message), t("inbound.not_owner", owner=", ".join(owners)))
-        return _skip()
+    owners = {settings.owner_for(str(item["board"])) for item in scope}
+    allowed = {_canonical_id(settings.owner_ids.get(o)) for o in owners} - {None}
+    if sender not in allowed:
+        return None  # not the owner (configured identity or stranger): untouched, flows on
 
     # -- 3. each update acts at most once ---------------------------------------------------
     if not store.mark_update(f"tg:{chat}:{message}", int(now)):
         return _skip()
+    try:
+        _act(event, source, settings, store, api, telegram, now, sent, items, selected, chat, sender, message)
+    except Exception:
+        log.exception("kanban-empowered: handling a consumed Telegram reply failed")
+    return _skip()
 
+
+def _act(event, source, settings, store, api, telegram, now, sent, items, selected, chat, sender, message) -> None:
+    """Everything after the update was consumed; the caller returns skip whatever happens here."""
     # -- 4. the request is still fresh ------------------------------------------------------
     if now - int(sent["created_at"]) >= settings.reply_ttl_s:
         _reply(telegram, int(chat), int(message), t("inbound.expired"))
-        return _skip()
-
+        return
     if selected is None:
         _reply(telegram, int(chat), int(message), t("inbound.which_item", n=len(items)))
-        return _skip()
-
+        return
     board, task_id, version = str(selected["board"]), str(selected["task_id"]), int(selected["version"])
     name = getattr(source, "user_name", None) or getattr(event, "user_name", None) or sender
     comment = t("inbound.comment.telegram", name=_clip(name), user_id=sender, text=_clip(event.text))
@@ -197,12 +231,11 @@ def handle_inbound(event: Any, settings: Any, store: Any, api: Any, telegram: An
     except Exception:
         log.exception("kanban-empowered: resolving %s/%s from Telegram failed", board, task_id)
         _reply(telegram, int(chat), int(message), t("inbound.error", id=task_id))
-        return _skip()
+        return
     if not done:
         _reply(telegram, int(chat), int(message), t("inbound.changed"))
-        return _skip()
+        return
     _reply(telegram, int(chat), int(message), render_done(board, task_id, held))
-    return _skip()
 
 
 def make_dispatch_hook(
@@ -227,6 +260,8 @@ def make_dispatch_hook(
 
     async def pre_gateway_dispatch(event: Any = None, **_ignored: Any) -> Optional[dict]:
         try:
+            if not is_candidate(event):  # pure checks on the loop; only candidates hop threads
+                return None
             return await asyncio.to_thread(run, event)
         except Exception:
             log.exception("kanban-empowered: inbound reply handling failed; passing the message through")

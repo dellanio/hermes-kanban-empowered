@@ -213,24 +213,24 @@ def test_unknown_stranger_gets_no_reply_and_no_card_read(env):
     assert env.store.mark_update(f"tg:{OWNER}:5", int(env.clock.now)) is True
 
 
-def test_known_non_owner_is_told_who_owns_it(env):
+def test_known_non_owner_is_ignored(env):
     spy = SpyApi()
     env.api = spy
-    r = env.handle(reply_event(user_id=BOSS, reply_to=env.sent_id, text="feito"))
-    assert r == {"action": "skip", "reason": "kanban-empowered"}
+    ev = reply_event(user_id=BOSS, reply_to=env.sent_id, text="feito", message_id="41")
+    assert env.handle(ev) is None
     assert _status(env.tids[0]) == "blocked"
-    assert "sponsor" in env.telegram.last_text
-    assert spy.calls == []  # no card read for a non-owner
+    assert spy.calls == [] and env.telegram.count("send") == 0
+    assert env.store.mark_update(f"tg:{OWNER}:41", int(env.clock.now)) is True  # not consumed
 
 
 def test_copy_recipient_cannot_resolve(env):
     copy_id = 9001
     env.store.add_sent_message(copy_id, int(BOSS), "waits", env.items, int(env.clock.now))
-    ev = reply_event(user_id=BOSS, chat_id=BOSS, reply_to=copy_id, text="feito")
-    assert env.handle(ev)["action"] == "skip"
+    ev = reply_event(user_id=BOSS, chat_id=BOSS, reply_to=copy_id, text="feito", message_id="42")
+    assert env.handle(ev) is None
     assert _status(env.tids[0]) == "blocked"
-    assert "sponsor" in env.telegram.last_text
-    assert env.telegram.calls["send"][-1]["chat_id"] == int(BOSS)
+    assert env.telegram.count("send") == 0
+    assert env.store.mark_update(f"tg:{BOSS}:42", int(env.clock.now)) is True  # not consumed
 
 
 def test_owner_impersonation_in_another_chat_is_ignored(env):
@@ -332,28 +332,77 @@ def test_card_no_longer_blocked_is_reported_as_changed(env):
 
 
 @pytest.mark.parametrize(
-    "text", ["done", "Feito", "liguei", "OK", "approved", "aprovado", "  1 done", "1 feito, pode seguir", "DONE!"]
+    "text",
+    ["done", "Feito", "liguei", "OK", "approved", "aprovado", "  1 done", "DONE!", "1. feito", "1) feito",
+     "1 done!", "feito ✅", "ok 👍", "1 - ok", "1: done."],
 )
-def test_multilingual_words_unblock(env, text):
+def test_explicit_confirmations_unblock(env, text):
     assert env.handle(reply_event(user_id=OWNER, reply_to=env.sent_id, text=text))["action"] == "skip"
     assert _status(env.tids[0]) != "blocked"
 
 
-@pytest.mark.parametrize("text", ["doneish", "okay", "não feito", "feitos", "1 2 done"])
-def test_non_command_words_do_not_unblock(env, text):
-    assert env.handle(reply_event(user_id=OWNER, reply_to=env.sent_id, text=text)) is None
+@pytest.mark.parametrize(
+    "text",
+    ["doneish", "okay", "não feito", "feitos", "1 2 done", "ok, mas ainda nao", "feito?",
+     "liguei mas ninguem atendeu", "done yet?", "OK vou ver amanha", "aprovado so a parte A", "done-ish",
+     "1 feito, pode seguir", "feito, liguei a placa"],
+)
+def test_anything_but_an_explicit_confirmation_goes_to_the_agent(env, text):
+    ev = reply_event(user_id=OWNER, reply_to=env.sent_id, text=text, message_id="61")
+    assert env.handle(ev) is None
     assert _status(env.tids[0]) == "blocked"
+    assert env.telegram.count("send") == 0
+    assert env.store.mark_update(f"tg:{OWNER}:61", int(env.clock.now)) is True  # not consumed
+
+
+@pytest.mark.parametrize("text", ["2 done!", "2. feito", "2) feito"])
+def test_numbered_confirmation_forms_pick_the_item(env2, text):
+    assert env2.handle(reply_event(user_id=OWNER, reply_to=env2.sent_id, text=text))["action"] == "skip"
+    assert _status(env2.tids[0]) == "blocked" and _status(env2.tids[1]) != "blocked"
+
+
+def test_gateway_control_disallowed_or_prompt_answer_passes_through(env):
+    ev = reply_event(user_id=OWNER, reply_to=env.sent_id, text="feito")
+    ev.allow_gateway_control = False
+    assert env.handle(ev) is None
+    ev2 = reply_event(user_id=OWNER, reply_to=env.sent_id, text="feito")
+    ev2.prompt_response = {"prompt_id": "p", "option_id": "o"}
+    assert env.handle(ev2) is None
+    assert _status(env.tids[0]) == "blocked" and env.telegram.count("send") == 0
+
+
+def test_failure_after_consuming_still_skips(env, monkeypatch):
+    from ke import inbound
+
+    def boom(*a, **kw):
+        raise RuntimeError("render broke")
+
+    monkeypatch.setattr(inbound, "render_done", boom)
+    r = env.handle(reply_event(user_id=OWNER, reply_to=env.sent_id, text="done"))
+    assert r == {"action": "skip", "reason": "kanban-empowered"}
+    assert _status(env.tids[0]) != "blocked"
+
+
+def test_unchecked_bot_author_is_logged_once(env, monkeypatch, caplog):
+    from ke import inbound
+
+    monkeypatch.setattr(inbound, "_logged_once", set())
+    with caplog.at_level("WARNING", logger="ke.inbound"):
+        env.handle(reply_event(user_id=OWNER, reply_to=env.sent_id, text="done"))
+        _reblock(env.tids[0])
+        env.handle(reply_event(user_id=OWNER, reply_to=env.sent_id, text="done"))
+    assert sum("cannot verify" in r.getMessage() for r in caplog.records) == 1
 
 
 # -- the action ----------------------------------------------------------------
 def test_owner_done_unblocks_comments_logs_and_confirms(env):
-    r = env.handle(reply_event(user_id=OWNER, reply_to=env.sent_id, text="feito, liguei a placa", message_id="31"))
+    r = env.handle(reply_event(user_id=OWNER, reply_to=env.sent_id, text="Feito ✅", message_id="31"))
     assert r == {"action": "skip", "reason": "kanban-empowered"}
     tid = env.tids[0]
     assert _status(tid) != "blocked"
     body = _comments(tid)[-1]
     assert body.startswith("kanban-empowered: ")
-    assert "Telegram" in body and "Dellanio (6802889854)" in body and "feito, liguei a placa" in body
+    assert "Telegram" in body and "Dellanio (6802889854)" in body and "Feito ✅" in body
     actions = [a for a in env.store.actions_since(0) if a["kind"] == "human_done"]
     assert [(a["board"], a["task_id"]) for a in actions] == [("default", tid)]
     send = env.telegram.calls["send"][-1]
@@ -386,6 +435,25 @@ def test_hook_consumes_owner_done(env):
     ev = reply_event(user_id=OWNER, reply_to=env.sent_id, text="done")
     r = asyncio.run(cb(event=ev, gateway=None, session_store=None))
     assert r["action"] == "skip" and _status(env.tids[0]) != "blocked"
+
+
+def test_hook_filters_non_candidates_on_the_loop(env, monkeypatch):
+    from ke import inbound
+
+    hops = []
+
+    async def fake_to_thread(fn, *a, **kw):
+        hops.append(fn)
+        return fn(*a, **kw)
+
+    monkeypatch.setattr(inbound.asyncio, "to_thread", fake_to_thread)
+    cb = _hook(env)
+    for ev in (plain_event("oi"), reply_event(user_id=OWNER, reply_to=env.sent_id, text="feito", platform="discord")):
+        assert asyncio.run(cb(event=ev, gateway=None, session_store=None)) is None
+    assert hops == []
+    ev = reply_event(user_id=OWNER, reply_to=env.sent_id, text="feito")
+    assert asyncio.run(cb(event=ev, gateway=None, session_store=None))["action"] == "skip"
+    assert len(hops) == 1
 
 
 def test_hook_internal_error_passes_through(env):

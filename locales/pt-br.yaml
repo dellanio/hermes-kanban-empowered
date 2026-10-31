@@ -65,7 +65,6 @@ kanban_empowered.waits.urgent: "🚨 URGENTE: nenhum contato de escalada está c
 kanban_empowered.inbound.which_item: "Qual item? Responda \"<n> feito\" com um número de 1 a {n}."
 kanban_empowered.inbound.changed: "Esse pedido mudou desde a mensagem; nada foi alterado."
 kanban_empowered.inbound.expired: "Pedido expirado; nada foi alterado."
-kanban_empowered.inbound.not_owner: "Este pedido é de {owner}; só essa pessoa pode resolvê-lo."
 kanban_empowered.inbound.error: "Algo deu errado ao processar esta resposta; confira o card com: hermes kanban-empowered explain {id}"
 kanban_empowered.inbound.unblocked: "✅ Desbloqueado {board} · {id}."
 kanban_empowered.inbound.held.none: "Nada mais está esperando por ele."

@@ -89,7 +89,6 @@ EN: dict[str, str] = {
     "inbound.which_item": 'Which item? Reply "<n> done" with a number from 1 to {n}.',
     "inbound.changed": "This request has changed since that message; nothing was changed.",
     "inbound.expired": "This request has expired; nothing was changed.",
-    "inbound.not_owner": "This request belongs to {owner}; only they can resolve it.",
     "inbound.error": "Something went wrong while processing this reply; check the card with: hermes kanban-empowered explain {id}",
     "inbound.unblocked": "✅ Unblocked {board} · {id}.",
     "inbound.held.none": "Nothing else is waiting on it.",

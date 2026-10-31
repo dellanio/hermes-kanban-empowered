@@ -7,6 +7,23 @@ import logging
 log = logging.getLogger(__name__)
 
 
+def _register_worker_guard(ctx, settings) -> None:
+    """Register the ``pre_tool_call`` guard in every profile (workers included).
+
+    It is a safety check, so it also runs on the fallback defaults when the
+    config is invalid (``require_structured_ask`` defaults to on).
+    """
+    try:
+        from .ke import worker_guard
+
+        def guard(tool_name="", args=None, **kw):
+            return worker_guard.pre_tool_call(tool_name, args, settings=settings)
+
+        ctx.register_hook("pre_tool_call", guard)
+    except Exception:
+        log.exception("kanban-empowered: failed to register the worker guard")
+
+
 def register(ctx) -> None:
     """Wire the dispatch-tick hook and the ``kanban-empowered`` CLI command.
 
@@ -24,6 +41,7 @@ def register(ctx) -> None:
         settings = Settings.from_mapping({})
         config_error = str(exc) or type(exc).__name__
     cli.bind(settings, config_error)
+    _register_worker_guard(ctx, settings)
     if config_error is None:  # never run the coordinator on guessed settings
         try:
             from .ke.coordinator import Coordinator

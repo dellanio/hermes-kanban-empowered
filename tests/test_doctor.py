@@ -182,3 +182,27 @@ def test_doctor_no_config_line_when_valid(kanban_home, capsys, tmp_path):
 
     cli.run_doctor(settings_for_test(tmp_path))
     assert "config:" not in capsys.readouterr().out
+
+
+def test_register_wires_pre_tool_call_guard(kanban_home, tmp_path, load_plugin):
+    mod = load_plugin()
+    ctx = _Ctx(tmp_path / "state")
+    mod.register(ctx)
+    guard = ctx.hooks["pre_tool_call"]
+    r = guard(tool_name="kanban_block", args={"reason": "x", "kind": "needs_input"}, task_id="t")
+    assert r["action"] == "block"
+    assert guard(tool_name="terminal", args={"command": "ls"}, session_id="s") is None
+
+
+def test_register_guard_honors_config_and_survives_invalid_config(kanban_home, tmp_path, load_plugin):
+    mod = load_plugin()
+    ctx = _Ctx(tmp_path / "state", config={"waits.require_structured_ask": False})
+    mod.register(ctx)
+    assert ctx.hooks["pre_tool_call"](tool_name="kanban_block", args={"reason": "x"}) is None
+
+    mod2 = load_plugin("ke_plugin_pkg2")
+    bad = _Ctx(tmp_path / "state2", config={"mode": "bogus"})
+    mod2.register(bad)
+    assert "on_kanban_dispatch_tick" not in bad.hooks
+    r = bad.hooks["pre_tool_call"](tool_name="kanban_block", args={"reason": "x"})
+    assert r["action"] == "block"

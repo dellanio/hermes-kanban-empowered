@@ -73,7 +73,11 @@ EN: dict[str, str] = {
 
 
 def t(key: str, **kw) -> str:
-    """Text for ``key`` in the user's Hermes language, English when Hermes has none."""
+    """Text for ``key`` in the user's Hermes language, English when Hermes has none.
+
+    ``kw`` are format arguments; they must not be named ``lang`` or ``key`` (``agent.i18n.t``
+    takes ``lang`` itself, and ``key`` is this function's own parameter).
+    """
     out = hermes_api.translate(PREFIX + key, **kw)
     if out is not None:
         return out

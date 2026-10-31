@@ -69,10 +69,14 @@ def run_explain(settings: Settings, card: str, board: Optional[str]) -> int:
                 with hermes_api.connect(b) as conn:
                     if hermes_api.task(conn, card) is None:
                         continue
-                    found.append(
-                        conditions.explain(conn, b, card, store, time.time(), settings=settings)
-                    )
-            except Exception as exc:
+                    try:
+                        found.append(
+                            conditions.explain(conn, b, card, store, time.time(), settings=settings)
+                        )
+                    except Exception as exc:  # a real failure while explaining: never "not found"
+                        print(t("explain.board_error", board=b, error=exc))
+                        return 1
+            except Exception as exc:  # board unreadable (connect / lookup)
                 if board:
                     print(t("explain.board_error", board=b, error=exc))
                     return 1

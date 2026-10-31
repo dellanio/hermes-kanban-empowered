@@ -69,22 +69,49 @@ def _count(n: int, key: str) -> str:
 
 
 # -- conditions -----------------------------------------------------------------
-def _open_roots(conn: Any, tid: str, seen: set) -> list:
-    """Open ancestors of ``tid`` that have no open parent themselves (the blocking roots)."""
-    roots: list = []
-    for pid in hermes_api.parents(conn, tid):
-        if pid in seen:
-            continue
-        seen.add(pid)
-        parent = hermes_api.task(conn, pid)
-        if parent is None or parent.status in _CLOSED:
-            continue
-        roots.extend(_open_roots(conn, pid, seen) or [parent])
-    return roots
+def _open_roots(conn: Any, tid: str) -> list:
+    """Blocking roots of ``tid``: open ancestors with no open parent of their own.
+
+    Memoized per node, so a diamond (X <- P1, P2 <- R) reports R once and never an
+    intermediate node; nodes still being resolved (a dependency cycle) contribute nothing.
+    If a cycle leaves no root at all, the open direct parents are reported instead.
+    """
+    memo: dict[str, list] = {}
+    in_progress: set[str] = set()
+
+    def open_parents(node: str) -> list:
+        found = []
+        for pid in hermes_api.parents(conn, node):
+            parent = hermes_api.task(conn, pid)
+            if parent is not None and parent.status not in _CLOSED:
+                found.append(parent)
+        return found
+
+    def roots_of(parent: Any) -> list:
+        if parent.id in memo:
+            return memo[parent.id]
+        if parent.id in in_progress:
+            return []
+        in_progress.add(parent.id)
+        above = open_parents(parent.id)
+        roots = [parent] if not above else [r for p in above for r in roots_of(p)]
+        in_progress.discard(parent.id)
+        memo[parent.id] = roots
+        return roots
+
+    in_progress.add(tid)
+    direct = open_parents(tid)
+    unique: dict[str, Any] = {}
+    for parent in direct:
+        for root in roots_of(parent):
+            unique.setdefault(root.id, root)
+    if not unique:
+        unique = {p.id: p for p in direct}
+    return list(unique.values())
 
 
 def _dependencies(conn, board, task, store, now, settings) -> Condition:
-    roots = _open_roots(conn, task.id, {task.id})
+    roots = _open_roots(conn, task.id)
     if not roots:
         return Condition("dependencies", True, t("explain.dependencies.none"))
     parts = []
@@ -245,42 +272,42 @@ def fleet_status(store: Store, now: float, settings: Optional[Settings] = None) 
     for board in boards:
         try:
             with hermes_api.connect(board) as conn:
-                for t in hermes_api.list_tasks(conn, status="running"):
+                for task in hermes_api.list_tasks(conn, status="running"):
                     running.append(
                         {
                             "board": board,
-                            "task_id": t.id,
-                            "title": t.title,
-                            "assignee": t.assignee,
-                            "age_s": _age(now, t.started_at or t.created_at),
-                            "heartbeat_age_s": _age(now, t.last_heartbeat_at) if t.last_heartbeat_at else None,
+                            "task_id": task.id,
+                            "title": task.title,
+                            "assignee": task.assignee,
+                            "age_s": _age(now, task.started_at or task.created_at),
+                            "heartbeat_age_s": _age(now, task.last_heartbeat_at) if task.last_heartbeat_at else None,
                         }
                     )
-                for t in hermes_api.list_tasks(conn, status="blocked"):
-                    if not _is_human_block(t, settings):
+                for task in hermes_api.list_tasks(conn, status="blocked"):
+                    if not _is_human_block(task, settings):
                         continue
-                    wait = store.latest_wait(board, t.id)
+                    wait = store.latest_wait(board, task.id)
                     since = (wait or {}).get("started_at") or _last_event_ts(
-                        _events(conn, t.id), frozenset({"blocked"})
-                    ) or t.created_at
+                        _events(conn, task.id), frozenset({"blocked"})
+                    ) or task.created_at
                     human_waits.append(
                         {
                             "board": board,
-                            "task_id": t.id,
-                            "title": t.title,
+                            "task_id": task.id,
+                            "title": task.title,
                             "owner": (wait or {}).get("owner") or settings.owner_for(board),
                             "age_s": _age(now, since),
                         }
                     )
-                for t in hermes_api.list_tasks(conn, status="ready"):
-                    hits, reason = _guard_hits(_events(conn, t.id))
+                for task in hermes_api.list_tasks(conn, status="ready"):
+                    hits, reason = _guard_hits(_events(conn, task.id))
                     if not hits:
                         continue
                     guarded.append(
                         {
                             "board": board,
-                            "task_id": t.id,
-                            "title": t.title,
+                            "task_id": task.id,
+                            "title": task.title,
                             "reason": reason,
                             "count": len(hits),
                             "age_s": _age(now, hits[0].created_at),

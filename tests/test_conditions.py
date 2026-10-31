@@ -498,3 +498,142 @@ def test_english_when_pack_missing_for_language(kanban_home, tmp_path, monkeypat
     finally:
         monkeypatch.delenv("HERMES_LANGUAGE", raising=False)
         i18n.reset_language_cache()
+
+
+# -- dependency graph shapes ----------------------------------------------------
+def test_dependencies_diamond_reports_only_the_root(kanban_home, tmp_path):
+    from ke import hermes_api as h
+
+    store = _store(tmp_path)
+    with h.connect("default") as conn:
+        r = create_task(conn, title="raiz", assignee="dev")
+        _claim(conn, r)
+        block_task(conn, r, reason="Preciso: x", kind="needs_input")
+        p1 = create_task(conn, title="p1", parents=[r])
+        p2 = create_task(conn, title="p2", parents=[r])
+        x = create_task(conn, title="x", parents=[p1, p2])
+    dep = _cond(_explain("default", x, store), "dependencies")
+    assert dep.text.count(r) == 1 and p1 not in dep.text and p2 not in dep.text
+
+
+def test_dependencies_two_independent_roots(kanban_home, tmp_path):
+    from ke import hermes_api as h
+
+    store = _store(tmp_path)
+    with h.connect("default") as conn:
+        roots = []
+        for name in ("a", "b"):
+            r = create_task(conn, title=name, assignee="dev")
+            _claim(conn, r)
+            block_task(conn, r, reason="Preciso: x", kind="needs_input")
+            roots.append(r)
+        x = create_task(conn, title="x", parents=roots)
+    dep = _cond(_explain("default", x, store), "dependencies")
+    assert all(r in dep.text for r in roots)
+
+
+def _fake_graph(monkeypatch, edges, statuses):
+    from types import SimpleNamespace
+
+    from ke import hermes_api as h
+
+    monkeypatch.setattr(h, "parents", lambda conn, tid: edges.get(tid, []))
+    monkeypatch.setattr(
+        h,
+        "task",
+        lambda conn, tid: SimpleNamespace(id=tid, status=statuses.get(tid, "todo")),
+    )
+
+
+def test_open_roots_survives_cycle(monkeypatch):
+    from ke import conditions
+
+    _fake_graph(monkeypatch, {"a": ["b"], "b": ["c"], "c": ["b"]}, {})
+    roots = conditions._open_roots(None, "a")
+    assert [r.id for r in roots] == ["b"]  # cycle b<->c has no root: falls back to direct parents
+
+
+def test_open_roots_cycle_with_real_root(monkeypatch):
+    from ke import conditions
+
+    _fake_graph(monkeypatch, {"a": ["b"], "b": ["c", "r"], "c": ["b"]}, {"r": "blocked"})
+    assert [r.id for r in conditions._open_roots(None, "a")] == ["r"]
+
+
+def test_open_roots_diamond_dedupes(monkeypatch):
+    from ke import conditions
+
+    _fake_graph(monkeypatch, {"x": ["p1", "p2"], "p1": ["r"], "p2": ["r"]}, {})
+    assert [r.id for r in conditions._open_roots(None, "x")] == ["r"]
+
+
+# -- fleet_status resilience ----------------------------------------------------
+def test_fleet_status_skips_unreadable_board(kanban_home, tmp_path, monkeypatch):
+    from hermes_cli import kanban_db_boards as kbb
+    from ke import conditions, hermes_api as h
+
+    store = _store(tmp_path)
+    kbb.create_board("side")
+    with h.connect("default") as conn:
+        run_t = create_task(conn, title="rodando", assignee="dev")
+        _claim(conn, run_t)
+    real = h.connect
+
+    def flaky(board):
+        if board == "side":
+            raise RuntimeError("corrompido")
+        return real(board)
+
+    monkeypatch.setattr(h, "connect", flaky)
+    fs = conditions.fleet_status(store, time.time() + 1)
+    assert [r["task_id"] for r in fs["running"]] == [run_t]
+    assert fs["boards"] == ["default", "side"]
+
+
+# -- CLI error paths ------------------------------------------------------------
+def test_cli_explain_ambiguous_across_boards(kanban_home, tmp_path, capsys, monkeypatch):
+    from types import SimpleNamespace
+
+    from hermes_cli import kanban_db_boards as kbb
+    from ke import cli, conditions, hermes_api as h
+
+    kbb.create_board("side")
+    monkeypatch.setattr(h, "task", lambda conn, tid: SimpleNamespace(id=tid))
+    monkeypatch.setattr(
+        conditions,
+        "explain",
+        lambda conn, board, tid, store, now, settings=None: conditions.CardConditions(
+            board, tid, "ready", 0, [], "x"
+        ),
+    )
+    rc = cli.run_explain(settings_for_test(tmp_path), "t_dup", None)
+    out = capsys.readouterr().out
+    assert rc == 1 and "several boards" in out and "default, side" in out and "--board" in out
+
+
+def test_cli_explain_board_error_exits_1(kanban_home, tmp_path, capsys, monkeypatch):
+    from ke import cli, hermes_api as h
+
+    def boom(board):
+        raise RuntimeError("sem acesso")
+
+    monkeypatch.setattr(h, "connect", boom)
+    rc = cli.run_explain(settings_for_test(tmp_path), "t_1", "matrix")
+    out = capsys.readouterr().out
+    assert rc == 1 and "error reading board matrix" in out and "sem acesso" in out
+
+
+def test_cli_explain_failure_is_not_reported_as_not_found(kanban_home, tmp_path, capsys, monkeypatch):
+    from ke import cli, conditions, hermes_api as h
+
+    with h.connect("default") as conn:
+        tid = create_task(conn, title="t")
+
+    def boom(*a, **kw):
+        raise RuntimeError("falha interna")
+
+    monkeypatch.setattr(conditions, "explain", boom)
+    rc = cli.run_explain(settings_for_test(tmp_path), tid, None)
+    out = capsys.readouterr().out
+    assert rc == 1 and "error reading board default" in out and "falha interna" in out
+    assert "not found" not in out

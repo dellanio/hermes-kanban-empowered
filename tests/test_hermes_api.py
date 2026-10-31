@@ -1,7 +1,10 @@
 import pathlib
 import re
+import sqlite3
 
-from conftest import create_task
+import pytest
+
+from conftest import block_task, create_task
 
 
 def test_constants():
@@ -29,6 +32,59 @@ def test_comment_prefix_and_author(kanban_home):
         c = h.comments(conn, tid)[-1]
         assert c.author == "kanban-empowered" and c.body.startswith("kanban-empowered: ")
         assert c.body == "kanban-empowered: segurado"
+
+
+def test_connect_closes_connection_on_exit(kanban_home):
+    from ke import hermes_api as h
+
+    with h.connect("default") as conn:
+        conn.execute("SELECT 1")
+    with pytest.raises(sqlite3.ProgrammingError):
+        conn.execute("SELECT 1")
+
+
+def test_connect_closes_on_exception(kanban_home):
+    from ke import hermes_api as h
+
+    with pytest.raises(KeyError):
+        with h.connect("default") as conn:
+            raise KeyError("x")
+    with pytest.raises(sqlite3.ProgrammingError):
+        conn.execute("SELECT 1")
+
+
+@pytest.mark.parametrize(
+    "given,expected",
+    [
+        ("kanban-empowered:x", "kanban-empowered: x"),
+        ("  kanban-empowered: x  ", "kanban-empowered: x"),
+        ("   spaced  ", "kanban-empowered: spaced"),
+    ],
+)
+def test_comment_normalizes_prefix_and_whitespace(kanban_home, given, expected):
+    from ke import hermes_api as h
+
+    with h.connect("default") as conn:
+        tid = create_task(conn, title="t")
+        h.comment(conn, tid, given)
+        assert h.comments(conn, tid)[-1].body == expected
+
+
+@pytest.mark.parametrize("body", ["", "   ", " \t ", "kanban-empowered:", "kanban-empowered:  "])
+def test_comment_empty_rejected(kanban_home, body):
+    from ke import hermes_api as h
+
+    with h.connect("default") as conn:
+        tid = create_task(conn, title="t")
+        with pytest.raises(ValueError):
+            h.comment(conn, tid, body)
+        assert h.comments(conn, tid) == []
+
+
+def test_hermes_home_follows_env(kanban_home):
+    from ke import hermes_api as h
+
+    assert h.hermes_home() == kanban_home
 
 
 def test_comment_does_not_double_prefix(kanban_home):
@@ -67,8 +123,7 @@ def test_unblock(kanban_home):
     with h.connect("default") as conn:
         tid = create_task(conn, title="t", assignee="default")
         assert h.unblock(conn, tid) is False  # not blocked
-        conn.execute("UPDATE tasks SET status='blocked' WHERE id=?", (tid,))
-        conn.commit()
+        block_task(conn, tid, reason="waiting")
         assert h.unblock(conn, tid) is True
         assert h.task(conn, tid).status == "ready"
 
@@ -121,10 +176,12 @@ def test_veto_hooks_available_when_both_present(monkeypatch):
 
 def test_only_adapter_imports_hermes_cli():
     ke_dir = pathlib.Path(__file__).resolve().parent.parent / "ke"
-    pat = re.compile(r"^\s*(from|import)\s+hermes_cli", re.M)
+    pat = re.compile(
+        r"^\s*(from|import)\s+(hermes_cli|hermes_constants|hermes_state|agent)\b", re.M
+    )
     offenders = [
-        p.name
-        for p in ke_dir.glob("*.py")
+        str(p.relative_to(ke_dir))
+        for p in ke_dir.rglob("*.py")
         if p.name != "hermes_api.py" and pat.search(p.read_text(encoding="utf-8"))
     ]
     assert offenders == []

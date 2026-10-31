@@ -6,9 +6,10 @@ Hermes upgrade only ever needs fixes here.
 """
 from __future__ import annotations
 
+import contextlib
 import sqlite3
 from pathlib import Path
-from typing import Optional
+from typing import Iterator
 
 from hermes_cli import kanban_db as _kb
 from hermes_cli import kanban_db_boards as _kbb
@@ -29,9 +30,16 @@ def boards() -> list[str]:
     return [b["slug"] for b in _kbb.list_boards(include_archived=False)]
 
 
-def connect(board: str) -> sqlite3.Connection:
-    """Open the kanban DB of ``board`` (the caller closes it)."""
-    return _kbc.connect(board=board)
+@contextlib.contextmanager
+def connect(board: str) -> Iterator[sqlite3.Connection]:
+    """Context manager yielding the kanban DB connection of ``board``.
+
+    The connection is always closed on exit (``connect_closing``): a bare
+    ``with sqlite3_conn`` only commits and would leak fds in a long-running
+    process (Hermes incident #33159).
+    """
+    with _kbc.connect_closing(board=board) as conn:
+        yield conn
 
 
 # -- reads -------------------------------------------------------------------
@@ -61,17 +69,37 @@ def unblock(conn: sqlite3.Connection, tid: str) -> bool:
 
 
 def comment(conn: sqlite3.Connection, tid: str, body: str) -> int:
-    """Comment as ``kanban-empowered``; the body is prefixed unless it already is."""
-    if not body.startswith(_COMMENT_PREFIX):
-        body = _COMMENT_PREFIX + body
+    """Comment as ``kanban-empowered``; the body is stripped and prefixed unless it already is.
+
+    Raises ValueError on an empty/whitespace-only body.
+    """
+    body = (body or "").strip()
+    if not body:
+        raise ValueError("comment body is required")
+    if body.startswith(COMMENT_AUTHOR + ":"):
+        body = body[len(COMMENT_AUTHOR) + 1:].strip()
+        if not body:
+            raise ValueError("comment body is required")
+    body = _COMMENT_PREFIX + body
     return int(_kb.add_comment(conn, tid, COMMENT_AUTHOR, body))
 
 
 def assign(conn: sqlite3.Connection, tid: str, profile: str) -> bool:
+    """Assign ``tid`` to ``profile``; False if the task is unknown.
+
+    Raises RuntimeError (from Hermes) while the task is running under a claim.
+    """
     return bool(_kb.assign_task(conn, tid, profile))
 
 
 # -- environment -------------------------------------------------------------
+def hermes_home() -> Path:
+    """The active Hermes home directory."""
+    from hermes_constants import get_hermes_home
+
+    return Path(get_hermes_home())
+
+
 def profiles() -> list[str]:
     """Profile names: sub-directories of ``<hermes root>/profiles`` plus ``default``."""
     from hermes_constants import get_default_hermes_root

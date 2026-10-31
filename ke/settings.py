@@ -40,9 +40,9 @@ def parse_duration(text: Any) -> int:
 
 def _hermes_home() -> Path:
     try:
-        from hermes_constants import get_hermes_home
+        from . import hermes_api
 
-        return Path(get_hermes_home())
+        return hermes_api.hermes_home()
     except Exception:
         env = os.environ.get("HERMES_HOME")
         return Path(env) if env else Path.home() / ".hermes"

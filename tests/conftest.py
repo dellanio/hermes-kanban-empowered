@@ -37,6 +37,13 @@ def create_task(conn, **kw) -> str:
     return kb.create_task(conn, **kw)
 
 
+def block_task(conn, task_id: str, **kw) -> bool:
+    """Thin wrapper over ``hermes_cli.kanban_db.block_task``."""
+    from hermes_cli import kanban_db as kb
+
+    return kb.block_task(conn, task_id, **kw)
+
+
 class FakeClock:
     """Controllable wall clock: ``clock.now`` is a float, ``advance(s)`` moves it."""
 

@@ -1,0 +1,584 @@
+diff --git a/hermes_cli/kanban.py b/hermes_cli/kanban.py
+index e1c36a8111..5bdfb24598 100644
+--- a/hermes_cli/kanban.py
++++ b/hermes_cli/kanban.py
+@@ -892,6 +892,16 @@ def _goal_gate_error(conn, tid: str, evidence: str, handoff: str, blocked_hint:
+     return None
+ 
+ 
++def _cli_actor() -> str:
++    """``cli:<os user>`` — who ran this command, for the ``kanban_pre_complete`` hook."""
++    import getpass
++
++    try:
++        return f"cli:{getpass.getuser()}"
++    except Exception:
++        return "cli:unknown"
++
++
+ def _cmd_complete(args: argparse.Namespace) -> int:
+     """Mark one or more tasks done. Supports a single id or a list."""
+     ids, rc = _require_ids(args)
+@@ -921,7 +931,8 @@ def _cmd_complete(args: argparse.Namespace) -> int:
+             try:
+                 done = kb.complete_task(conn, tid, result=args.result, summary=summary, metadata=metadata,
+                                         expected_run_id=_worker_run_id_for(tid),
+-                                        force=bool(getattr(args, "force", False)))
++                                        force=bool(getattr(args, "force", False)),
++                                        actor=_cli_actor())
+             except kb.LiveClaimError:
+                 fail_msg[tid] = (f"cannot complete {tid}: a live worker is running it. Wait for the "
+                                  f"worker, `hermes kanban reclaim {tid}` to release it, or re-run with "
+@@ -931,6 +942,9 @@ def _cmd_complete(args: argparse.Namespace) -> int:
+                 fail_msg[tid] = (f"cannot complete {tid}: {empty_err}. Pass --result/--summary "
+                                  f"describing what was done (an empty completion is not evidence).")
+                 return False
++            except kb.CompletionRefused as refused_err:
++                fail_msg[tid] = f"refused: {refused_err.reason}"
++                return False
+             if not done:
+                 # complete_task returns bare False for a dependency refusal too;
+                 # name the open parents instead of claiming the id is unknown.
+diff --git a/hermes_cli/kanban_db.py b/hermes_cli/kanban_db.py
+index 4279503ff5..a725e9084b 100644
+--- a/hermes_cli/kanban_db.py
++++ b/hermes_cli/kanban_db.py
+@@ -191,6 +191,27 @@ def _kanban_observer_consumed(event: str) -> bool:
+         return False
+ 
+ 
++def _kanban_veto_reason(event: str, task_id: str, **fields: Any) -> Optional[str]:
++    """Fire a VETO hook (``kanban_pre_claim`` / ``kanban_pre_complete``) BEFORE the board
++    write; return the first ``{"refuse": "<reason>"}`` a plugin answers with, else ``None``.
++
++    Fail-open: nothing subscribed, a malformed answer, a raising callback or a
++    failure of the dispatch itself all mean "proceed as if unhooked" — only an explicit
++    refusal vetoes, so a broken plugin can never wedge the board."""
++    if not _kanban_observer_consumed(event):
++        return None
++    try:
++        from hermes_cli.lifecycle import invoke_hook
++
++        for result in invoke_hook(event, task_id=task_id, board=get_current_board(), **fields):
++            reason = result.get("refuse") if isinstance(result, dict) else None
++            if isinstance(reason, str) and reason.strip():
++                return reason
++    except Exception as exc:
++        _log.warning("kanban veto hook %s failed (fail-open): %s", event, exc)
++    return None
++
++
+ def _fire_worker_spawned_hook(
+     conn: sqlite3.Connection, task: Task, workspace_path: str, pid: Optional[int], *,
+     board: Optional[str] = None,
+@@ -2194,6 +2215,21 @@ def claim_task(
+         _reclaim_dangling_run(
+             conn, task_id, statuses=("ready",), now=now, note="invariant recovery on re-claim",
+         )
++        # Plugin veto (kanban_pre_claim): the card stays 'ready'. The event is logged once per
++        # distinct reason so a dispatcher re-trying every tick doesn't flood the log.
++        trow = conn.execute(
++            "SELECT status, assignee, workspace_path FROM tasks WHERE id = ?", (task_id,),
++        ).fetchone()
++        if trow is not None and trow["status"] == "ready":
++            refused = _kanban_veto_reason(
++                "kanban_pre_claim", task_id, assignee=trow["assignee"],
++                workspace_path=trow["workspace_path"], claimer=lock,
++            )
++            if refused is not None:
++                last = _json_dict(_row_get(_latest_event(conn, task_id, "claim_refused"), "payload"))
++                if last.get("reason") != refused:
++                    _append_event(conn, task_id, "claim_refused", {"reason": refused, "by": "plugin"})
++                return None
+         run_id = _claim_and_open_run(conn, task_id, "ready", lock, expires, now)
+         if run_id is None:
+             return None
+@@ -2622,6 +2658,16 @@ class LiveClaimError(ValueError):
+         )
+ 
+ 
++class CompletionRefused(RuntimeError):
++    """``complete_task`` refused by a ``kanban_pre_complete`` plugin veto; ``.reason`` is the
++    plugin's text. Raised before any write (a ``completion_refused`` event is the only trace),
++    so the card keeps its status and the caller can surface the reason."""
++
++    def __init__(self, reason: str):
++        self.reason = reason
++        super().__init__(f"completion refused: {reason}")
++
++
+ def _claim_is_live(trow) -> bool:
+     """True when a ``running`` task's claim still protects a run: the worker process
+     it spawned exists (PID + start-time fingerprint). A claim whose worker is gone,
+@@ -2640,7 +2686,7 @@ def complete_task(
+     conn: sqlite3.Connection, task_id: str, *, result: Optional[str] = None,
+     summary: Optional[str] = None, metadata: Optional[dict] = None,
+     created_cards: Optional[Iterable[str]] = None, expected_run_id: Optional[int] = None,
+-    fire_lifecycle_hook: bool = True, force: bool = False,
++    fire_lifecycle_hook: bool = True, force: bool = False, actor: Optional[str] = None,
+ ) -> bool:
+     """``running|ready|blocked|review -> done``; records ``result``.
+ 
+@@ -2658,11 +2704,29 @@ def complete_task(
+     or ``summary``, or a stripped result already stored on the card. Empty or
+     whitespace-only evidence raises :class:`EmptyCompletionError` after an
+     auditable event. Approving a card out of ``review`` stays exempt.
++
++    ``actor`` (profile, ``cli:<user>``, ``dashboard``) is only handed to the
++    ``kanban_pre_complete`` veto hook; a plugin refusal raises :class:`CompletionRefused`
++    (after a ``completion_refused`` event) before any gate or write.
+     """
+     now = int(time.time())
+     # Cheap pre-check; re-checked inside the txn to close the parent-reopen race.
+     if not _parents_satisfied(conn, task_id):
+         return False
++    hook_row = conn.execute(
++        "SELECT assignee, current_run_id FROM tasks WHERE id = ?", (task_id,),
++    ).fetchone()
++    if hook_row is not None:
++        refused = _kanban_veto_reason(
++            "kanban_pre_complete", task_id, assignee=hook_row["assignee"], actor=actor,
++            force=force, summary=summary if summary is not None else result,
++            metadata=dict(metadata) if isinstance(metadata, dict) else metadata,
++            run_id=expected_run_id if expected_run_id is not None else hook_row["current_run_id"],
++        )
++        if refused is not None:
++            with write_txn(conn):
++                _append_event(conn, task_id, "completion_refused", {"reason": refused, "by": "plugin"})
++            raise CompletionRefused(refused)
+     from hermes_cli.kanban_pr_acceptance_store import prepare_acceptance, record_acceptance
+     verified_cards = _gate_created_cards(conn, task_id, created_cards, summary or result)
+     _gate_empty_completion(conn, task_id, result=result, summary=summary)
+diff --git a/hermes_cli/plugins.py b/hermes_cli/plugins.py
+index 14e13ab00e..cfee914df8 100644
+--- a/hermes_cli/plugins.py
++++ b/hermes_cli/plugins.py
+@@ -159,6 +159,20 @@ VALID_HOOKS: set[str] = {
+     # spawn; completed/blocked fire in the WORKER (or whichever process drove it). Kwargs: task_id,
+     # board, assignee, run_id, profile_name; completed adds summary, blocked adds reason.
+     "kanban_task_claimed", "kanban_task_completed", "kanban_task_blocked",
++    # Kanban VETO hooks (hermes_cli.kanban_db), fired BEFORE the board write; the only kanban hooks whose
++    # return value matters. A callback returns None (proceed) or {"refuse": "<reason>"} (first refusal wins);
++    # raising or returning anything else is fail-open (logged, board proceeds as if unhooked). Callbacks run
++    # on the caller thread with no timeout (not in _HOOK_TIMEOUT_*): keep them fast and non-blocking.
++    # kanban_pre_claim: inside claim_task's write txn, after status == 'ready' is confirmed, before the claim
++    #   is written. Kwargs: task_id, board, assignee, workspace_path, claimer. A refusal makes claim_task
++    #   return None, leaves the card 'ready' and appends a `claim_refused` event {reason, by: "plugin"}
++    #   (not repeated while the latest claim_refused carries the same reason). Stay fast: the SQLite
++    #   write lock is held.
++    # kanban_pre_complete: start of complete_task, after the row is loaded, before any completion gate or
++    #   write. Kwargs: task_id, board, assignee, actor (profile | "cli:<os user>" | "dashboard" | None),
++    #   force, summary, metadata, run_id. A refusal appends a `completion_refused` event {reason, by:
++    #   "plugin"} and raises kanban_db.CompletionRefused(reason); the card is not mutated.
++    "kanban_pre_claim", "kanban_pre_complete",
+     # Kanban worker/mutation/tick observers; returns ignored; fire sites short-circuit on
+     # has_hook(). Kwargs: task_id, profile_name, board, assignee, run_id plus, per hook:
+     # worker_spawned (DISPATCHER, after PID persisted, inside the dispatch lock — stay fast):
+diff --git a/plugins/kanban/dashboard/plugin_api.py b/plugins/kanban/dashboard/plugin_api.py
+index c38f8e399b..d69b29e818 100644
+--- a/plugins/kanban/dashboard/plugin_api.py
++++ b/plugins/kanban/dashboard/plugin_api.py
+@@ -25,7 +25,7 @@ from typing import Any, Callable, Iterator, Optional
+ 
+ from fastapi import (
+     APIRouter, File, Form, HTTPException, Query, UploadFile, WebSocket, WebSocketDisconnect, status as http_status)
+-from fastapi.responses import FileResponse
++from fastapi.responses import FileResponse, JSONResponse
+ from pydantic import BaseModel, Field
+ 
+ from hermes_cli import kanban_db
+@@ -593,7 +593,7 @@ def _drag_to(conn, task_id: str, s: str) -> bool:
+ # detection) and ``done`` pass ``force=True``: a dashboard action is a human override of a live worker claim.
+ _STATUS_HANDLERS: dict[str, Any] = {
+     "done": lambda conn, tid, p: kanban_db.complete_task(
+-        conn, tid, result=p.result, summary=p.summary, metadata=p.metadata, force=True),
++        conn, tid, result=p.result, summary=p.summary, metadata=p.metadata, force=True, actor="dashboard"),
+     "blocked": lambda conn, tid, p: kanban_db.block_task(conn, tid, reason=getattr(p, "block_reason", None)),
+     "scheduled": lambda conn, tid, p: kanban_db.schedule_task(conn, tid, reason=getattr(p, "block_reason", None)),
+     "review": lambda conn, tid, p: kanban_db.request_review(
+@@ -700,7 +700,11 @@ def update_task(task_id: str, payload: UpdateTaskBody, board: Optional[str] = Qu
+             with _map_errors(409, RuntimeError):
+                 _require_ok(kanban_db.assign_task(conn, task_id, payload.assignee or None))
+         if payload.status is not None:
+-            _patch_status(conn, task_id, payload, review_assignee_deferred)
++            try:
++                _patch_status(conn, task_id, payload, review_assignee_deferred)
++            except kanban_db.CompletionRefused as refused:  # kanban_pre_complete plugin veto
++                return JSONResponse(
++                    status_code=409, content={"error": "completion_refused", "reason": refused.reason})
+         for wanted, apply, _refused in _OVERRIDE_OPS:
+             if wanted(payload):
+                 with _map_errors(400, ValueError, RuntimeError):
+diff --git a/tests/hermes_cli/test_kanban_veto_hooks.py b/tests/hermes_cli/test_kanban_veto_hooks.py
+new file mode 100644
+index 0000000000..b5da7087a3
+--- /dev/null
++++ b/tests/hermes_cli/test_kanban_veto_hooks.py
+@@ -0,0 +1,340 @@
++"""Tests for the ``kanban_pre_claim`` / ``kanban_pre_complete`` veto hooks.
++
++Unlike the observer hooks (``kanban_task_claimed`` & co.), these two fire BEFORE the
++board write and may refuse the transition by returning ``{"refuse": "<reason>"}``.
++A plugin that raises, times out, or returns anything else must never block the board
++(fail-open): only an explicit refusal vetoes.
++"""
++
++from __future__ import annotations
++
++import argparse
++import importlib.util
++import json
++import sys
++from pathlib import Path
++
++import pytest
++from fastapi import FastAPI
++from fastapi.testclient import TestClient
++
++
++
++class _Lazy:
++    """Resolve a hermes_cli module at use time, not collection time.
++
++    Some kanban tests purge every ``hermes_cli*`` entry from ``sys.modules`` to re-import
++    under a fresh HERMES_HOME. A module object bound at collection time would then be a
++    stale copy whose plugin registry is not the one ``kanban_db`` fires through, and the
++    hook callbacks registered here would silently never run."""
++
++    def __init__(self, name: str):
++        self._name = name
++
++    def __getattr__(self, attr):
++        return getattr(importlib.import_module(self._name), attr)
++
++
++kb = _Lazy("hermes_cli.kanban_db")
++kbc = _Lazy("hermes_cli.kanban_db_connect")
++plugins = _Lazy("hermes_cli.plugins")
++
++
++@pytest.fixture
++def kanban_home(tmp_path, monkeypatch):
++    home = tmp_path / ".hermes"
++    home.mkdir()
++    monkeypatch.setenv("HERMES_HOME", str(home))
++    monkeypatch.setattr(Path, "home", lambda: tmp_path)
++    kb.init_db()
++    return home
++
++
++@pytest.fixture
++def register():
++    """Register a hook callback on the plugin manager's registry; restored afterward."""
++    mgr = plugins.get_plugin_manager()
++    saved = {k: list(v) for k, v in mgr._hooks.items()}
++
++    def _register(hook, callback):
++        mgr._hooks.setdefault(hook, []).append(callback)
++
++    try:
++        yield _register
++    finally:
++        mgr._hooks = saved
++
++
++def _kinds(conn, tid):
++    return [e.kind for e in kb.list_events(conn, tid)]
++
++
++def test_hooks_are_valid_and_not_fail_closed():
++    from hermes_cli import plugins_dispatch
++
++    assert "kanban_pre_claim" in plugins.VALID_HOOKS
++    assert "kanban_pre_complete" in plugins.VALID_HOOKS
++    assert "kanban_pre_claim" not in plugins_dispatch._HOOK_TIMEOUT_FAIL_CLOSED_HOOKS
++    assert "kanban_pre_complete" not in plugins_dispatch._HOOK_TIMEOUT_FAIL_CLOSED_HOOKS
++
++
++# --- kanban_pre_claim ---------------------------------------------------------
++
++def test_pre_claim_refusal_keeps_task_ready(kanban_home, register):
++    register("kanban_pre_claim", lambda **kw: {"refuse": "resource matrix/_run busy"})
++    with kbc.connect_closing() as conn:
++        tid = kb.create_task(conn, title="deploy")
++        assert kb.claim_task(conn, tid) is None
++        assert kb.get_task(conn, tid).status == "ready"
++        assert _kinds(conn, tid).count("claim_refused") == 1
++        assert kb.claim_task(conn, tid) is None
++        assert _kinds(conn, tid).count("claim_refused") == 1  # dedupe
++
++
++def test_pre_claim_refusal_event_payload_and_no_run_opened(kanban_home, register):
++    register("kanban_pre_claim", lambda **kw: {"refuse": "busy"})
++    with kbc.connect_closing() as conn:
++        tid = kb.create_task(conn, title="deploy")
++        assert kb.claim_task(conn, tid) is None
++        refused = [e for e in kb.list_events(conn, tid) if e.kind == "claim_refused"]
++        assert refused[0].payload == {"reason": "busy", "by": "plugin"}
++        task = kb.get_task(conn, tid)
++        assert task.current_run_id is None
++        assert task.claim_lock is None
++        assert "claimed" not in _kinds(conn, tid)
++
++
++def test_pre_claim_new_reason_logs_new_event(kanban_home, register):
++    reason = {"v": "first"}
++    register("kanban_pre_claim", lambda **kw: {"refuse": reason["v"]})
++    with kbc.connect_closing() as conn:
++        tid = kb.create_task(conn, title="deploy")
++        assert kb.claim_task(conn, tid) is None
++        reason["v"] = "second"
++        assert kb.claim_task(conn, tid) is None
++        assert kb.claim_task(conn, tid) is None
++        refused = [e.payload["reason"] for e in kb.list_events(conn, tid) if e.kind == "claim_refused"]
++        assert refused == ["first", "second"]
++
++
++def test_pre_claim_passes_documented_kwargs(kanban_home, register):
++    seen = []
++    register("kanban_pre_claim", lambda **kw: seen.append(kw))
++    with kbc.connect_closing() as conn:
++        tid = kb.create_task(conn, title="t", assignee="worker")
++        assert kb.claim_task(conn, tid, claimer="host:1") is not None
++    assert len(seen) == 1
++    kw = seen[0]
++    assert kw["task_id"] == tid
++    assert kw["assignee"] == "worker"
++    assert kw["claimer"] == "host:1"
++    assert "board" in kw and "workspace_path" in kw
++
++
++def test_pre_claim_callback_error_fails_open(kanban_home, register):
++    def boom(**kw):
++        raise RuntimeError("x")
++
++    register("kanban_pre_claim", boom)
++    with kbc.connect_closing() as conn:
++        tid = kb.create_task(conn, title="t")
++        assert kb.claim_task(conn, tid) is not None
++
++
++def test_pre_claim_invoke_failure_fails_open(kanban_home, register, monkeypatch):
++    register("kanban_pre_claim", lambda **kw: {"refuse": "never reached"})
++    from hermes_cli import lifecycle
++
++    def broken_invoke(*a, **k):
++        raise RuntimeError("dispatch exploded")
++
++    monkeypatch.setattr(lifecycle, "invoke_hook", broken_invoke)
++    with kbc.connect_closing() as conn:
++        tid = kb.create_task(conn, title="t")
++        assert kb.claim_task(conn, tid) is not None
++
++
++@pytest.mark.parametrize("ret", ["no", {"refuse": ""}, {"refuse": None}, {"other": 1}, {"refuse": 3}])
++def test_pre_claim_malformed_result_is_not_a_refusal(kanban_home, register, ret):
++    register("kanban_pre_claim", lambda **kw: ret)
++    with kbc.connect_closing() as conn:
++        tid = kb.create_task(conn, title="t")
++        assert kb.claim_task(conn, tid) is not None
++
++
++def test_pre_claim_not_fired_when_task_not_ready(kanban_home, register):
++    calls = []
++    register("kanban_pre_claim", lambda **kw: calls.append(kw))
++    with kbc.connect_closing() as conn:
++        tid = kb.create_task(conn, title="t")
++        assert kb.claim_task(conn, tid) is not None
++        assert len(calls) == 1
++        assert kb.claim_task(conn, tid) is None  # already running
++        assert len(calls) == 1
++
++
++# --- kanban_pre_complete ------------------------------------------------------
++
++def test_pre_complete_refusal_raises_with_reason(kanban_home, register):
++    register("kanban_pre_complete", lambda **kw: {"refuse": "gate sem veredito"})
++    with kbc.connect_closing() as conn:
++        tid = kb.create_task(conn, title="gate")
++        with pytest.raises(kb.CompletionRefused) as ei:
++            kb.complete_task(conn, tid, summary="ok", actor="cli:della")
++        assert ei.value.reason == "gate sem veredito"
++        assert kb.get_task(conn, tid).status != "done"
++        events = [e for e in kb.list_events(conn, tid) if e.kind == "completion_refused"]
++        assert len(events) == 1
++        assert events[0].payload["reason"] == "gate sem veredito"
++        assert events[0].payload["by"] == "plugin"
++        assert "completed" not in _kinds(conn, tid)
++
++
++def test_pre_complete_refusal_keeps_running_task_running(kanban_home, register):
++    register("kanban_pre_complete", lambda **kw: {"refuse": "nope"})
++    with kbc.connect_closing() as conn:
++        tid = kb.create_task(conn, title="t", assignee="w")
++        run_id = kb.claim_task(conn, tid).current_run_id
++        with pytest.raises(kb.CompletionRefused):
++            kb.complete_task(conn, tid, summary="ok", expected_run_id=run_id)
++        task = kb.get_task(conn, tid)
++        assert task.status == "running"
++        assert task.current_run_id == run_id
++
++
++def test_pre_complete_passes_documented_kwargs(kanban_home, register):
++    seen = []
++    register("kanban_pre_complete", lambda **kw: seen.append(kw))
++    with kbc.connect_closing() as conn:
++        tid = kb.create_task(conn, title="t", assignee="w")
++        run_id = kb.claim_task(conn, tid).current_run_id
++        assert kb.complete_task(
++            conn, tid, summary="s", metadata={"k": 1}, expected_run_id=run_id,
++            force=True, actor="alice",
++        )
++    kw = seen[0]
++    assert kw["task_id"] == tid
++    assert kw["assignee"] == "w"
++    assert kw["actor"] == "alice"
++    assert kw["force"] is True
++    assert kw["summary"] == "s"
++    assert kw["metadata"] == {"k": 1}
++    assert kw["run_id"] == run_id
++    assert "board" in kw
++
++
++def test_pre_complete_callback_error_fails_open(kanban_home, register):
++    def boom(**kw):
++        raise RuntimeError("x")
++
++    register("kanban_pre_complete", boom)
++    with kbc.connect_closing() as conn:
++        tid = kb.create_task(conn, title="t")
++        assert kb.complete_task(conn, tid, summary="ok")
++        assert kb.get_task(conn, tid).status == "done"
++
++
++def test_pre_complete_not_fired_for_unknown_task(kanban_home, register):
++    calls = []
++    register("kanban_pre_complete", lambda **kw: calls.append(kw))
++    with kbc.connect_closing() as conn:
++        assert kb.complete_task(conn, "t_missing", summary="ok") is False
++    assert calls == []
++
++
++def test_completion_refused_is_runtime_error():
++    err = kb.CompletionRefused("why")
++    assert isinstance(err, RuntimeError)
++    assert err.reason == "why"
++    assert "why" in str(err)
++
++
++# --- surfaces -----------------------------------------------------------------
++
++def test_cli_complete_prints_refused_and_exits_1(kanban_home, register, capsys):
++    from hermes_cli import kanban as kc
++
++    register("kanban_pre_complete", lambda **kw: {"refuse": "gate sem veredito"})
++    with kbc.connect_closing() as conn:
++        tid = kb.create_task(conn, title="gate")
++    args = argparse.Namespace(
++        task_ids=[tid], result=None, summary="ok", metadata=None, force=False,
++    )
++    assert kc._cmd_complete(args) == 1
++    assert "refused: gate sem veredito" in capsys.readouterr().err
++    with kbc.connect_closing() as conn:
++        assert kb.get_task(conn, tid).status != "done"
++
++
++def test_cli_complete_passes_cli_actor(kanban_home, register):
++    from hermes_cli import kanban as kc
++
++    seen = []
++    register("kanban_pre_complete", lambda **kw: seen.append(kw))
++    with kbc.connect_closing() as conn:
++        tid = kb.create_task(conn, title="t")
++    args = argparse.Namespace(
++        task_ids=[tid], result=None, summary="ok", metadata=None, force=False,
++    )
++    assert kc._cmd_complete(args) == 0
++    assert seen[0]["actor"].startswith("cli:")
++
++
++def test_tool_complete_returns_error_with_reason(kanban_home, register, monkeypatch):
++    from tools import kanban_tools as kt
++
++    monkeypatch.setenv("HERMES_PROFILE", "test-worker")
++    with kbc.connect_closing() as conn:
++        tid = kb.create_task(conn, title="t", assignee="test-worker")
++        run_id = kb.claim_task(conn, tid).current_run_id
++    monkeypatch.setenv("HERMES_KANBAN_TASK", tid)
++    monkeypatch.setenv("HERMES_KANBAN_RUN_ID", str(run_id))
++    seen = []
++
++    def veto(**kw):
++        seen.append(kw)
++        return {"refuse": "gate sem veredito"}
++
++    register("kanban_pre_complete", veto)
++    out = json.loads(kt._handle_complete({"summary": "done"}))
++    assert "gate sem veredito" in out["error"]
++    assert seen[0]["actor"] == "test-worker"
++    with kbc.connect_closing() as conn:
++        assert kb.get_task(conn, tid).status == "running"
++
++
++def test_dashboard_done_returns_409_completion_refused(kanban_home, register):
++    plugin_file = Path(__file__).resolve().parents[2] / "plugins" / "kanban" / "dashboard" / "plugin_api.py"
++    spec = importlib.util.spec_from_file_location("hermes_dashboard_plugin_kanban_veto_test", plugin_file)
++    mod = importlib.util.module_from_spec(spec)
++    sys.modules[spec.name] = mod
++    spec.loader.exec_module(mod)
++    app = FastAPI()
++    app.include_router(mod.router, prefix="/api/plugins/kanban")
++    client = TestClient(app)
++
++    seen = []
++
++    def veto(**kw):
++        seen.append(kw)
++        return {"refuse": "gate sem veredito"}
++
++    register("kanban_pre_complete", veto)
++    with kbc.connect_closing() as conn:
++        tid = kb.create_task(conn, title="gate")
++    r = client.patch(
++        f"/api/plugins/kanban/tasks/{tid}",
++        json={"status": "done", "result": "done", "summary": "done"},
++    )
++    assert r.status_code == 409
++    assert r.json() == {"error": "completion_refused", "reason": "gate sem veredito"}
++    assert seen[0]["actor"] == "dashboard"
++    with kbc.connect_closing() as conn:
++        assert kb.get_task(conn, tid).status != "done"
++
++
++def test_no_hook_registered_behaviour_unchanged(kanban_home):
++    with kbc.connect_closing() as conn:
++        tid = kb.create_task(conn, title="t")
++        assert kb.claim_task(conn, tid) is not None
++        assert kb.complete_task(conn, tid, summary="ok", force=True)
+diff --git a/tools/kanban_tools.py b/tools/kanban_tools.py
+index c8b64c095c..f31d013e66 100644
+--- a/tools/kanban_tools.py
++++ b/tools/kanban_tools.py
+@@ -749,7 +749,8 @@ def _handle_complete(args: dict, **kw) -> str:
+         try:
+             ok = kb.complete_task(
+                 conn, tid, result=result, summary=summary, metadata=metadata,
+-                created_cards=created_cards, expected_run_id=_worker_run_id(tid))
++                created_cards=created_cards, expected_run_id=_worker_run_id(tid),
++                actor=_persisted_identity())
+         except kb.ArtifactPreservationError as artifact_err:
+             # Structured rejection — surface the phantom ids so the worker can retry with a corrected list
+             # or drop the field. Audit event already landed in the DB. The task itself was NOT mutated (the
+@@ -784,6 +785,12 @@ def _handle_complete(args: dict, **kw) -> str:
+                 f"kanban_complete blocked: {empty_err}. Your task is still in-flight (no state "
+                 f"change). Retry kanban_complete with a non-empty summary or result describing "
+                 f"what was done.")
++        except kb.CompletionRefused as refused_err:
++            # A plugin veto (kanban_pre_complete): nothing was mutated; the reason says what
++            # the worker must satisfy before retrying.
++            return tool_error(
++                f"kanban_complete refused: {refused_err.reason}. Your task is still in-flight "
++                f"(no state change). Address the reason above, then retry kanban_complete.")
+         task = kb.get_task(conn, tid)
+         if not ok:
+             # complete_task reports every refusal as bare False; a reopened or

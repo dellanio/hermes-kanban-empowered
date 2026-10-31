@@ -1,0 +1,2 @@
+# Patches are applied with git apply: never rewrite their line endings.
+patches/*.patch -text

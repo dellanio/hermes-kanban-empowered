@@ -16,21 +16,8 @@ def test_create_task_helper(kanban_home):
         assert kb.get_task(conn, tid).title == "via helper"
 
 
-def test_plugin_register_is_callable(tmp_path, monkeypatch):
-    import importlib.util
-    import sys
-    from pathlib import Path
-
-    root = Path(__file__).resolve().parent.parent
-    spec = importlib.util.spec_from_file_location(
-        "ke_plugin_root", root / "__init__.py", submodule_search_locations=[str(root)]
-    )
-    mod = importlib.util.module_from_spec(spec)
-    monkeypatch.setitem(sys.modules, "ke_plugin_root", mod)
-    from ke import cli
-
-    monkeypatch.setattr(cli, "_settings", None)
-    spec.loader.exec_module(mod)
+def test_plugin_register_is_callable(tmp_path, load_plugin):
+    mod = load_plugin("ke_plugin_root")
 
     class Ctx:
         def get_config(self, key, default=None):

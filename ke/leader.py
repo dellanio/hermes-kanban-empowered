@@ -114,23 +114,28 @@ class LeaderLock:
         return json.dumps({"pid": os.getpid(), "token": self.token, "ts": now})
 
     def _create_exclusive(self, now: float) -> bool:
-        """Create the lock file only if it does not exist yet (atomic: one winner)."""
+        """Publish the lock only if no file exists yet, with its FULL payload.
+
+        The payload goes to a private tmp file first and is then hard-linked to
+        the lock path: ``os.link`` fails with FileExistsError if somebody got
+        there first, and a reader can never observe an empty/partial lock file
+        (which a plain ``O_CREAT|O_EXCL`` + write would expose, letting a
+        concurrent acquirer treat it as corrupt and replace it).
+        """
         self.path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = self.path.with_name(f"{self.path.name}.{self.token}.new")
         try:
-            fd = os.open(self.path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-        except FileExistsError:
-            return False
-        try:
-            with os.fdopen(fd, "w", encoding="utf-8") as f:
-                f.write(self._payload(now))
-        except BaseException:
+            tmp.write_text(self._payload(now), encoding="utf-8")
             try:
-                self.path.unlink()
+                os.link(tmp, self.path)
+            except FileExistsError:
+                return False
+            return True
+        finally:
+            try:
+                tmp.unlink()
             except OSError:
                 pass
-            raise
-        return True
-
     def _live_holder(self, data: Optional[dict], now: float) -> bool:
         """Is ``data`` a lock somebody else still validly holds?"""
         if not data:
@@ -146,14 +151,16 @@ class LeaderLock:
     def acquire(self, now: float) -> bool:
         """Take the lock if free/stale/orphaned, or refresh it if already ours."""
         try:
-            if not self.path.exists():
-                if self._create_exclusive(now):
-                    return True
-                return False  # someone else created it between our check and open
+            if not self.path.exists() and self._create_exclusive(now):
+                return True
+            # Lock exists (possibly created just now by a rival): judge it by its content.
             data = self._read()
             if data and data.get("token") != self.token and self._live_holder(data, now):
                 return False
             self._write(now)  # ours, stale, orphaned or corrupt: replace
+            # Residual (accepted): two acquirers that both judge the SAME lock stale can
+            # both replace it; the read-back below makes the earlier writer back off
+            # unless the later replace lands after its read. The heartbeat TTL bounds it.
             check = self._read()  # lost a takeover race if someone wrote after us
             return bool(check and check.get("token") == self.token)
         except OSError:

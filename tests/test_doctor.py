@@ -1,9 +1,4 @@
-import importlib.util
-import pathlib
 import subprocess
-import sys
-
-import pytest
 
 from conftest import settings_for_test
 
@@ -108,42 +103,19 @@ def test_active_profile_follows_hermes_home(kanban_home, monkeypatch):
     assert h.active_profile() == "builder"
 
 
-def test_cli_setup_and_run(kanban_home, capsys, tmp_path):
+def test_cli_setup_and_run(kanban_home, capsys, tmp_path, monkeypatch):
     import argparse
 
     from ke import cli
 
+    monkeypatch.setattr(cli, "_settings", None)  # restored on teardown
+    monkeypatch.setattr(cli, "_config_error", None)
     cli.bind(settings_for_test(tmp_path))
     parser = argparse.ArgumentParser()
     cli.setup(parser)
     args = parser.parse_args(["doctor"])
     cli.run(args)
     assert "hermes_compat: bf0203a794" in capsys.readouterr().out
-
-
-@pytest.fixture
-def load_plugin(monkeypatch):
-    """Load the repo root as a package; undo sys.modules and cli module state afterwards."""
-    from ke import cli
-
-    monkeypatch.setattr(cli, "_settings", None)
-    monkeypatch.setattr(cli, "_config_error", None)
-    before = set(sys.modules)
-
-    def load():
-        root = pathlib.Path(__file__).resolve().parent.parent
-        spec = importlib.util.spec_from_file_location(
-            "ke_plugin_pkg", root / "__init__.py", submodule_search_locations=[str(root)]
-        )
-        mod = importlib.util.module_from_spec(spec)
-        sys.modules["ke_plugin_pkg"] = mod
-        spec.loader.exec_module(mod)
-        return mod
-
-    yield load
-    for name in set(sys.modules) - before:
-        if name == "ke_plugin_pkg" or name.startswith("ke_plugin_pkg."):
-            del sys.modules[name]
 
 
 class _Ctx:

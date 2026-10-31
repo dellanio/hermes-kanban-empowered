@@ -178,3 +178,31 @@ def make_coordinator(
         telegram=telegram,
         **kw,
     )
+
+
+@pytest.fixture
+def load_plugin():
+    """Load the repo root as a package like Hermes does; sweep its modules afterwards.
+
+    ``register()`` binds ``<pkg>.ke.cli`` (a different module object from the
+    top-level ``ke.cli``), so isolation comes from dropping every ``<pkg>`` entry.
+    """
+    import importlib.util
+
+    created: list[str] = []
+    before = set(sys.modules)
+
+    def load(name: str = "ke_plugin_pkg"):
+        spec = importlib.util.spec_from_file_location(
+            name, _REPO_ROOT / "__init__.py", submodule_search_locations=[str(_REPO_ROOT)]
+        )
+        mod = importlib.util.module_from_spec(spec)
+        sys.modules[name] = mod
+        created.append(name)
+        spec.loader.exec_module(mod)
+        return mod
+
+    yield load
+    for key in set(sys.modules) - before:
+        if any(key == n or key.startswith(n + ".") for n in created):
+            del sys.modules[key]

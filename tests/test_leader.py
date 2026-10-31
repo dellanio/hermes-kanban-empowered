@@ -149,3 +149,47 @@ def test_failed_write_leaves_no_tmp_file(tmp_path, monkeypatch):
     monkeypatch.setattr(leader.os, "replace", boom)
     assert lock.acquire(1010) is False  # replace path fails -> not leader, no exception
     assert [p.name for p in tmp_path.iterdir()] == ["l"]
+
+
+def _holder_token(path):
+    return json.loads(path.read_text(encoding="utf-8"))["token"]
+
+
+def test_published_lock_is_never_empty_and_blocks_rival(tmp_path):
+    path = tmp_path / "l"
+    a, b = LeaderLock(path), LeaderLock(path)
+    assert a._create_exclusive(1000)
+    assert _holder_token(path) == a.token  # full payload as soon as it exists
+    assert not b.acquire(1001)
+    assert _holder_token(path) == a.token  # rival did not overwrite
+
+
+def test_rival_that_lost_the_create_race_defers_to_the_winner(tmp_path, monkeypatch):
+    from pathlib import Path
+
+    path = tmp_path / "l"
+    a, b = LeaderLock(path), LeaderLock(path)
+    assert a.acquire(1000)
+    # B checked "absent" just before A published: simulate the stale existence check.
+    real_exists = Path.exists
+    monkeypatch.setattr(
+        Path, "exists", lambda self: False if self == path else real_exists(self)
+    )
+    assert b.acquire(1001) is False
+    monkeypatch.undo()
+    assert _holder_token(path) == a.token
+    assert [p.name for p in tmp_path.iterdir()] == ["l"]  # no leftover tmp files
+
+
+def test_create_exclusive_cleans_tmp_when_write_fails(tmp_path, monkeypatch):
+    from pathlib import Path
+
+    lock = LeaderLock(tmp_path / "l")
+
+    def boom(self, *a, **k):
+        raise OSError("disk")
+
+    monkeypatch.setattr(Path, "write_text", boom)
+    assert lock.acquire(1000) is False
+    monkeypatch.undo()
+    assert list(tmp_path.iterdir()) == []

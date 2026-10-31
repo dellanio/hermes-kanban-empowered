@@ -1,0 +1,9 @@
+name: kanban-empowered
+version: 0.1.0
+description: "Human-wait reminders over Telegram, stuck-card guards and infra-failure recovery for the Hermes kanban."
+author: "dellanio"
+provides_hooks:
+  - on_kanban_dispatch_tick
+  - on_kanban_worker_exited
+  - pre_gateway_dispatch
+  - pre_tool_call

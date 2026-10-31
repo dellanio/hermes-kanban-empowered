@@ -417,11 +417,12 @@ def test_escalation_copy_is_retried_until_it_lands_without_resending_to_the_owne
     coord._deliver_waits(clock.now)
     assert attempts == [111, 222]
     assert _stage(coord, due) is None and coord.pending_dues == [due]  # not done: the copy is missing
-    coord._tg_down = False
+    clock.advance(601)  # past the copy back-off
     coord.pending_dues = [due]  # the tracker offers the still-unsent wait again
     coord._deliver_waits(clock.now)
     assert attempts == [111, 222, 222]  # only the copy again
     del fail[222]
+    clock.advance(601)
     coord.pending_dues = [due]
     coord._deliver_waits(clock.now)
     assert attempts == [111, 222, 222, 222]
@@ -429,6 +430,78 @@ def test_escalation_copy_is_retried_until_it_lands_without_resending_to_the_owne
     coord.pending_dues = [due]  # even if offered once more nothing is re-sent
     coord._deliver_waits(clock.now)
     assert attempts == [111, 222, 222, 222]
+
+
+def test_rate_limited_copy_backs_off_per_wait(tmp_path, fake_tg, clock):
+    from ke.telegram import TelegramError
+
+    coord = _coord(tmp_path, fake_tg, clock, escalate_to="ops")
+    due, other = _due("t_1", stage="escalation"), _due("t_2", stage="escalation")
+    for d in (due, other):
+        _wait_row(coord, d)
+    attempts, fail = _track(coord, fake_tg, {222: TelegramError(429, "Too Many Requests")})
+    coord.pending_dues = [due]
+    coord._deliver_waits(clock.now)
+    assert attempts == [111, 222]
+    for dt in (30, 300, 599):  # no new attempt while backing off
+        coord.pending_dues = [due]
+        coord._deliver_waits(clock.now + dt)
+    assert attempts == [111, 222]
+    coord.pending_dues = [due, other]  # a different wait is not held back by this one's back-off
+    coord._deliver_waits(clock.now + 100)
+    assert attempts == [111, 222, 111, 222]
+    del fail[222]
+    coord.pending_dues = [due]
+    coord._deliver_waits(clock.now + 600)
+    assert attempts[-1] == 222 and _stage(coord, due) == "escalation"
+
+
+def test_permanent_copy_rejection_gives_up_after_one_attempt(tmp_path, fake_tg, clock, caplog):
+    from ke.telegram import TelegramError
+
+    coord = _coord(tmp_path, fake_tg, clock, escalate_to="ops")
+    due = _due("t_1", stage="escalation")
+    _wait_row(coord, due)
+    attempts, _ = _track(coord, fake_tg, {222: TelegramError(403, "Forbidden: bot was blocked by the user")})
+    with caplog.at_level(logging.WARNING):
+        for i in range(4):
+            coord.pending_dues = [due]
+            coord._deliver_waits(clock.now + i * 30)
+    assert attempts == [111, 222]  # one attempt at the copy, then never again
+    assert coord.store.kv_get("esc_copy:b:t_1:1") == "gave_up"
+    assert _stage(coord, due) == "escalation" and coord.pending_dues == []  # the wait could proceed
+    acts = [a for a in coord.store.actions_since(0) if a["kind"] == "escalation_copy_failed"]
+    assert len(acts) == 1 and (acts[0]["board"], acts[0]["task_id"]) == ("b", "t_1")
+    assert "bot was blocked" in acts[0]["detail"]
+    warns = [r for r in caplog.records if "escalation copy" in r.getMessage()]
+    assert len(warns) == 1 and "blocked" in warns[0].getMessage()
+
+
+def test_permanent_copy_rejection_gives_up_every_pending_card_of_the_group(tmp_path, fake_tg, clock):
+    from ke.telegram import TelegramError
+
+    coord = _coord(tmp_path, fake_tg, clock, escalate_to="ops")
+    dues = [_due(f"t_{i}", stage="escalation", need="x" * 900) for i in range(9)]
+    attempts, _ = _track(coord, fake_tg, {222: TelegramError(400, "Bad Request: chat not found")})
+    coord.pending_dues = list(dues)
+    coord._deliver_waits(clock.now)
+    assert attempts.count(222) == 1  # the first copy message fails, the rest are given up with it
+    assert all(coord.store.kv_get(f"esc_copy:b:{d.task_id}:1") == "gave_up" for d in dues)
+
+
+def test_permanent_owner_rejection_is_one_attempt_per_pass_and_logged_once(tmp_path, fake_tg, clock, caplog):
+    from ke.telegram import TelegramError
+
+    coord = _coord(tmp_path, fake_tg, clock)
+    dues = [_due(f"t_{i}", need="x" * 900) for i in range(10)]
+    attempts, _ = _track(coord, fake_tg, {111: TelegramError(403, "Forbidden: bot was blocked by the user")})
+    with caplog.at_level(logging.WARNING):
+        for _ in range(3):
+            coord.pending_dues = list(dues)
+            coord._deliver_waits(clock.now)
+    assert attempts == [111, 111, 111]  # not one per chunk, not consuming the cap
+    assert len(coord.pending_dues) == 10  # owner reminders stay unsent
+    assert len([r for r in caplog.records if "rejected" in r.getMessage()]) == 1
 
 
 def test_escalation_copy_is_sent_when_the_owner_send_failed(tmp_path, fake_tg, clock):

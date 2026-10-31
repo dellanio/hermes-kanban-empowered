@@ -27,6 +27,8 @@ EVAL_INTERVAL_S = 30
 STEP_ORDER = ("waits", "guards", "infra", "panel")
 MAX_MESSAGES_PER_PASS = 3  # Telegram messages per recipient per evaluation (tick time is bounded)
 VETO_RETRY_S = 600  # back-off between failed attempts to send the veto-hooks warning
+COPY_RETRY_S = 600  # back-off between failed attempts to send one escalation copy
+TERMINAL_HTTP = (400, 403)  # chat not found, bot blocked: retrying cannot help
 
 Step = Callable[[float], Any]
 
@@ -124,6 +126,28 @@ class Coordinator:
         def copy_sent(d: Due) -> None:
             self.store.kv_set(marker("copy", d), "1")
 
+        def copy_failed(items: list[Due], exc: Exception, terminal: bool) -> None:
+            for d in items:
+                if not terminal:  # 429 / 5xx / transport: try again, but not before COPY_RETRY_S
+                    self.store.kv_set(marker("copytry", d), repr(float(now)))
+                    continue
+                self.store.kv_set(marker("copy", d), "gave_up")  # lets the owner's wait finish
+                self.store.log_action(
+                    d.board, d.task_id, "escalation_copy_failed", f"{target}: {exc}", int(now)
+                )
+            if terminal:
+                log.warning(
+                    "kanban-empowered: giving up the escalation copy to %r for %d card(s): %s",
+                    target, len(items), exc,
+                )
+
+        def copy_backing_off(d: Due) -> bool:
+            last = self.store.kv_get(marker("copytry", d))
+            try:
+                return last is not None and now - float(last) < COPY_RETRY_S
+            except ValueError:
+                return False
+
         owner_sent: set[int] = set()  # id(due): the owner has the message (now or on an earlier pass)
         counts: dict[str, int] = {}
         try:
@@ -145,14 +169,18 @@ class Coordinator:
             if target is not None:  # the copy does not depend on the owner's delivery
                 by_origin: dict[str, list[Due]] = {}
                 for due in dues:
-                    if copy_needed(due) and not self.store.kv_get(marker("copy", due)):
+                    if (
+                        copy_needed(due)
+                        and not self.store.kv_get(marker("copy", due))
+                        and not copy_backing_off(due)
+                    ):
                         by_origin.setdefault(due.owner, []).append(due)
                 for origin, group in by_origin.items():
                     if self._tg_down:
                         break
                     self._send_group(
                         target, origin, group, now, counts, urgent=False,
-                        lead=t("waits.copy_of", owner=origin), on_sent=copy_sent,
+                        lead=t("waits.copy_of", owner=origin), on_sent=copy_sent, on_failed=copy_failed,
                     )
         except Exception:
             log.exception("kanban-empowered: delivering reminders failed")
@@ -181,30 +209,48 @@ class Coordinator:
         urgent: bool,
         lead: str = "",
         on_sent: Optional[Callable[[Due], Any]] = None,
+        on_failed: Optional[Callable[[list[Due], Exception, bool], Any]] = None,
     ) -> list[Due]:
         """Send ``group`` to ``recipient`` split to the Telegram limit; returns the dues sent.
 
         ``counts`` is the per-pass message tally per recipient (capped at MAX_MESSAGES_PER_PASS).
         ``on_sent`` runs for each due right after its message went out; marking waits as sent
-        is left to the caller.
+        is left to the caller. A failed send calls ``on_failed(items, exc, terminal)``: ``items`` is
+        the chunk, or for a terminal 4xx (400/403: the chat itself is unusable) every item not yet
+        sent; a terminal 4xx also ends the group (one attempt per pass, logged once per error).
         """
         chat_id = self.settings.owner_ids.get(recipient)
         if chat_id is None:
             self._warn_once("no_chat:" + recipient, "kanban-empowered: no Telegram chat id for owner %r", recipient)
             return []
         sent: list[Due] = []
-        for text, items in render_waits_chunks(label, group, urgent_escalation=urgent, lead=lead):
+        chunks = render_waits_chunks(label, group, urgent_escalation=urgent, lead=lead)
+        for index, (text, items) in enumerate(chunks):
             if self._tg_down or counts.get(recipient, 0) >= MAX_MESSAGES_PER_PASS:
                 break  # the rest goes out on a later evaluation
             counts[recipient] = counts.get(recipient, 0) + 1
             try:
                 message_id = self._tg_send(chat_id, text)
             except Exception as exc:
-                log.warning("kanban-empowered: Telegram send to %r failed: %s", recipient, exc)
                 status = getattr(exc, "status", None)
-                if status is None or status == 429 or status >= 500:
-                    break  # transport trouble / rate limit: stop now, retry on a later evaluation
-                continue  # a rejected message (4xx) must not hold back the ones behind it
+                terminal = status in TERMINAL_HTTP
+                if status is not None and 400 <= status < 500 and status != 429:
+                    # a permanent rejection repeats every pass: say it once per (chat, error)
+                    self._warn_once(
+                        f"send:{chat_id}:{status}:{exc}",
+                        "kanban-empowered: Telegram rejected the message to %r: %s", recipient, exc,
+                    )
+                else:
+                    log.warning("kanban-empowered: Telegram send to %r failed: %s", recipient, exc)
+                if on_failed is not None:
+                    rest = [d for _, chunk_items in chunks[index:] for d in chunk_items] if terminal else items
+                    try:
+                        on_failed(rest, exc, terminal)
+                    except Exception:
+                        log.exception("kanban-empowered: could not record a delivery failure")
+                if terminal or status is None or status == 429 or status >= 500:
+                    break  # unusable chat / transport trouble / rate limit: retry on a later pass
+                continue  # any other rejected message (4xx) must not hold back the ones behind it
             try:
                 self.store.add_sent_message(
                     message_id,

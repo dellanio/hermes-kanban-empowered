@@ -97,3 +97,29 @@ def test_present_veto_hooks_no_warning(tmp_path, clock, caplog):
         c.evaluate(1.0)
     assert c.store.kv_get("veto_hooks_warned") is None
     assert not [r for r in caplog.records if "veto" in r.getMessage().lower()]
+
+
+def test_veto_check_failure_does_not_starve_steps(tmp_path, clock):
+    c = make_coordinator(tmp_path, clock=clock)
+
+    def boom():
+        raise RuntimeError("hermes gone")
+
+    c.api.veto_hooks_available = boom
+    ran = []
+    c.register_step("waits", lambda now: ran.append("waits"))
+    c.evaluate(1.0)
+    assert ran == ["waits"]
+
+
+def test_kv_failure_in_veto_warning_does_not_starve_steps(tmp_path, clock):
+    c = make_coordinator(tmp_path, clock=clock, veto_hooks=False)
+
+    def boom(key, value):
+        raise RuntimeError("db locked")
+
+    c.store.kv_set = boom
+    ran = []
+    c.register_step("guards", lambda now: ran.append("guards"))
+    c.evaluate(1.0)
+    assert ran == ["guards"]

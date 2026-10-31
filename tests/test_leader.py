@@ -116,3 +116,36 @@ def test_fallback_probe_without_psutil():
         p.kill()
         p.wait()
     assert not _pid_alive_fallback(p.pid)
+
+
+def test_absent_lock_has_exactly_one_winner(tmp_path):
+    import threading
+
+    path = tmp_path / "l"
+    locks = [LeaderLock(path) for _ in range(8)]
+    barrier = threading.Barrier(len(locks))
+    results = []
+
+    def go(lock):
+        barrier.wait()
+        results.append(lock.acquire(1000))
+
+    threads = [threading.Thread(target=go, args=(lk,)) for lk in locks]
+    [t.start() for t in threads]
+    [t.join() for t in threads]
+    assert results.count(True) == 1
+
+
+def test_failed_write_leaves_no_tmp_file(tmp_path, monkeypatch):
+    import ke.leader as leader
+
+    path = tmp_path / "l"
+    lock = LeaderLock(path)
+    assert lock.acquire(1000)
+
+    def boom(src, dst):
+        raise OSError("disk")
+
+    monkeypatch.setattr(leader.os, "replace", boom)
+    assert lock.acquire(1010) is False  # replace path fails -> not leader, no exception
+    assert [p.name for p in tmp_path.iterdir()] == ["l"]

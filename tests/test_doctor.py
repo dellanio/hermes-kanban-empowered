@@ -3,6 +3,8 @@ import pathlib
 import subprocess
 import sys
 
+import pytest
+
 from conftest import settings_for_test
 
 
@@ -119,23 +121,40 @@ def test_cli_setup_and_run(kanban_home, capsys, tmp_path):
     assert "hermes_compat: bf0203a794" in capsys.readouterr().out
 
 
-def _load_plugin():
-    root = pathlib.Path(__file__).resolve().parent.parent
-    spec = importlib.util.spec_from_file_location(
-        "ke_plugin_pkg", root / "__init__.py", submodule_search_locations=[str(root)]
-    )
-    mod = importlib.util.module_from_spec(spec)
-    sys.modules["ke_plugin_pkg"] = mod
-    spec.loader.exec_module(mod)
-    return mod
+@pytest.fixture
+def load_plugin(monkeypatch):
+    """Load the repo root as a package; undo sys.modules and cli module state afterwards."""
+    from ke import cli
+
+    monkeypatch.setattr(cli, "_settings", None)
+    monkeypatch.setattr(cli, "_config_error", None)
+    before = set(sys.modules)
+
+    def load():
+        root = pathlib.Path(__file__).resolve().parent.parent
+        spec = importlib.util.spec_from_file_location(
+            "ke_plugin_pkg", root / "__init__.py", submodule_search_locations=[str(root)]
+        )
+        mod = importlib.util.module_from_spec(spec)
+        sys.modules["ke_plugin_pkg"] = mod
+        spec.loader.exec_module(mod)
+        return mod
+
+    yield load
+    for name in set(sys.modules) - before:
+        if name == "ke_plugin_pkg" or name.startswith("ke_plugin_pkg."):
+            del sys.modules[name]
 
 
 class _Ctx:
-    def __init__(self, state_dir):
+    def __init__(self, state_dir, config=None):
         self.state_dir = state_dir
+        self.config = config or {}
         self.hooks, self.cmds = {}, {}
 
     def get_config(self, key, default=None):
+        if key in self.config:
+            return self.config[key]
         return str(self.state_dir) if key == "shared_state_dir" else default
 
     def register_hook(self, name, cb):
@@ -145,8 +164,8 @@ class _Ctx:
         self.cmds[name] = (setup_fn, handler_fn)
 
 
-def test_register_wires_hook_and_cli(kanban_home, tmp_path):
-    mod = _load_plugin()
+def test_register_wires_hook_and_cli(kanban_home, tmp_path, load_plugin):
+    mod = load_plugin()
     ctx = _Ctx(tmp_path / "state")
     mod.register(ctx)
     assert "on_kanban_dispatch_tick" in ctx.hooks
@@ -160,10 +179,34 @@ def test_register_wires_hook_and_cli(kanban_home, tmp_path):
         )
 
 
-def test_register_survives_broken_setup(kanban_home, tmp_path):
-    mod = _load_plugin()
+def test_register_survives_broken_setup(kanban_home, tmp_path, load_plugin):
+    mod = load_plugin()
     blocker = tmp_path / "afile"
     blocker.write_text("x")
     ctx = _Ctx(blocker / "state")  # cannot mkdir under a regular file
     mod.register(ctx)  # must not raise; hermes keeps loading other plugins
     assert "kanban-empowered" in ctx.cmds  # doctor stays available
+
+
+def test_register_with_invalid_config_keeps_doctor(kanban_home, tmp_path, load_plugin, capsys):
+    mod = load_plugin()
+    ctx = _Ctx(tmp_path / "state", config={"mode": "bogus"})
+    mod.register(ctx)
+    assert "kanban-empowered" in ctx.cmds
+    assert "on_kanban_dispatch_tick" not in ctx.hooks  # no coordinator on guessed settings
+    setup_fn, handler_fn = ctx.cmds["kanban-empowered"]
+    import argparse
+
+    parser = argparse.ArgumentParser()
+    setup_fn(parser)
+    handler_fn(parser.parse_args(["doctor"]))
+    out = capsys.readouterr().out
+    assert "config: inválida (" in out and "mode" in out
+    assert "hermes_compat: bf0203a794" in out
+
+
+def test_doctor_no_config_line_when_valid(kanban_home, capsys, tmp_path):
+    from ke import cli
+
+    cli.run_doctor(settings_for_test(tmp_path))
+    assert "config:" not in capsys.readouterr().out

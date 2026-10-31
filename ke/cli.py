@@ -9,12 +9,17 @@ from .leader import LeaderLock
 from .settings import Settings
 
 _settings: Optional[Settings] = None
+_config_error: Optional[str] = None
 
 
-def bind(settings: Settings) -> None:
-    """Give the CLI the settings ``register(ctx)`` built (Hermes calls handlers with ``args`` only)."""
-    global _settings
+def bind(settings: Settings, config_error: Optional[str] = None) -> None:
+    """Give the CLI the settings ``register(ctx)`` built (Hermes calls handlers with ``args`` only).
+
+    ``config_error`` is set when the user's config was invalid and defaults were used instead.
+    """
+    global _settings, _config_error
     _settings = settings
+    _config_error = config_error
 
 
 def setup(parser: Any) -> None:
@@ -29,7 +34,7 @@ def run(args: Any) -> int:
     settings = _settings if _settings is not None else Settings.from_mapping({})
     cmd = getattr(args, "ke_cmd", None)
     if cmd == "doctor":
-        run_doctor(settings)
+        run_doctor(settings, config_error=_config_error)
         return 0
     parser = getattr(args, "ke_parser", None)
     if parser is not None:
@@ -39,7 +44,7 @@ def run(args: Any) -> int:
     return 0 if cmd is None else 2
 
 
-def run_doctor(settings: Settings) -> None:
+def run_doctor(settings: Settings, config_error: Optional[str] = None) -> None:
     """Print ``key: value`` diagnostics, one per line."""
     pid = LeaderLock(settings.shared_state_dir / "leader.lock").holder_pid(time.time())
     profiles = hermes_api.profiles_with_plugin()
@@ -51,5 +56,7 @@ def run_doctor(settings: Settings) -> None:
         ("shared_state_dir", str(settings.shared_state_dir)),
         ("profiles_com_plugin", ", ".join(profiles) if profiles else "nenhum"),
     ]
+    if config_error:
+        rows.append(("config", f"inválida ({config_error})"))
     for key, value in rows:
         print(f"{key}: {value}")

@@ -79,7 +79,10 @@ class Coordinator:
 
     # -- evaluation ----------------------------------------------------------
     def evaluate(self, now: float) -> None:
-        self._warn_missing_veto_hooks()
+        try:
+            self._warn_missing_veto_hooks()
+        except Exception:
+            log.exception("kanban-empowered: veto-hooks check failed")
         for name in STEP_ORDER:
             step = self.steps[name]
             if step is None:

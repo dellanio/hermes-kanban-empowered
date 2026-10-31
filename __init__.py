@@ -16,22 +16,29 @@ def register(ctx) -> None:
     from .ke import cli
     from .ke.settings import Settings
 
-    settings = Settings.from_ctx(ctx)
-    cli.bind(settings)
+    config_error = None
     try:
-        from .ke.coordinator import Coordinator
-        from .ke.store import Store
+        settings = Settings.from_ctx(ctx)
+    except Exception as exc:
+        log.exception("kanban-empowered: invalid config; falling back to defaults")
+        settings = Settings.from_mapping({})
+        config_error = str(exc) or type(exc).__name__
+    cli.bind(settings, config_error)
+    if config_error is None:  # never run the coordinator on guessed settings
+        try:
+            from .ke.coordinator import Coordinator
+            from .ke.store import Store
 
-        store = Store(settings.shared_state_dir / "state.db")
-        coordinator = Coordinator(settings, store)
-        atexit.register(coordinator.leader.release)
+            store = Store(settings.shared_state_dir / "state.db")
+            coordinator = Coordinator(settings, store)
+            atexit.register(coordinator.leader.release)
 
-        def on_tick(board=None, dry_run=False, result=None, **kw):
-            coordinator.on_tick(board, result, dry_run=dry_run, **kw)
+            def on_tick(board=None, dry_run=False, result=None, **kw):
+                coordinator.on_tick(board, result, dry_run=dry_run, **kw)
 
-        ctx.register_hook("on_kanban_dispatch_tick", on_tick)
-    except Exception:
-        log.exception("kanban-empowered: failed to start the coordinator; hooks not registered")
+            ctx.register_hook("on_kanban_dispatch_tick", on_tick)
+        except Exception:
+            log.exception("kanban-empowered: failed to start the coordinator; hooks not registered")
 
     ctx.register_cli_command(
         "kanban-empowered",

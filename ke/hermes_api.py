@@ -118,3 +118,53 @@ def veto_hooks_available() -> bool:
     import hermes_cli.plugins as plugins
 
     return _VETO_HOOKS <= set(getattr(plugins, "VALID_HOOKS", ()))
+
+
+def active_profile() -> str:
+    """Name of the profile this process runs as (``default``, a profile name, or ``custom``)."""
+    from hermes_cli.profiles import get_active_profile_name
+
+    return str(get_active_profile_name())
+
+
+def hermes_head() -> str | None:
+    """Short git HEAD of the installed Hermes checkout, or ``None`` when it cannot be read."""
+    import subprocess
+
+    import hermes_cli
+
+    root = Path(hermes_cli.__file__).resolve().parent.parent
+    try:
+        proc = subprocess.run(
+            ["git", "-C", str(root), "rev-parse", "--short", "HEAD"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+    except Exception:
+        return None
+    out = (proc.stdout or "").strip()
+    return out if proc.returncode == 0 and out else None
+
+
+def profiles_with_plugin(plugin: str = "kanban-empowered") -> list[str]:
+    """Profiles whose ``config.yaml`` has ``plugins.entries.<plugin>`` (``default`` first)."""
+    from hermes_constants import get_default_hermes_root
+
+    try:
+        import yaml
+    except ImportError:
+        return []
+
+    root = Path(get_default_hermes_root())
+    found: list[str] = []
+    for name in profiles():
+        cfg = (root / "config.yaml") if name == "default" else (root / "profiles" / name / "config.yaml")
+        try:
+            data = yaml.safe_load(cfg.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        entries = ((data or {}).get("plugins") or {}).get("entries") if isinstance(data, dict) else None
+        if isinstance(entries, dict) and plugin in entries:
+            found.append(name)
+    return found

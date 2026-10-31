@@ -126,3 +126,55 @@ class FakeTelegram:
 @pytest.fixture
 def fake_tg() -> FakeTelegram:
     return FakeTelegram()
+
+
+# -- Coordinator helpers -------------------------------------------------------
+def settings_for_test(tmp_path: Path, **overrides):
+    """Settings whose shared state lives under ``tmp_path``; ``overrides`` set fields directly."""
+    import dataclasses
+
+    from ke.settings import Settings
+
+    base = Settings.from_mapping({"shared_state_dir": str(tmp_path / "state")})
+    return dataclasses.replace(base, **overrides) if overrides else base
+
+
+class FakeApi:
+    """Stand-in for ``ke.hermes_api`` as seen by the Coordinator."""
+
+    def __init__(self, active_profile: str = "default", veto_hooks: bool = True) -> None:
+        self._active = active_profile
+        self._veto = veto_hooks
+
+    def active_profile(self) -> str:
+        return self._active
+
+    def veto_hooks_available(self) -> bool:
+        return self._veto
+
+
+def make_coordinator(
+    tmp_path: Path,
+    coordinator_profile: str = "default",
+    active_profile: str = "default",
+    veto_hooks: bool = True,
+    clock=None,
+    telegram=None,
+    **settings_overrides,
+):
+    """A Coordinator wired to a temp Store/LeaderLock and a FakeApi."""
+    from ke.coordinator import Coordinator
+    from ke.store import Store
+
+    settings = settings_for_test(
+        tmp_path, coordinator_profile=coordinator_profile, **settings_overrides
+    )
+    store = Store(settings.shared_state_dir / "state.db")
+    kw = {"clock": clock} if clock is not None else {}
+    return Coordinator(
+        settings,
+        store,
+        api=FakeApi(active_profile, veto_hooks),
+        telegram=telegram,
+        **kw,
+    )

@@ -16,15 +16,30 @@ def test_create_task_helper(kanban_home):
         assert kb.get_task(conn, tid).title == "via helper"
 
 
-def test_plugin_register_is_callable():
+def test_plugin_register_is_callable(tmp_path):
     import importlib.util
+    import sys
     from pathlib import Path
+
+    root = Path(__file__).resolve().parent.parent
     spec = importlib.util.spec_from_file_location(
-        "ke_plugin_root", Path(__file__).resolve().parent.parent / "__init__.py"
+        "ke_plugin_root", root / "__init__.py", submodule_search_locations=[str(root)]
     )
     mod = importlib.util.module_from_spec(spec)
+    sys.modules["ke_plugin_root"] = mod
     spec.loader.exec_module(mod)
-    assert mod.register(object()) is None
+
+    class Ctx:
+        def get_config(self, key, default=None):
+            return str(tmp_path / "state") if key == "shared_state_dir" else default
+
+        def register_hook(self, name, cb):
+            pass
+
+        def register_cli_command(self, *a, **k):
+            pass
+
+    assert mod.register(Ctx()) is None
 
 
 def test_fake_clock_and_fake_tg(clock, fake_tg):

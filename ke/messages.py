@@ -69,6 +69,20 @@ EN: dict[str, str] = {
     "status.row.no_assignee": "no assignee",
     "status.row.wait": "  waiting  {board}/{id}  {title}  (owner: {owner}, {age} ago)",
     "status.row.guarded": "  guarded  {board}/{id}  {title}  ({reason}, {count}x, for {age})",
+    # waits (human reminders)
+    "waits.head.reminder": "🟠 Needs you",
+    "waits.head.urgent": "🔴 Escalated: needs you",
+    "waits.head.digest": "🔴 Daily summary: still needs you",
+    "waits.single.line": "{head} · {board} · stopped for {age}",
+    "waits.group.line": "{head} · {n} items for {owner}",
+    "waits.item.line": "{n}. {board} · {id} · stopped for {age}",
+    "waits.need": "What I need: {text}",
+    "waits.why": "Why: {text}",
+    "waits.no_reason": "(no reason given)",
+    "waits.held.one": "What is held behind: 1 card ({ids}).",
+    "waits.held.many": "What is held behind: {n} cards ({ids}).",
+    "waits.how.single": "How to reply: reply \"done\" to this message or run: hermes kanban-empowered done {id}",
+    "waits.how.group": "How to reply: reply \"{n} done\" to this message or run: hermes kanban-empowered done <id>",
 }
 
 
@@ -103,3 +117,60 @@ def human_age(seconds: int) -> str:
     d, rem = divmod(s, 86400)
     h = rem // 3600
     return f"{t('age.d', n=d)} {t('age.h', n=h)}" if h else t("age.d", n=d)
+
+
+# -- human wait reminders ---------------------------------------------------------
+_RAW_REASON_MAX = 600
+_HELD_IDS_SHOWN = 5
+
+
+def _wait_head(stage: str) -> str:
+    if stage == "digest":
+        return t("waits.head.digest")
+    if stage == "escalation":
+        return t("waits.head.urgent")
+    return t("waits.head.reminder")
+
+
+def _clip(text: str) -> str:
+    text = " ".join(str(text).split())
+    return text if len(text) <= _RAW_REASON_MAX else text[: _RAW_REASON_MAX - 1] + "…"
+
+
+def _wait_body(due) -> list[str]:
+    """What I need / why / what is held behind, for one wait."""
+    lines = []
+    if due.ask is not None:
+        lines.append(t("waits.need", text=due.ask.need))
+        lines.append(t("waits.why", text=due.ask.why))
+    else:  # blocked before the structured ask existed: the raw reason is all there is
+        lines.append(t("waits.need", text=_clip(due.reason) if due.reason.strip() else t("waits.no_reason")))
+    held = list(due.held_behind)
+    if held:
+        shown = held[:_HELD_IDS_SHOWN]
+        ids = ", ".join(shown) + (", …" if len(held) > len(shown) else "")
+        lines.append(t("waits.held.one", ids=ids) if len(held) == 1 else t("waits.held.many", n=len(held), ids=ids))
+    return lines
+
+
+def render_waits(owner: str, dues: list) -> str:
+    """The reminder message for ``owner``: one item as-is, several numbered and grouped."""
+    if not dues:
+        return ""
+    if len(dues) == 1:
+        due = dues[0]
+        head = t(
+            "waits.single.line",
+            head=_wait_head(due.stage),
+            board=due.board,
+            age=human_age(due.age_s),
+        )
+        return "\n".join([head, *_wait_body(due), t("waits.how.single", id=due.task_id)])
+    urgent = any(d.stage in ("escalation", "digest") for d in dues)
+    lead = _wait_head("digest" if any(d.stage == "digest" for d in dues) else "escalation" if urgent else "reminder1")
+    lines = [t("waits.group.line", head=lead, n=len(dues), owner=owner)]
+    for n, due in enumerate(dues, start=1):
+        lines.append(t("waits.item.line", n=n, board=due.board, id=due.task_id, age=human_age(due.age_s)))
+        lines.extend("   " + body for body in _wait_body(due))
+    lines.append(t("waits.how.group", n=1))
+    return "\n".join(lines)

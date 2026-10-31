@@ -18,6 +18,7 @@ from . import hermes_api
 from .leader import LeaderLock
 from .settings import Settings
 from .store import Store
+from .waits import Due, WaitTracker
 
 log = logging.getLogger(__name__)
 
@@ -44,6 +45,11 @@ class Coordinator:
         self.clock = clock
         self.leader = leader or LeaderLock(settings.shared_state_dir / "leader.lock")
         self.steps: dict[str, Optional[Step]] = {name: None for name in STEP_ORDER}
+        # Human waits: each evaluation syncs the tracker and keeps the reminders that are due
+        # in ``pending_dues`` for the sender; nothing is marked sent here.
+        self.waits = WaitTracker(settings, store, api)
+        self.pending_dues: list[Due] = []
+        self.register_step("waits", self._waits_step)
 
     # -- wiring --------------------------------------------------------------
     def register_step(self, name: str, fn: Step) -> None:
@@ -51,6 +57,10 @@ class Coordinator:
         if name not in self.steps:
             raise ValueError(f"unknown step {name!r}; expected one of {STEP_ORDER}")
         self.steps[name] = fn
+
+    def _waits_step(self, now: float) -> None:
+        self.waits.sync(now)
+        self.pending_dues = self.waits.collect_due(now)
 
     # -- hook entry ----------------------------------------------------------
     def on_tick(

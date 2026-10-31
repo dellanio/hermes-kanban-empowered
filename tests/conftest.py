@@ -152,6 +152,10 @@ class FakeApi:
     def veto_hooks_available(self) -> bool:
         return self._veto
 
+    def boards(self) -> list[str]:
+        """No boards: the coordinator's waits step then never touches a real kanban DB."""
+        return []
+
 
 def make_coordinator(
     tmp_path: Path,
@@ -160,9 +164,10 @@ def make_coordinator(
     veto_hooks: bool = True,
     clock=None,
     telegram=None,
+    api=None,
     **settings_overrides,
 ):
-    """A Coordinator wired to a temp Store/LeaderLock and a FakeApi."""
+    """A Coordinator wired to a temp Store/LeaderLock and a FakeApi (or ``api``, e.g. ``hermes_api``)."""
     from ke.coordinator import Coordinator
     from ke.store import Store
 
@@ -174,7 +179,7 @@ def make_coordinator(
     return Coordinator(
         settings,
         store,
-        api=FakeApi(active_profile, veto_hooks),
+        api=api if api is not None else FakeApi(active_profile, veto_hooks),
         telegram=telegram,
         **kw,
     )

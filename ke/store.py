@@ -128,6 +128,41 @@ class Store:
             ).fetchone()
         return None if row is None else dict(row)
 
+    def all_waits(self) -> list[dict]:
+        """Every wait row, ordered by board, card and version."""
+        with self.lock:
+            rows = self.conn.execute(
+                "SELECT board, task_id, version, owner, started_at, stage, last_sent_at "
+                "FROM waits ORDER BY board, task_id, version"
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    def upsert_wait(
+        self, board: str, task_id: str, version: int, owner: Optional[str], started_at: int
+    ) -> None:
+        """Insert a wait, or refresh only its owner: ``stage``/``last_sent_at`` are never reset."""
+        with self.lock:
+            self.conn.execute(
+                "INSERT INTO waits (board, task_id, version, owner, started_at) VALUES (?,?,?,?,?) "
+                "ON CONFLICT(board, task_id, version) DO UPDATE SET owner = excluded.owner",
+                (board, task_id, int(version), owner, int(started_at)),
+            )
+
+    def delete_wait(self, board: str, task_id: str, version: int) -> None:
+        with self.lock:
+            self.conn.execute(
+                "DELETE FROM waits WHERE board = ? AND task_id = ? AND version = ?",
+                (board, task_id, int(version)),
+            )
+
+    def mark_wait_sent(self, board: str, task_id: str, version: int, stage: str, ts: int) -> None:
+        with self.lock:
+            self.conn.execute(
+                "UPDATE waits SET stage = ?, last_sent_at = ? "
+                "WHERE board = ? AND task_id = ? AND version = ?",
+                (stage, int(ts), board, task_id, int(version)),
+            )
+
     # -- kv --------------------------------------------------------------
     def kv_get(self, key: str) -> Optional[str]:
         with self.lock:

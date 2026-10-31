@@ -7,3 +7,8 @@ provides_hooks:
   - on_kanban_worker_exited
   - pre_gateway_dispatch
   - pre_tool_call
+provides_locales:
+  - id: en
+    endonym: English
+  - id: pt-br
+    endonym: Português (Brasil)

@@ -117,6 +117,17 @@ class Store:
             ).fetchall()
         return [dict(r) for r in rows]
 
+    # -- waits (read side; rows are written by the wait tracker) ---------
+    def latest_wait(self, board: str, task_id: str) -> Optional[dict]:
+        """The highest-``version`` wait row of a card, or ``None``."""
+        with self.lock:
+            row = self.conn.execute(
+                "SELECT board, task_id, version, owner, started_at, stage, last_sent_at "
+                "FROM waits WHERE board = ? AND task_id = ? ORDER BY version DESC LIMIT 1",
+                (board, task_id),
+            ).fetchone()
+        return None if row is None else dict(row)
+
     # -- kv --------------------------------------------------------------
     def kv_get(self, key: str) -> Optional[str]:
         with self.lock:

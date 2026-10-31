@@ -185,3 +185,19 @@ def test_only_adapter_imports_hermes_cli():
         if p.name != "hermes_api.py" and pat.search(p.read_text(encoding="utf-8"))
     ]
     assert offenders == []
+
+
+def test_latest_summary_run_and_runs(kanban_home):
+    from hermes_cli import kanban_db as kb
+    from ke import hermes_api as h
+
+    with h.connect("default") as conn:
+        tid = create_task(conn, title="t", assignee="dev")
+        assert h.latest_summary_run(conn, tid) is None
+        task = kb.claim_task(conn, tid)
+        kb.complete_task(conn, tid, summary="pronto", expected_run_id=task.current_run_id)
+        run = h.latest_summary_run(conn, tid)
+        assert run.summary == "pronto" and run.id == task.current_run_id
+        assert [r.id for r in h.runs(conn, tid)] == [run.id]
+        assert [t.id for t in h.list_tasks(conn, status="done")] == [tid]
+        assert h.list_tasks(conn, status="running") == []

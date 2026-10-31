@@ -55,6 +55,34 @@ def comments(conn: sqlite3.Connection, tid: str) -> list:
     return _kb.list_comments(conn, tid)
 
 
+def runs(conn: sqlite3.Connection, tid: str) -> list:
+    """Runs of ``tid`` in start order (active and closed)."""
+    return _kb.list_runs(conn, tid)
+
+
+def latest_summary_run(conn: sqlite3.Connection, tid: str):
+    """The run holding the newest non-empty summary, or ``None``.
+
+    Same selection as Hermes' ``latest_summary``/``latest_summaries`` (newest by
+    ``COALESCE(ended_at, started_at)`` then id), but returning the whole run so the
+    caller also gets the timestamp and run id. Built on the public ``list_runs``.
+    """
+    best = None
+    best_key = None
+    for run in _kb.list_runs(conn, tid):
+        if not run.summary:
+            continue
+        key = (run.ended_at if run.ended_at is not None else run.started_at, run.id)
+        if best_key is None or key >= best_key:
+            best, best_key = run, key
+    return best
+
+
+def list_tasks(conn: sqlite3.Connection, status: str | None = None) -> list:
+    """Non-archived tasks, optionally filtered by ``status``."""
+    return _kb.list_tasks(conn, status=status)
+
+
 def children(conn: sqlite3.Connection, tid: str) -> list[str]:
     return list(_kb.child_ids(conn, tid))
 
@@ -90,6 +118,22 @@ def assign(conn: sqlite3.Connection, tid: str, profile: str) -> bool:
     Raises RuntimeError (from Hermes) while the task is running under a claim.
     """
     return bool(_kb.assign_task(conn, tid, profile))
+
+
+# -- i18n --------------------------------------------------------------------
+def translate(full_key: str, **kw) -> str | None:
+    """Hermes' translation of ``full_key`` (``agent.i18n.t``), or ``None`` when it has none.
+
+    Hermes returns the bare key on a miss, so "the key came back" means untranslated; an
+    import or lookup failure also yields ``None`` and the caller falls back to its own text.
+    """
+    try:
+        from agent.i18n import t as _t
+
+        out = _t(full_key, **kw)
+    except Exception:
+        return None
+    return None if not isinstance(out, str) or out == full_key else out
 
 
 # -- environment -------------------------------------------------------------

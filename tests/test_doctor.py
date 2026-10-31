@@ -13,7 +13,7 @@ def test_doctor_reports_missing_hooks(monkeypatch, capsys, tmp_path):
 
     monkeypatch.setattr(h, "veto_hooks_available", lambda: False)
     cli.run_doctor(settings_for_test(tmp_path))
-    assert "veto_hooks: ausentes" in capsys.readouterr().out
+    assert "veto_hooks: missing" in capsys.readouterr().out
 
 
 def test_doctor_reports_present_hooks(monkeypatch, capsys, tmp_path):
@@ -21,7 +21,7 @@ def test_doctor_reports_present_hooks(monkeypatch, capsys, tmp_path):
 
     monkeypatch.setattr(h, "veto_hooks_available", lambda: True)
     cli.run_doctor(settings_for_test(tmp_path))
-    assert "veto_hooks: presentes" in capsys.readouterr().out
+    assert "veto_hooks: present" in capsys.readouterr().out
 
 
 def test_doctor_all_keys(kanban_home, capsys, tmp_path):
@@ -34,17 +34,17 @@ def test_doctor_all_keys(kanban_home, capsys, tmp_path):
         "hermes_compat",
         "hermes_head",
         "veto_hooks",
-        "leader",
+        "coordinator",
         "shared_state_dir",
-        "profiles_com_plugin",
+        "profiles_with_plugin",
     ]
     assert out["hermes_compat"] == "bf0203a794"
-    assert out["leader"] == "nenhum"
+    assert out["coordinator"] == "none"
     assert out["shared_state_dir"] == str(s.shared_state_dir)
-    assert out["profiles_com_plugin"] == "nenhum"
+    assert out["profiles_with_plugin"] == "none"
 
 
-def test_doctor_reports_leader_pid(kanban_home, capsys, tmp_path):
+def test_doctor_reports_coordinator_pid(kanban_home, capsys, tmp_path):
     import os
     import time
 
@@ -54,7 +54,7 @@ def test_doctor_reports_leader_pid(kanban_home, capsys, tmp_path):
     s = settings_for_test(tmp_path)
     assert LeaderLock(s.shared_state_dir / "leader.lock").acquire(time.time())
     cli.run_doctor(s)
-    assert _out(capsys)["leader"] == str(os.getpid())
+    assert _out(capsys)["coordinator"] == str(os.getpid())
 
 
 def test_doctor_profiles_with_plugin(kanban_home, capsys, tmp_path):
@@ -73,7 +73,7 @@ def test_doctor_profiles_with_plugin(kanban_home, capsys, tmp_path):
         (d / "config.yaml").write_text(body, encoding="utf-8")
     (kanban_home / "profiles" / "dave").mkdir()  # no config.yaml
     cli.run_doctor(settings_for_test(tmp_path))
-    assert _out(capsys)["profiles_com_plugin"] == "default, alice"
+    assert _out(capsys)["profiles_with_plugin"] == "default, alice"
 
 
 def test_hermes_head_is_short_sha_or_none():
@@ -173,7 +173,7 @@ def test_register_with_invalid_config_keeps_doctor(kanban_home, tmp_path, load_p
     setup_fn(parser)
     handler_fn(parser.parse_args(["doctor"]))
     out = capsys.readouterr().out
-    assert "config: inválida (" in out and "mode" in out
+    assert "config: invalid (" in out and "mode" in out
     assert "hermes_compat: bf0203a794" in out
 
 
@@ -206,3 +206,12 @@ def test_register_guard_honors_config_and_survives_invalid_config(kanban_home, t
     assert "on_kanban_dispatch_tick" not in bad.hooks
     r = bad.hooks["pre_tool_call"](tool_name="kanban_block", args={"reason": "x"})
     assert r["action"] == "block"
+
+
+def test_doctor_never_says_leader(kanban_home, capsys, tmp_path):
+    from ke import cli
+
+    cli.run_doctor(settings_for_test(tmp_path), config_error="x")
+    rows = _out(capsys)
+    rows.pop("shared_state_dir")  # a path; may contain anything
+    assert "leader" not in " ".join([*rows, *rows.values()]).lower()

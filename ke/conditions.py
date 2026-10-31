@@ -1,0 +1,350 @@
+"""Conditions engine: why a card is (not) moving, and a fleet-wide status.
+
+``explain`` evaluates five conditions for one card, always in this order:
+``dependencies``, ``guard``, ``live``, ``fresh``, ``wait``. It only reads
+(Hermes DB through ``hermes_api``, plugin state through ``Store``).
+"""
+from __future__ import annotations
+
+import time
+from dataclasses import dataclass, field
+from typing import Any, Optional
+
+from . import hermes_api
+from .messages import human_age, t
+from .settings import Settings
+from .store import Store
+
+_CLOSED = frozenset({"done", "archived"})
+# Events that carry no news about the card itself.
+_NOISE_EVENTS = frozenset({"heartbeat"})
+_RESOLVED_ACTIONS = frozenset({"human_done", "guard_release", "infra_undo"})
+_KIND_SHOWN_IN = frozenset({"blocked", "todo", "triage"})
+
+
+@dataclass(frozen=True)
+class Condition:
+    name: str
+    ok: bool
+    text: str
+    # ``ok=False`` conditions that are a heads-up rather than a hard stop render as ⚠, not ✗.
+    warn: bool = False
+
+
+@dataclass(frozen=True)
+class CardConditions:
+    board: str
+    task_id: str
+    status: str
+    age_s: int
+    conditions: list[Condition] = field(default_factory=list)
+    title: str = ""
+
+
+# -- helpers --------------------------------------------------------------------
+def _age(now: float, ts: Optional[int]) -> int:
+    return max(0, int(now - ts)) if ts else 0
+
+
+def _events(conn: Any, tid: str) -> list:
+    return sorted(hermes_api.events(conn, tid), key=lambda e: e.id)
+
+
+def _last_event_ts(events: list, kinds: Optional[frozenset] = None) -> Optional[int]:
+    for ev in reversed(events):
+        if kinds is None:
+            if ev.kind not in _NOISE_EVENTS and ev.kind != "commented":
+                return ev.created_at
+        elif ev.kind in kinds:
+            return ev.created_at
+    return None
+
+
+def _is_human_block(task: Any, settings: Settings) -> bool:
+    return task.status == "blocked" and (task.block_kind is None or task.block_kind in settings.human_kinds)
+
+
+def _count(n: int, key: str) -> str:
+    return t(f"{key}.{'one' if n == 1 else 'many'}", n=n)
+
+
+# -- conditions -----------------------------------------------------------------
+def _open_roots(conn: Any, tid: str, seen: set) -> list:
+    """Open ancestors of ``tid`` that have no open parent themselves (the blocking roots)."""
+    roots: list = []
+    for pid in hermes_api.parents(conn, tid):
+        if pid in seen:
+            continue
+        seen.add(pid)
+        parent = hermes_api.task(conn, pid)
+        if parent is None or parent.status in _CLOSED:
+            continue
+        roots.extend(_open_roots(conn, pid, seen) or [parent])
+    return roots
+
+
+def _dependencies(conn, board, task, store, now, settings) -> Condition:
+    roots = _open_roots(conn, task.id, {task.id})
+    if not roots:
+        return Condition("dependencies", True, t("explain.dependencies.none"))
+    parts = []
+    for root in roots:
+        label = root.status
+        if root.block_kind and root.status in _KIND_SHOWN_IN:
+            label += f" {root.block_kind}"
+        since = _last_event_ts(_events(conn, root.id)) or root.created_at
+        wait = store.latest_wait(board, root.id)
+        if wait and wait.get("owner"):
+            owner = wait["owner"]
+        elif _is_human_block(root, settings):
+            owner = settings.owner_for(board)
+        else:
+            owner = root.assignee or t("explain.dependencies.no_owner")
+        parts.append(
+            t("explain.dependencies.waiting", id=root.id, label=label, age=human_age(_age(now, since)), owner=owner)
+        )
+    return Condition("dependencies", False, "; ".join(parts))
+
+
+def _guard_hits(events: list) -> tuple[list, str]:
+    """``respawn_guarded`` events since the last ``claimed`` (heartbeats never count) and the latest reason."""
+    last_claim = max((i for i, e in enumerate(events) if e.kind == "claimed"), default=-1)
+    hits = [e for e in events[last_claim + 1:] if e.kind == "respawn_guarded"]
+    payload = hits[-1].payload if hits and isinstance(hits[-1].payload, dict) else {}
+    return hits, payload.get("reason") or t("explain.guard.unknown_reason")
+
+
+def _guard(conn, board, task, store, now, settings) -> Condition:
+    hits, reason = _guard_hits(_events(conn, task.id))
+    if not hits:
+        return Condition("guard", True, t("explain.guard.none"))
+    since = human_age(_age(now, hits[0].created_at))
+    return Condition("guard", False, t("explain.guard.active", reason=reason, count=len(hits), age=since))
+
+
+def _live(conn, board, task, store, now, settings) -> Condition:
+    if task.status != "running" or task.current_run_id is None:
+        return Condition("live", True, t("explain.live.none"))
+    hb = (
+        t("explain.live.heartbeat", age=human_age(_age(now, task.last_heartbeat_at)))
+        if task.last_heartbeat_at
+        else t("explain.live.no_heartbeat")
+    )
+    if task.worker_pid is None:
+        return Condition("live", False, t("explain.live.no_pid", run=task.current_run_id, heartbeat=hb), warn=True)
+    return Condition(
+        "live", True, t("explain.live.ok", run=task.current_run_id, pid=task.worker_pid, heartbeat=hb)
+    )
+
+
+def _fresh(conn, board, task, store, now, settings) -> Condition:
+    run = hermes_api.latest_summary_run(conn, task.id)
+    if run is None:
+        return Condition("fresh", True, t("explain.fresh.none"))
+    ts = run.ended_at if run.ended_at is not None else run.started_at
+    events = _events(conn, task.id)
+    boundary = max(
+        (e.id for e in events if e.run_id == run.id and e.kind not in _NOISE_EVENTS), default=None
+    )
+    if boundary is not None:
+        after = [e for e in events if e.id > boundary]
+    else:
+        after = [e for e in events if e.created_at > ts]
+    news = [e for e in after if e.kind not in _NOISE_EVENTS and e.kind != "commented"]
+    # Comments by timestamp, or by the "commented" events past the run's last event
+    # (exact within the same second); the larger of the two wins.
+    by_time = sum(1 for c in hermes_api.comments(conn, task.id) if c.created_at > ts)
+    n_comments = max(by_time, sum(1 for e in after if e.kind == "commented"))
+    age = human_age(_age(now, ts))
+    if not n_comments and not news:
+        return Condition("fresh", True, t("explain.fresh.clean", age=age))
+    bits = []
+    if n_comments:
+        bits.append(_count(n_comments, "explain.comment"))
+    if news:
+        bits.append(_count(len(news), "explain.event"))
+    joined = bits[0] if len(bits) == 1 else t("explain.fresh.and", first=bits[0], second=bits[1])
+    return Condition("fresh", False, t("explain.fresh.stale", age=age, news=joined), warn=True)
+
+
+def _next_reminder_in(age: int, settings: Settings) -> int:
+    for threshold in sorted((*settings.reminders_s, settings.escalate_after_s)):
+        if threshold > age:
+            return threshold - age
+    digest = max(1, settings.digest_every_s)
+    k = (age - settings.escalate_after_s) // digest + 1
+    return settings.escalate_after_s + k * digest - age
+
+
+def _wait(conn, board, task, store, now, settings) -> Condition:
+    row = store.latest_wait(board, task.id) if task.status == "blocked" else None
+    if row is None:
+        return Condition("wait", True, t("explain.wait.none"))
+    age = _age(now, row["started_at"])
+    owner = row.get("owner") or settings.owner_for(board)
+    return Condition(
+        "wait",
+        False,
+        t("explain.wait.active", owner=owner, age=human_age(age), next=human_age(_next_reminder_in(age, settings))),
+    )
+
+
+_CONDITIONS = (_dependencies, _guard, _live, _fresh, _wait)
+
+
+# -- public API -----------------------------------------------------------------
+def explain(
+    conn: Any,
+    board: str,
+    task_id: str,
+    store: Store,
+    now: float,
+    settings: Optional[Settings] = None,
+) -> CardConditions:
+    """Evaluate every condition for ``task_id``. Raises ``LookupError`` for an unknown card."""
+    task = hermes_api.task(conn, task_id)
+    if task is None:
+        raise LookupError(t("explain.unknown_card", card=task_id, board=board))
+    settings = settings if settings is not None else Settings.from_mapping({})
+    since = _last_event_ts(_events(conn, task_id)) or task.created_at
+    return CardConditions(
+        board=board,
+        task_id=task.id,
+        status=task.status,
+        age_s=_age(now, since),
+        conditions=[fn(conn, board, task, store, now, settings) for fn in _CONDITIONS],
+        title=task.title,
+    )
+
+
+def format_explain(cc: CardConditions) -> str:
+    """Header line (id, title, status, age) plus one ✓/✗/⚠ line per condition."""
+    lines = [t("explain.header", id=cc.task_id, title=cc.title, status=cc.status, age=human_age(cc.age_s))]
+    width = max((len(c.name) for c in cc.conditions), default=0)
+    for c in cc.conditions:
+        mark = "✓" if c.ok else ("⚠" if c.warn else "✗")
+        lines.append(f"  {mark} {c.name.ljust(width)}  {c.text}")
+    return "\n".join(lines)
+
+
+def _local_midnight(now: float) -> int:
+    lt = time.localtime(now)
+    return int(time.mktime((lt.tm_year, lt.tm_mon, lt.tm_mday, 0, 0, 0, 0, 0, -1)))
+
+
+def fleet_status(store: Store, now: float, settings: Optional[Settings] = None) -> dict:
+    """Snapshot across all boards: running cards, human waits, guarded cards, resolved today.
+
+    A board that cannot be read is skipped rather than failing the whole status.
+    """
+    settings = settings if settings is not None else Settings.from_mapping({})
+    boards = hermes_api.boards()
+    running: list[dict] = []
+    human_waits: list[dict] = []
+    guarded: list[dict] = []
+    for board in boards:
+        try:
+            with hermes_api.connect(board) as conn:
+                for t in hermes_api.list_tasks(conn, status="running"):
+                    running.append(
+                        {
+                            "board": board,
+                            "task_id": t.id,
+                            "title": t.title,
+                            "assignee": t.assignee,
+                            "age_s": _age(now, t.started_at or t.created_at),
+                            "heartbeat_age_s": _age(now, t.last_heartbeat_at) if t.last_heartbeat_at else None,
+                        }
+                    )
+                for t in hermes_api.list_tasks(conn, status="blocked"):
+                    if not _is_human_block(t, settings):
+                        continue
+                    wait = store.latest_wait(board, t.id)
+                    since = (wait or {}).get("started_at") or _last_event_ts(
+                        _events(conn, t.id), frozenset({"blocked"})
+                    ) or t.created_at
+                    human_waits.append(
+                        {
+                            "board": board,
+                            "task_id": t.id,
+                            "title": t.title,
+                            "owner": (wait or {}).get("owner") or settings.owner_for(board),
+                            "age_s": _age(now, since),
+                        }
+                    )
+                for t in hermes_api.list_tasks(conn, status="ready"):
+                    hits, reason = _guard_hits(_events(conn, t.id))
+                    if not hits:
+                        continue
+                    guarded.append(
+                        {
+                            "board": board,
+                            "task_id": t.id,
+                            "title": t.title,
+                            "reason": reason,
+                            "count": len(hits),
+                            "age_s": _age(now, hits[0].created_at),
+                        }
+                    )
+        except Exception:
+            continue
+    resolved = sum(1 for a in store.actions_since(_local_midnight(now)) if a["kind"] in _RESOLVED_ACTIONS)
+    return {
+        "running": running,
+        "human_waits": human_waits,
+        "guarded": guarded,
+        "resolved_today": resolved,
+        "boards": boards,
+    }
+
+
+def format_status(fs: dict) -> str:
+    """Plain-text rendering of ``fleet_status`` for the terminal."""
+    lines = [
+        t("status.running", n=len(fs["running"])),
+        t("status.human_waits", n=len(fs["human_waits"])),
+        t("status.guarded", n=len(fs["guarded"])),
+        t("status.resolved_today", n=fs["resolved_today"]),
+        t("status.boards", boards=", ".join(fs["boards"]) or t("status.no_boards")),
+    ]
+    for r in fs["running"]:
+        hb = (
+            t("status.row.heartbeat", age=human_age(r["heartbeat_age_s"]))
+            if r["heartbeat_age_s"] is not None
+            else ""
+        )
+        lines.append(
+            t(
+                "status.row.running",
+                board=r["board"],
+                id=r["task_id"],
+                title=r["title"],
+                assignee=r["assignee"] or t("status.row.no_assignee"),
+                age=human_age(r["age_s"]),
+                heartbeat=hb,
+            )
+        )
+    for w in fs["human_waits"]:
+        lines.append(
+            t(
+                "status.row.wait",
+                board=w["board"],
+                id=w["task_id"],
+                title=w["title"],
+                owner=w["owner"],
+                age=human_age(w["age_s"]),
+            )
+        )
+    for g in fs["guarded"]:
+        lines.append(
+            t(
+                "status.row.guarded",
+                board=g["board"],
+                id=g["task_id"],
+                title=g["title"],
+                reason=g["reason"],
+                count=g["count"],
+                age=human_age(g["age_s"]),
+            )
+        )
+    return "\n".join(lines)

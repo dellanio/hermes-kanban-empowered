@@ -127,3 +127,15 @@ def test_readonly_second_connection_while_open(tmp_path):
     finally:
         ro.close()
     s.close()
+
+
+def test_latest_wait_returns_highest_version(tmp_path):
+    s = Store(tmp_path / "s.db")
+    assert s.latest_wait("b", "t1") is None
+    for version, owner in ((3, "a"), (7, "b"), (5, "c")):
+        s.conn.execute(
+            "INSERT INTO waits (board, task_id, version, owner, started_at) VALUES ('b','t1',?,?,100)",
+            (version, owner),
+        )
+    row = s.latest_wait("b", "t1")
+    assert row["version"] == 7 and row["owner"] == "b" and row["started_at"] == 100

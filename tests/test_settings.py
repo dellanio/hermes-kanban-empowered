@@ -90,32 +90,51 @@ def test_settings_from_ctx_reads_dotted_keys():
     assert "guards.alert_after" in seen and "infra_failures.undo_budget" in seen
 
 
+# Every value below differs from the Settings default, so an unwired or
+# misnamed key makes the assertions fail.
 SECTION_8 = {
-    "mode": "enforce",
-    "coordinator_profile": "default",
-    "shared_state_dir": "C:/Users/della/AppData/Local/hermes/plugin-data/kanban-empowered",
-    "telegram": {"owner_ids": {"sponsor": 6802889854, "operador": 6802889854},
-                 "pin_live_panel": True, "quiet_hours": None},
-    "waits": {"default_owner": "sponsor", "reminders": ["30m", "2h"], "escalate_after": "8h",
-              "escalate_to": "diretor", "digest": "daily", "require_structured_ask": True},
-    "guards": {"alert_after": "30m"},
-    "infra_failures": {"undo_budget": {"count": 2, "window": "24h"}},
+    "mode": "cooperative-only",
+    "coordinator_profile": "builder",
+    "shared_state_dir": "/srv/ke-state",
+    "telegram": {"owner_ids": {"ana": 111, "bob": 222}, "pin_live_panel": False,
+                 "quiet_hours": None, "reply_ttl": "2d"},
+    "waits": {"default_owner": "ana", "reminders": ["10m", "1h"], "escalate_after": "4h",
+              "escalate_to": "bob", "digest": "weekly", "require_structured_ask": False,
+              "human_kinds": ["needs_input", "approval"]},
+    "guards": {"alert_after": "15m"},
+    "infra_failures": {"undo_budget": {"count": 5, "window": "12h"},
+                       "alert_count": 7, "alert_window": "2h", "patterns": ["boom", "kaput"]},
     "quota": {"groups": {"anthropic-principal": ["builder"]}, "backoff": ["5m"], "max_wait": "30m"},
-    "boards": {"projeto-x": {"waits": {"default_owner": "operador"}},
+    "boards": {"projeto-x": {"waits": {"default_owner": "bob"}},
                "outro": {"waits": {"reminders": ["5m"]}}},
 }
 
 
 def _assert_section8(s):
-    assert s.mode == "enforce" and s.coordinator_profile == "default"
-    assert s.default_owner == "sponsor"
-    assert s.owner_for("projeto-x") == "operador"
-    assert s.owner_for("outro") == "sponsor" and s.owner_for("desconhecido") == "sponsor"
-    assert s.infra_undo_count == 2 and s.infra_undo_window_s == 86400
-    assert s.digest_every_s == 86400
-    assert s.reminders_s == (1800, 7200) and s.escalate_after_s == 28800
-    assert s.escalate_to == "diretor" and s.guard_alert_after_s == 1800
-    assert s.owner_ids == {"sponsor": 6802889854, "operador": 6802889854}
+    assert s.mode == "cooperative-only" and s.coordinator_profile == "builder"
+    assert str(s.shared_state_dir).replace("\\", "/") == "/srv/ke-state"
+    assert s.owner_ids == {"ana": 111, "bob": 222} and s.pin_live_panel is False
+    assert s.reply_ttl_s == 172800
+    assert s.default_owner == "ana"
+    assert s.owner_for("projeto-x") == "bob"
+    assert s.owner_for("outro") == "ana" and s.owner_for("desconhecido") == "ana"
+    assert s.reminders_s == (600, 3600) and s.escalate_after_s == 14400
+    assert s.escalate_to == "bob" and s.digest_every_s == 604800
+    assert s.require_structured_ask is False and s.human_kinds == ("needs_input", "approval")
+    assert s.guard_alert_after_s == 900
+    assert s.infra_undo_count == 5 and s.infra_undo_window_s == 43200
+    assert s.infra_alert_count == 7 and s.infra_alert_window_s == 7200
+    assert s.infra_patterns == ("boom", "kaput")
+
+
+def test_section8_fixture_is_all_non_default():
+    """Guard the guard: every Settings field must differ from its default here."""
+    import dataclasses
+    from ke.settings import Settings
+    s, d = Settings.from_mapping(SECTION_8), Settings.from_mapping({})
+    same = [f.name for f in dataclasses.fields(Settings)
+            if getattr(s, f.name) == getattr(d, f.name)]
+    assert same == []
 
 
 def test_section8_yaml_structure_via_from_mapping():
@@ -170,3 +189,11 @@ def test_mode_validated():
     assert Settings.from_mapping({"mode": "cooperative-only"}).mode == "cooperative-only"
     with pytest.raises(ValueError, match="mode"):
         Settings.from_mapping({"mode": "observe"})
+
+
+def test_empty_string_boolean_rejected():
+    from ke.settings import Settings
+    with pytest.raises(ValueError, match="pin_live_panel"):
+        Settings.from_mapping({"telegram": {"pin_live_panel": ""}})
+    with pytest.raises(ValueError, match="require_structured_ask"):
+        Settings.from_mapping({"waits": {"require_structured_ask": "  "}})

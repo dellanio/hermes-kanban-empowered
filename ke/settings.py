@@ -64,7 +64,7 @@ def _get(m: Mapping[str, Any], dotted: str, default: Any = None) -> Any:
 _DIGEST_ALIASES = {"hourly": 3600, "daily": 86400, "weekly": 604800}
 _VALID_MODES = ("enforce", "cooperative-only")
 _TRUE = {"true", "1", "yes", "y", "on"}
-_FALSE = {"false", "0", "no", "n", "off", ""}
+_FALSE = {"false", "0", "no", "n", "off"}
 
 
 def _parse_bool(value: Any, key: str) -> bool:

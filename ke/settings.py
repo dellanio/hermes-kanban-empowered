@@ -61,6 +61,43 @@ def _get(m: Mapping[str, Any], dotted: str, default: Any = None) -> Any:
     return default if cur is None else cur
 
 
+_DIGEST_ALIASES = {"hourly": 3600, "daily": 86400, "weekly": 604800}
+_VALID_MODES = ("enforce", "cooperative-only")
+_TRUE = {"true", "1", "yes", "y", "on"}
+_FALSE = {"false", "0", "no", "n", "off", ""}
+
+
+def _parse_bool(value: Any, key: str) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    text = str(value).strip().lower()
+    if text in _TRUE:
+        return True
+    if text in _FALSE:
+        return False
+    raise ValueError(f"invalid boolean for {key}: {value!r}")
+
+
+def _parse_digest(value: Any) -> int:
+    if isinstance(value, str) and value.strip().lower() in _DIGEST_ALIASES:
+        return _DIGEST_ALIASES[value.strip().lower()]
+    return parse_duration(value)
+
+
+def _board_owners(m: Mapping[str, Any]) -> dict[str, str]:
+    """Per-board overrides: ``boards.<board>.waits.default_owner``."""
+    boards = _get(m, "boards") or {}
+    out: dict[str, str] = {}
+    if isinstance(boards, Mapping):
+        for name, cfg in boards.items():
+            owner = _get(cfg, "waits.default_owner") if isinstance(cfg, Mapping) else None
+            if owner:
+                out[str(name)] = str(owner)
+    return out
+
+
 def _durations(value: Any) -> tuple[int, ...]:
     if isinstance(value, (str, int, float)):
         value = [value]
@@ -101,6 +138,7 @@ class Settings:
 
     @classmethod
     def from_mapping(cls, m: Mapping[str, Any]) -> "Settings":
+        """Build from a nested mapping shaped like the plugin's ``settings`` subtree."""
         defaults = cls()  # for non-trivial defaults
 
         def dur(key: str, field_name: str) -> int:
@@ -113,33 +151,49 @@ class Settings:
 
         def flag(key: str, field_name: str) -> bool:
             v = _get(m, key)
-            return bool(v) if v is not None else getattr(defaults, field_name)
+            return _parse_bool(v, key) if v is not None else getattr(defaults, field_name)
 
+        mode = str(_get(m, "mode", defaults.mode))
+        if mode not in _VALID_MODES:
+            raise ValueError(f"invalid value for mode: {mode!r} (expected one of {_VALID_MODES})")
+
+        # infra_failures.undo_budget: {count, window}; a bare int is the count.
+        budget = _get(m, "infra_failures.undo_budget")
+        undo_count = defaults.infra_undo_count
+        undo_window = defaults.infra_undo_window_s
+        if isinstance(budget, Mapping):
+            if budget.get("count") is not None:
+                undo_count = int(budget["count"])
+            if budget.get("window") is not None:
+                undo_window = parse_duration(budget["window"])
+        elif budget is not None:
+            undo_count = int(budget)
+
+        digest = _get(m, "waits.digest")
         reminders = _get(m, "waits.reminders")
         human_kinds = _get(m, "waits.human_kinds")
         patterns = _get(m, "infra_failures.patterns")
         state_dir = _get(m, "shared_state_dir")
         owner_ids = _get(m, "telegram.owner_ids") or {}
-        board_owner = _get(m, "owners.boards") or {}
         escalate_to = _get(m, "waits.escalate_to")
 
         return cls(
-            mode=str(_get(m, "mode", defaults.mode)),
+            mode=mode,
             coordinator_profile=str(_get(m, "coordinator_profile", defaults.coordinator_profile)),
             shared_state_dir=Path(state_dir) if state_dir else default_shared_state_dir(),
             owner_ids={str(k): int(v) for k, v in dict(owner_ids).items()},
             pin_live_panel=flag("telegram.pin_live_panel", "pin_live_panel"),
-            default_owner=str(_get(m, "owners.default", defaults.default_owner)),
-            board_owner={str(k): str(v) for k, v in dict(board_owner).items()},
+            default_owner=str(_get(m, "waits.default_owner", defaults.default_owner)),
+            board_owner=_board_owners(m),
             reminders_s=_durations(reminders) if reminders is not None else defaults.reminders_s,
             escalate_after_s=dur("waits.escalate_after", "escalate_after_s"),
-            digest_every_s=dur("waits.digest_every", "digest_every_s"),
+            digest_every_s=_parse_digest(digest) if digest is not None else defaults.digest_every_s,
             escalate_to=str(escalate_to) if escalate_to else None,
             human_kinds=_strs(human_kinds) if human_kinds is not None else defaults.human_kinds,
             require_structured_ask=flag("waits.require_structured_ask", "require_structured_ask"),
             guard_alert_after_s=dur("guards.alert_after", "guard_alert_after_s"),
-            infra_undo_count=num("infra_failures.undo_budget", "infra_undo_count"),
-            infra_undo_window_s=dur("infra_failures.undo_window", "infra_undo_window_s"),
+            infra_undo_count=undo_count,
+            infra_undo_window_s=undo_window,
             infra_alert_count=num("infra_failures.alert_count", "infra_alert_count"),
             infra_alert_window_s=dur("infra_failures.alert_window", "infra_alert_window_s"),
             infra_patterns=_strs(patterns) if patterns is not None else defaults.infra_patterns,
@@ -156,17 +210,16 @@ class Settings:
             "telegram.owner_ids",
             "telegram.pin_live_panel",
             "telegram.reply_ttl",
-            "owners.default",
-            "owners.boards",
+            "boards",
+            "waits.default_owner",
             "waits.reminders",
             "waits.escalate_after",
-            "waits.digest_every",
+            "waits.digest",
             "waits.escalate_to",
             "waits.human_kinds",
             "waits.require_structured_ask",
             "guards.alert_after",
             "infra_failures.undo_budget",
-            "infra_failures.undo_window",
             "infra_failures.alert_count",
             "infra_failures.alert_window",
             "infra_failures.patterns",

@@ -44,18 +44,18 @@ def test_settings_other_defaults(monkeypatch, tmp_path):
 def test_settings_from_mapping_overrides():
     from ke.settings import Settings
     s = Settings.from_mapping({
-        "mode": "observe",
+        "mode": "cooperative-only",
         "shared_state_dir": "/tmp/x",
         "telegram": {"owner_ids": {"sponsor": "123"}, "pin_live_panel": False, "reply_ttl": "1d"},
-        "owners": {"default": "ana", "boards": {"b1": "bob"}},
-        "waits": {"reminders": ["10m", 3600], "escalate_after": "4h", "digest_every": "12h",
+        "boards": {"b1": {"waits": {"default_owner": "bob"}}},
+        "waits": {"default_owner": "ana", "reminders": ["10m", 3600], "escalate_after": "4h", "digest": "12h",
                   "escalate_to": "bob", "human_kinds": ["needs_input", "approval"],
                   "require_structured_ask": False},
         "guards": {"alert_after": "15m"},
-        "infra_failures": {"undo_budget": 5, "undo_window": "2d", "alert_count": 4,
+        "infra_failures": {"undo_budget": {"count": 5, "window": "2d"}, "alert_count": 4,
                            "alert_window": "30m", "patterns": ["boom"]},
     })
-    assert s.mode == "observe" and str(s.shared_state_dir).replace("\\", "/") == "/tmp/x"
+    assert s.mode == "cooperative-only" and str(s.shared_state_dir).replace("\\", "/") == "/tmp/x"
     assert s.owner_ids == {"sponsor": 123} and s.pin_live_panel is False and s.reply_ttl_s == 86400
     assert s.default_owner == "ana" and s.owner_for("b1") == "bob" and s.owner_for("b2") == "ana"
     assert s.reminders_s == (600, 3600) and s.escalate_after_s == 14400 and s.digest_every_s == 43200
@@ -75,7 +75,7 @@ def test_settings_is_frozen():
 def test_settings_from_ctx_reads_dotted_keys():
     from ke.settings import Settings
     values = {"waits.reminders": ["5m"], "waits.escalate_after": "1h",
-              "telegram.owner_ids": {"sponsor": 7}, "mode": "observe"}
+              "telegram.owner_ids": {"sponsor": 7}, "mode": "cooperative-only"}
     seen = []
 
     class Ctx:
@@ -85,6 +85,88 @@ def test_settings_from_ctx_reads_dotted_keys():
 
     s = Settings.from_ctx(Ctx())
     assert s.reminders_s == (300,) and s.escalate_after_s == 3600
-    assert s.owner_ids == {"sponsor": 7} and s.mode == "observe"
+    assert s.owner_ids == {"sponsor": 7} and s.mode == "cooperative-only"
     assert s.digest_every_s == 86400 and s.guard_alert_after_s == 1800
     assert "guards.alert_after" in seen and "infra_failures.undo_budget" in seen
+
+
+SECTION_8 = {
+    "mode": "enforce",
+    "coordinator_profile": "default",
+    "shared_state_dir": "C:/Users/della/AppData/Local/hermes/plugin-data/kanban-empowered",
+    "telegram": {"owner_ids": {"sponsor": 6802889854, "operador": 6802889854},
+                 "pin_live_panel": True, "quiet_hours": None},
+    "waits": {"default_owner": "sponsor", "reminders": ["30m", "2h"], "escalate_after": "8h",
+              "escalate_to": "diretor", "digest": "daily", "require_structured_ask": True},
+    "guards": {"alert_after": "30m"},
+    "infra_failures": {"undo_budget": {"count": 2, "window": "24h"}},
+    "quota": {"groups": {"anthropic-principal": ["builder"]}, "backoff": ["5m"], "max_wait": "30m"},
+    "boards": {"projeto-x": {"waits": {"default_owner": "operador"}},
+               "outro": {"waits": {"reminders": ["5m"]}}},
+}
+
+
+def _assert_section8(s):
+    assert s.mode == "enforce" and s.coordinator_profile == "default"
+    assert s.default_owner == "sponsor"
+    assert s.owner_for("projeto-x") == "operador"
+    assert s.owner_for("outro") == "sponsor" and s.owner_for("desconhecido") == "sponsor"
+    assert s.infra_undo_count == 2 and s.infra_undo_window_s == 86400
+    assert s.digest_every_s == 86400
+    assert s.reminders_s == (1800, 7200) and s.escalate_after_s == 28800
+    assert s.escalate_to == "diretor" and s.guard_alert_after_s == 1800
+    assert s.owner_ids == {"sponsor": 6802889854, "operador": 6802889854}
+
+
+def test_section8_yaml_structure_via_from_mapping():
+    from ke.settings import Settings
+    _assert_section8(Settings.from_mapping(SECTION_8))
+
+
+def test_section8_yaml_structure_via_from_ctx():
+    from ke.settings import Settings
+
+    class Ctx:
+        def get_config(self, key, default=None):
+            cur = SECTION_8
+            for part in key.split("."):
+                if not isinstance(cur, dict) or part not in cur:
+                    return default
+                cur = cur[part]
+            return cur
+
+    _assert_section8(Settings.from_ctx(Ctx()))
+
+
+def test_digest_aliases_and_durations():
+    from ke.settings import Settings
+    for raw, expected in (("daily", 86400), ("hourly", 3600), ("weekly", 604800), ("6h", 21600), (7200, 7200)):
+        assert Settings.from_mapping({"waits": {"digest": raw}}).digest_every_s == expected
+    with pytest.raises(ValueError):
+        Settings.from_mapping({"waits": {"digest": "sometimes"}})
+
+
+def test_undo_budget_bare_int_and_partial_mapping():
+    from ke.settings import Settings
+    s = Settings.from_mapping({"infra_failures": {"undo_budget": 4}})
+    assert s.infra_undo_count == 4 and s.infra_undo_window_s == 86400
+    s = Settings.from_mapping({"infra_failures": {"undo_budget": {"window": "1h"}}})
+    assert s.infra_undo_count == 2 and s.infra_undo_window_s == 3600
+
+
+def test_bool_strings_parsed_explicitly():
+    from ke.settings import Settings
+    for raw in ("false", "0", "no", "False", False, 0):
+        s = Settings.from_mapping({"telegram": {"pin_live_panel": raw}, "waits": {"require_structured_ask": raw}})
+        assert s.pin_live_panel is False and s.require_structured_ask is False
+    for raw in ("true", "1", "yes", True):
+        assert Settings.from_mapping({"telegram": {"pin_live_panel": raw}}).pin_live_panel is True
+    with pytest.raises(ValueError, match="pin_live_panel"):
+        Settings.from_mapping({"telegram": {"pin_live_panel": "maybe"}})
+
+
+def test_mode_validated():
+    from ke.settings import Settings
+    assert Settings.from_mapping({"mode": "cooperative-only"}).mode == "cooperative-only"
+    with pytest.raises(ValueError, match="mode"):
+        Settings.from_mapping({"mode": "observe"})

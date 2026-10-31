@@ -107,6 +107,25 @@ def test_transport_errors_become_telegram_error_without_the_token():
         assert "SECRET" not in str(e.value) and "SECRET" not in e.value.description
 
 
+def test_non_numeric_error_code_only_raises_telegram_error():
+    from ke.telegram import TelegramError
+
+    for code in ("abc", None, [1], {}):
+        with pytest.raises(TelegramError) as e:
+            _client([], {"ok": False, "error_code": code, "description": "nope"}).send(1, "x")
+        assert e.value.status is None and e.value.description == "nope"
+
+
+def test_http_error_is_closed_after_reading():
+    from ke.telegram import TelegramError
+
+    fp = io.BytesIO(json.dumps({"ok": False, "description": "boom"}).encode())
+    err = urllib.error.HTTPError("u", 502, "Bad Gateway", {}, fp)
+    with pytest.raises(TelegramError) as e:
+        _client([], exc=err).send(1, "x")
+    assert e.value.status == 502 and e.value.description == "boom" and fp.closed
+
+
 def test_garbage_and_missing_message_id_raise():
     from ke.telegram import TelegramError
 
@@ -182,6 +201,25 @@ def test_urgent_marker_fits_in_the_limit():
 
     (text, _), = render_waits_chunks("s", [_due(stage="escalation", need="z" * 6000)], urgent_escalation=True)
     assert _tg_len(text) <= 4096 and text.splitlines()[-1].startswith("How to reply")
+
+
+def test_clip_of_a_huge_ask_is_fast_and_within_the_limit():
+    import time
+
+    from ke.messages import _tg_len, render_waits_chunks
+
+    due = _due("t_big", need="é" * 60000)
+    start = time.perf_counter()
+    ((text, _),) = render_waits_chunks("sponsor", [due])
+    assert time.perf_counter() - start < 0.05
+    assert _tg_len(text) <= 4096 and "…" in text and text.splitlines()[-1].startswith("How to reply")
+
+
+def test_pathological_clip_counts_utf16_units():
+    from ke.messages import _clip_item, _tg_len
+
+    out = _clip_item("😀" * 60 + "\n" + "😀" * 60, 11)
+    assert _tg_len(out) <= 11 and out.endswith("…")
 
 
 # -- coordinator delivery -------------------------------------------------------
@@ -275,6 +313,31 @@ def test_dues_are_grouped_one_message_per_owner(tmp_path, fake_tg, clock):
     assert coord.pending_dues == []
 
 
+def _track(coord, fake_tg, fail_chats=None):
+    """Count every send attempt; ``fail_chats`` maps chat_id -> exception raised while it is set."""
+    attempts = []
+    fail_chats = {} if fail_chats is None else fail_chats
+    orig = fake_tg.send
+
+    def send(chat_id, text, **kw):
+        attempts.append(chat_id)
+        exc = fail_chats.get(chat_id)
+        if exc is not None:
+            raise exc
+        return orig(chat_id, text, **kw)
+
+    fake_tg.send = send
+    return attempts, fail_chats
+
+
+def _wait_row(coord, due, owner=None):
+    coord.store.upsert_wait(due.board, due.task_id, due.version, owner or due.owner, 0)
+
+
+def _stage(coord, due):
+    return coord.store.latest_wait(due.board, due.task_id)["stage"]
+
+
 def test_escalation_goes_to_owner_and_escalate_to(tmp_path, fake_tg, clock):
     from ke.messages import t
 
@@ -284,6 +347,19 @@ def test_escalation_goes_to_owner_and_escalate_to(tmp_path, fake_tg, clock):
     assert sorted(c["chat_id"] for c in fake_tg.calls["send"]) == [111, 222]
     assert all(t("waits.urgent") not in c["text"] for c in fake_tg.calls["send"])
     assert {r["chat_id"] for r in _sent_rows(coord)} == {111, 222}
+
+
+def test_escalated_copy_names_the_original_owner(tmp_path, fake_tg, clock):
+    from ke.messages import t
+
+    coord = _coord(tmp_path, fake_tg, clock, escalate_to="ops")
+    coord.pending_dues = [_due("t_1", stage="escalation"), _due("t_2", stage="escalation")]
+    coord._deliver_waits(clock.now)
+    copy = next(c for c in fake_tg.calls["send"] if c["chat_id"] == 222)
+    owner_msg = next(c for c in fake_tg.calls["send"] if c["chat_id"] == 111)
+    assert copy["text"].splitlines()[0] == t("waits.copy_of", owner="sponsor")
+    assert "sponsor" in copy["text"].splitlines()[0] and "copy" not in owner_msg["text"].lower()
+    assert "1. b · t_1" in copy["text"] and "2. b · t_2" in copy["text"]
 
 
 def test_escalation_without_escalate_to_is_owner_only_and_urgent(tmp_path, fake_tg, clock):
@@ -296,11 +372,31 @@ def test_escalation_without_escalate_to_is_owner_only_and_urgent(tmp_path, fake_
     assert call["chat_id"] == 111 and call["text"].startswith(t("waits.urgent"))
 
 
-def test_escalate_to_same_as_owner_sends_once(tmp_path, fake_tg, clock):
+def test_escalate_to_same_as_owner_sends_once_and_is_urgent(tmp_path, fake_tg, clock):
+    from ke.messages import t
+
     coord = _coord(tmp_path, fake_tg, clock, escalate_to="sponsor")
     coord.pending_dues = [_due("t_1", stage="escalation")]
     coord._deliver_waits(clock.now)
-    assert fake_tg.count("send") == 1
+    (call,) = fake_tg.calls["send"]
+    assert call["chat_id"] == 111 and call["text"].startswith(t("waits.urgent"))
+
+
+def test_urgent_marker_is_decided_per_owner_in_a_mixed_batch(tmp_path, fake_tg, clock):
+    from ke.messages import t
+
+    coord = _coord(tmp_path, fake_tg, clock, escalate_to="ops")
+    coord.pending_dues = [
+        _due("t_s", owner="sponsor", stage="escalation"),
+        _due("t_o", owner="ops", stage="escalation"),
+    ]
+    coord._deliver_waits(clock.now)
+    by_chat = {}
+    for c in fake_tg.calls["send"]:
+        by_chat.setdefault(c["chat_id"], []).append(c["text"])
+    assert not any(t("waits.urgent") in m for m in by_chat[111])  # ops will hear of sponsor's card
+    assert any(m.startswith(t("waits.urgent")) and "t_o" in m for m in by_chat[222])  # ops IS the escalation
+    assert not any("t_o" in m for m in by_chat[111])
 
 
 def test_non_escalation_stages_are_not_copied(tmp_path, fake_tg, clock):
@@ -310,34 +406,118 @@ def test_non_escalation_stages_are_not_copied(tmp_path, fake_tg, clock):
     assert [c["chat_id"] for c in fake_tg.calls["send"]] == [111]
 
 
-def test_escalation_copy_failure_does_not_unmark_the_owner_delivery(tmp_path, fake_tg, clock):
+def test_escalation_copy_is_retried_until_it_lands_without_resending_to_the_owner(tmp_path, fake_tg, clock):
     from ke.telegram import TelegramError
 
     coord = _coord(tmp_path, fake_tg, clock, escalate_to="ops")
     due = _due("t_1", stage="escalation")
-    coord.store.upsert_wait(due.board, due.task_id, due.version, due.owner, 0)
+    _wait_row(coord, due)
+    attempts, fail = _track(coord, fake_tg, {222: TelegramError(500, "down")})
     coord.pending_dues = [due]
-    orig = fake_tg.send
-
-    def send(chat_id, text, **kw):
-        if chat_id == 222:
-            raise TelegramError(500, "down")
-        return orig(chat_id, text, **kw)
-
-    fake_tg.send = send
     coord._deliver_waits(clock.now)
-    assert coord.store.latest_wait(due.board, due.task_id)["stage"] == "escalation"  # owner got it
+    assert attempts == [111, 222]
+    assert _stage(coord, due) is None and coord.pending_dues == [due]  # not done: the copy is missing
+    coord._tg_down = False
+    coord.pending_dues = [due]  # the tracker offers the still-unsent wait again
+    coord._deliver_waits(clock.now)
+    assert attempts == [111, 222, 222]  # only the copy again
+    del fail[222]
+    coord.pending_dues = [due]
+    coord._deliver_waits(clock.now)
+    assert attempts == [111, 222, 222, 222]
+    assert _stage(coord, due) == "escalation" and coord.pending_dues == []
+    coord.pending_dues = [due]  # even if offered once more nothing is re-sent
+    coord._deliver_waits(clock.now)
+    assert attempts == [111, 222, 222, 222]
 
 
-def test_escalation_not_copied_when_owner_send_failed(tmp_path, fake_tg, clock):
+def test_escalation_copy_is_sent_when_the_owner_send_failed(tmp_path, fake_tg, clock):
     from ke.telegram import TelegramError
 
     coord = _coord(tmp_path, fake_tg, clock, escalate_to="ops")
-    coord.pending_dues = [_due("t_1", stage="escalation")]
-    fake_tg.fail_next = TelegramError(429, "slow down")
+    due = _due("t_1", stage="escalation")
+    _wait_row(coord, due)
+    attempts, fail = _track(coord, fake_tg, {111: TelegramError(400, "chat not found")})
+    coord.pending_dues = [due]
     coord._deliver_waits(clock.now)
-    assert fake_tg.count("send") == 0 and len(coord.pending_dues) == 1
+    assert attempts == [111, 222]
+    assert _stage(coord, due) is None and coord.pending_dues == [due]
+    del fail[111]
+    coord.pending_dues = [due]
+    coord._deliver_waits(clock.now)
+    assert attempts == [111, 222, 111]  # the copy is not repeated
+    assert _stage(coord, due) == "escalation" and coord.pending_dues == []
 
+
+def test_escalation_copy_is_sent_when_the_owner_has_no_chat_id(tmp_path, fake_tg, clock):
+    coord = _coord(tmp_path, fake_tg, clock, escalate_to="ops")
+    due = _due("t_1", owner="ghost", stage="escalation")
+    _wait_row(coord, due)
+    coord.pending_dues = [due]
+    coord._deliver_waits(clock.now)
+    (call,) = fake_tg.calls["send"]
+    assert call["chat_id"] == 222 and "ghost" in call["text"].splitlines()[0]
+    assert _stage(coord, due) is None  # the owner never got it
+    coord.pending_dues = [due]
+    coord._deliver_waits(clock.now)
+    assert fake_tg.count("send") == 1
+
+
+def test_transport_failure_aborts_the_whole_pass(tmp_path, fake_tg, clock):
+    coord = _coord(tmp_path, fake_tg, clock, escalate_to="ops")
+    coord.pending_dues = [
+        _due("t_1", owner="sponsor", stage="escalation"),
+        _due("t_2", owner="ops", stage="reminder1"),
+    ]
+    attempts, _ = _track(coord, fake_tg, {111: OSError("network is down")})
+    coord._deliver_waits(clock.now)
+    assert attempts == [111]  # not the other owner, not the escalation copy
+    assert len(coord.pending_dues) == 2
+
+
+def test_transport_failure_in_the_veto_warning_skips_the_deliveries(tmp_path, fake_tg, clock):
+    coord = _coord(tmp_path, fake_tg, clock, veto_hooks=False)
+    due = _due("t_1")
+    coord.waits.collect_due = lambda now: [due]
+    attempts, fail = _track(coord, fake_tg, {111: OSError("timed out")})
+    coord.evaluate(1000.0)
+    assert attempts == [111] and len(coord.pending_dues) == 1
+    del fail[111]
+    coord.evaluate(1001.0)  # the veto warning is backing off, the reminder goes out
+    assert attempts == [111, 111] and coord.pending_dues == []
+
+
+def test_http_errors_do_not_abort_the_pass(tmp_path, fake_tg, clock):
+    from ke.telegram import TelegramError
+
+    coord = _coord(tmp_path, fake_tg, clock)
+    coord.pending_dues = [_due("t_1", owner="sponsor"), _due("t_2", owner="ops")]
+    attempts, _ = _track(coord, fake_tg, {111: TelegramError(400, "bad")})
+    coord._deliver_waits(clock.now)
+    assert attempts == [111, 222]
+
+
+def test_at_most_three_messages_per_owner_per_pass(tmp_path, fake_tg, clock):
+    coord = _coord(tmp_path, fake_tg, clock)
+    dues = [_due(f"t_{i:02d}", need="x" * 900) for i in range(30)]
+    coord.pending_dues = list(dues)
+    coord._deliver_waits(clock.now)
+    assert fake_tg.count("send") == 3
+    sent_ids = {i["task_id"] for r in _sent_rows(coord) for i in json.loads(r["items_json"])}
+    assert [d.task_id for d in coord.pending_dues] == [d.task_id for d in dues if d.task_id not in sent_ids]
+    assert 0 < len(sent_ids) < 30
+    coord._deliver_waits(clock.now)  # the next evaluation carries on with the rest
+    assert fake_tg.count("send") == 6
+
+
+def test_cap_is_per_recipient(tmp_path, fake_tg, clock):
+    coord = _coord(tmp_path, fake_tg, clock)
+    coord.pending_dues = [_due(f"a{i:02d}", need="x" * 900) for i in range(20)] + [
+        _due(f"b{i:02d}", owner="ops", need="x" * 900) for i in range(20)
+    ]
+    coord._deliver_waits(clock.now)
+    chats = [c["chat_id"] for c in fake_tg.calls["send"]]
+    assert chats.count(111) == 3 and chats.count(222) == 3
 
 def test_missing_chat_id_warns_once_and_does_not_mark_sent(tmp_path, fake_tg, clock, caplog):
     coord = _coord(tmp_path, fake_tg, clock)
@@ -430,15 +610,18 @@ def test_veto_warning_is_sent_once_to_default_owner(tmp_path, fake_tg, clock):
     assert coord.store.kv_get("veto_hooks_warn_sent") == "1"
 
 
-def test_veto_warning_send_failure_is_retried_later(tmp_path, fake_tg, clock):
+def test_veto_warning_send_failure_is_retried_with_backoff(tmp_path, fake_tg, clock):
     from ke.telegram import TelegramError
 
     coord = _coord(tmp_path, fake_tg, clock, veto_hooks=False)
     fake_tg.fail_next = TelegramError(500, "x")
-    coord.evaluate(1.0)
+    coord.evaluate(1000.0)
     assert coord.store.kv_get("veto_hooks_warned") == "1"  # logged
     assert coord.store.kv_get("veto_hooks_warn_sent") is None
-    coord.evaluate(2.0)
+    coord.evaluate(1030.0)
+    coord.evaluate(1000.0 + 599)
+    assert fake_tg.count("send") == 0  # still backing off (a failed attempt consumed fail_next)
+    coord.evaluate(1000.0 + 600)
     assert fake_tg.count("send") == 1 and coord.store.kv_get("veto_hooks_warn_sent") == "1"
 
 

@@ -83,6 +83,7 @@ EN: dict[str, str] = {
     "waits.held.many": "What is held behind: {n} cards ({ids}).",
     "waits.how.single": "How to reply: reply \"done\" to this message or run: hermes kanban-empowered done {id}",
     "waits.how.group": "How to reply: reply \"{n} done\" to this message or run: hermes kanban-empowered done <id>",
+    "waits.copy_of": "Escalated copy: this was sent to {owner}.",
     "waits.urgent": "🚨 URGENT: no escalation contact is configured, so only you received this.",
     # setup warnings
     "veto.warning": "kanban-empowered: this Hermes build lacks the kanban veto hooks (kanban_pre_claim / kanban_pre_complete). Guards run in cooperative-only mode. Run: hermes kanban-empowered doctor",
@@ -195,14 +196,30 @@ def _clip_item(text: str, limit: int) -> str:
     head, footer, middle = lines[0], lines[-1], "\n".join(lines[1:-1])
     budget = limit - _tg_len(head) - _tg_len(footer) - 2
     if budget < 2:  # pathological: no room for a footer, plain clip
-        return text[: max(0, limit - 1)] + "…"
-    while middle and _tg_len(middle) + 1 > budget:
-        middle = middle[:-1]
-    return "\n".join([head, middle.rstrip() + "…", footer])
+        return _prefix(text, max(0, limit - 1)) + "…"
+    return "\n".join([head, _prefix(middle, budget - 1).rstrip() + "…", footer])
+
+
+def _prefix(text: str, units: int) -> str:
+    """The longest prefix of ``text`` that is at most ``units`` UTF-16 units long (binary search)."""
+    if _tg_len(text) <= units:
+        return text
+    lo, hi = 0, len(text)  # invariant: text[:lo] fits
+    while lo < hi:
+        mid = (lo + hi + 1) // 2
+        if _tg_len(text[:mid]) <= units:
+            lo = mid
+        else:
+            hi = mid - 1
+    return text[:lo]
 
 
 def render_waits_chunks(
-    owner: str, dues: list, urgent_escalation: bool = False, limit: int = TELEGRAM_LIMIT
+    owner: str,
+    dues: list,
+    urgent_escalation: bool = False,
+    limit: int = TELEGRAM_LIMIT,
+    lead: str = "",
 ) -> list[tuple[str, list]]:
     """Reminder messages for ``owner``, each within the Telegram limit, as ``(text, dues)`` pairs.
 
@@ -210,11 +227,12 @@ def render_waits_chunks(
     exceeds the limit is clipped (its head and reply footer are kept). Numbering restarts at 1
     in every message and ``dues`` is that message's item list, in numbering order, so a reply
     to a message maps "n done" to ``dues[n - 1]`` of that message and no other.
-    ``urgent_escalation`` marks the messages that carry an escalation (nobody to escalate to).
+    ``urgent_escalation`` marks the messages that carry an escalation (nobody else will hear of
+    it); ``lead`` is a line put first in every message (e.g. who an escalated copy is from).
     """
     def render(chunk: list, clip: bool = False) -> str:
         urgent = urgent_escalation and any(d.stage == "escalation" for d in chunk)
-        marker = t("waits.urgent") + "\n" if urgent else ""
+        marker = (lead + "\n" if lead else "") + (t("waits.urgent") + "\n" if urgent else "")
         text = render_waits(owner, chunk)
         return marker + (_clip_item(text, limit - _tg_len(marker)) if clip else text)
 

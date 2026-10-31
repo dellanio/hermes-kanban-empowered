@@ -84,6 +84,11 @@ class TelegramClient:
                     description = str(data.get("description") or description)
             except Exception:
                 pass
+            finally:
+                try:
+                    exc.close()
+                except Exception:
+                    pass
             raise TelegramError(status, self._scrub(description)) from None
         except TelegramError:
             raise
@@ -95,6 +100,9 @@ class TelegramClient:
             raise TelegramError(None, "invalid JSON from the Bot API") from None
         if not isinstance(data, dict) or not data.get("ok"):
             data = data if isinstance(data, dict) else {}
-            code = data.get("error_code")
-            raise TelegramError(int(code) if code else None, self._scrub(str(data.get("description", ""))))
+            try:
+                code = int(data.get("error_code"))
+            except (TypeError, ValueError):
+                code = None
+            raise TelegramError(code or None, self._scrub(str(data.get("description", ""))))
         return data.get("result")

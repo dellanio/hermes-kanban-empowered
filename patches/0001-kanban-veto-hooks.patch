@@ -40,7 +40,7 @@ index e1c36a8111..5bdfb24598 100644
                  # complete_task returns bare False for a dependency refusal too;
                  # name the open parents instead of claiming the id is unknown.
 diff --git a/hermes_cli/kanban_db.py b/hermes_cli/kanban_db.py
-index 4279503ff5..a725e9084b 100644
+index 4279503ff5..379dacbaa4 100644
 --- a/hermes_cli/kanban_db.py
 +++ b/hermes_cli/kanban_db.py
 @@ -191,6 +191,27 @@ def _kanban_observer_consumed(event: str) -> bool:
@@ -51,8 +51,8 @@ index 4279503ff5..a725e9084b 100644
 +    """Fire a VETO hook (``kanban_pre_claim`` / ``kanban_pre_complete``) BEFORE the board
 +    write; return the first ``{"refuse": "<reason>"}`` a plugin answers with, else ``None``.
 +
-+    Fail-open: nothing subscribed, a malformed answer, a raising callback or a
-+    failure of the dispatch itself all mean "proceed as if unhooked" — only an explicit
++    Fail-open: nothing subscribed, a malformed answer, a raising or timed-out callback
++    (bounded by ``kanban.veto_hook_timeout_seconds``) or a failure of the dispatch itself all mean "proceed as if unhooked" — only an explicit
 +    refusal vetoes, so a broken plugin can never wedge the board."""
 +    if not _kanban_observer_consumed(event):
 +        return None
@@ -71,29 +71,38 @@ index 4279503ff5..a725e9084b 100644
  def _fire_worker_spawned_hook(
      conn: sqlite3.Connection, task: Task, workspace_path: str, pid: Optional[int], *,
      board: Optional[str] = None,
-@@ -2194,6 +2215,21 @@ def claim_task(
+@@ -2194,6 +2215,30 @@ def claim_task(
          _reclaim_dangling_run(
              conn, task_id, statuses=("ready",), now=now, note="invariant recovery on re-claim",
          )
-+        # Plugin veto (kanban_pre_claim): the card stays 'ready'. The event is logged once per
-+        # distinct reason so a dispatcher re-trying every tick doesn't flood the log.
-+        trow = conn.execute(
-+            "SELECT status, assignee, workspace_path FROM tasks WHERE id = ?", (task_id,),
-+        ).fetchone()
++        # Plugin veto (kanban_pre_claim): the card stays 'ready'. Logged once per distinct reason per
++        # claim episode: a dispatcher re-trying every tick doesn't flood the log, but a refusal after a
++        # newer ``claimed`` event (a fresh episode) is logged again.
++        trow = (
++            conn.execute(
++                "SELECT status, assignee, workspace_path FROM tasks WHERE id = ?", (task_id,),
++            ).fetchone()
++            if _kanban_observer_consumed("kanban_pre_claim") else None
++        )
 +        if trow is not None and trow["status"] == "ready":
 +            refused = _kanban_veto_reason(
 +                "kanban_pre_claim", task_id, assignee=trow["assignee"],
 +                workspace_path=trow["workspace_path"], claimer=lock,
 +            )
 +            if refused is not None:
-+                last = _json_dict(_row_get(_latest_event(conn, task_id, "claim_refused"), "payload"))
-+                if last.get("reason") != refused:
++                last = conn.execute(
++                    "SELECT kind, payload FROM task_events "
++                    "WHERE task_id = ? AND kind IN ('claimed', 'claim_refused') "
++                    "ORDER BY id DESC LIMIT 1", (task_id,),
++                ).fetchone()
++                if (last is None or last["kind"] != "claim_refused"
++                        or _json_dict(last["payload"]).get("reason") != refused):
 +                    _append_event(conn, task_id, "claim_refused", {"reason": refused, "by": "plugin"})
 +                return None
          run_id = _claim_and_open_run(conn, task_id, "ready", lock, expires, now)
          if run_id is None:
              return None
-@@ -2622,6 +2658,16 @@ class LiveClaimError(ValueError):
+@@ -2622,6 +2667,16 @@ class LiveClaimError(ValueError):
          )
  
  
@@ -110,7 +119,7 @@ index 4279503ff5..a725e9084b 100644
  def _claim_is_live(trow) -> bool:
      """True when a ``running`` task's claim still protects a run: the worker process
      it spawned exists (PID + start-time fingerprint). A claim whose worker is gone,
-@@ -2640,7 +2686,7 @@ def complete_task(
+@@ -2640,7 +2695,7 @@ def complete_task(
      conn: sqlite3.Connection, task_id: str, *, result: Optional[str] = None,
      summary: Optional[str] = None, metadata: Optional[dict] = None,
      created_cards: Optional[Iterable[str]] = None, expected_run_id: Optional[int] = None,
@@ -119,23 +128,27 @@ index 4279503ff5..a725e9084b 100644
  ) -> bool:
      """``running|ready|blocked|review -> done``; records ``result``.
  
-@@ -2658,11 +2704,29 @@ def complete_task(
+@@ -2658,11 +2713,33 @@ def complete_task(
      or ``summary``, or a stripped result already stored on the card. Empty or
      whitespace-only evidence raises :class:`EmptyCompletionError` after an
      auditable event. Approving a card out of ``review`` stays exempt.
 +
 +    ``actor`` (profile, ``cli:<user>``, ``dashboard``) is only handed to the
-+    ``kanban_pre_complete`` veto hook; a plugin refusal raises :class:`CompletionRefused`
++    ``kanban_pre_complete`` veto hook (fired for running/ready/blocked/review cards); a plugin refusal raises :class:`CompletionRefused`
 +    (after a ``completion_refused`` event) before any gate or write.
      """
      now = int(time.time())
      # Cheap pre-check; re-checked inside the txn to close the parent-reopen race.
      if not _parents_satisfied(conn, task_id):
          return False
-+    hook_row = conn.execute(
-+        "SELECT assignee, current_run_id FROM tasks WHERE id = ?", (task_id,),
-+    ).fetchone()
-+    if hook_row is not None:
++    hook_row = (
++        conn.execute(
++            "SELECT status, assignee, current_run_id FROM tasks WHERE id = ?", (task_id,),
++        ).fetchone()
++        if _kanban_observer_consumed("kanban_pre_complete") else None
++    )
++    # Terminal cards (done/archived/...) skip the veto and keep the existing "cannot complete" outcome.
++    if hook_row is not None and hook_row["status"] in ("running", "ready", "blocked", "review"):
 +        refused = _kanban_veto_reason(
 +            "kanban_pre_complete", task_id, assignee=hook_row["assignee"], actor=actor,
 +            force=force, summary=summary if summary is not None else result,
@@ -150,32 +163,136 @@ index 4279503ff5..a725e9084b 100644
      verified_cards = _gate_created_cards(conn, task_id, created_cards, summary or result)
      _gate_empty_completion(conn, task_id, result=result, summary=summary)
 diff --git a/hermes_cli/plugins.py b/hermes_cli/plugins.py
-index 14e13ab00e..cfee914df8 100644
+index 14e13ab00e..1776cb4582 100644
 --- a/hermes_cli/plugins.py
 +++ b/hermes_cli/plugins.py
-@@ -159,6 +159,20 @@ VALID_HOOKS: set[str] = {
+@@ -159,6 +159,23 @@ VALID_HOOKS: set[str] = {
      # spawn; completed/blocked fire in the WORKER (or whichever process drove it). Kwargs: task_id,
      # board, assignee, run_id, profile_name; completed adds summary, blocked adds reason.
      "kanban_task_claimed", "kanban_task_completed", "kanban_task_blocked",
 +    # Kanban VETO hooks (hermes_cli.kanban_db), fired BEFORE the board write; the only kanban hooks whose
-+    # return value matters. A callback returns None (proceed) or {"refuse": "<reason>"} (first refusal wins);
-+    # raising or returning anything else is fail-open (logged, board proceeds as if unhooked). Callbacks run
-+    # on the caller thread with no timeout (not in _HOOK_TIMEOUT_*): keep them fast and non-blocking.
++    # return value matters. A callback returns None (proceed) or {"refuse": "<reason>"} (first refusal wins).
++    # Fail-open: raising, returning anything else, or exceeding the short cap (kanban.veto_hook_timeout_seconds,
++    # default 3s; worker abandoned, see _HOOK_TIMEOUT_BOUNDED_HOOKS) lets the board proceed as if unhooked.
++    # Callbacks run on a helper thread: keep them fast, and never write kanban.db from them.
 +    # kanban_pre_claim: inside claim_task's write txn, after status == 'ready' is confirmed, before the claim
 +    #   is written. Kwargs: task_id, board, assignee, workspace_path, claimer. A refusal makes claim_task
 +    #   return None, leaves the card 'ready' and appends a `claim_refused` event {reason, by: "plugin"}
-+    #   (not repeated while the latest claim_refused carries the same reason). Stay fast: the SQLite
-+    #   write lock is held.
-+    # kanban_pre_complete: start of complete_task, after the row is loaded, before any completion gate or
-+    #   write. Kwargs: task_id, board, assignee, actor (profile | "cli:<os user>" | "dashboard" | None),
-+    #   force, summary, metadata, run_id. A refusal appends a `completion_refused` event {reason, by:
-+    #   "plugin"} and raises kanban_db.CompletionRefused(reason); the card is not mutated.
++    #   (not repeated while the newest claimed/claim_refused event is a claim_refused with the same reason).
++    #   The caller HOLDS the SQLite write lock: a callback that writes kanban.db would block on it until the
++    #   cap expires, so it must NOT touch the board DB (read-only access from another connection is fine).
++    # kanban_pre_complete: start of complete_task, after the row is loaded (only for running/ready/blocked/
++    #   review cards), before any completion gate or write. Kwargs: task_id, board, assignee, actor (profile |
++    #   "cli:<os user>" | "dashboard" | None), force, summary, metadata, run_id. A refusal appends a
++    #   `completion_refused` event {reason, by: "plugin"} and raises kanban_db.CompletionRefused(reason);
++    #   the card is not mutated.
 +    "kanban_pre_claim", "kanban_pre_complete",
      # Kanban worker/mutation/tick observers; returns ignored; fire sites short-circuit on
      # has_hook(). Kwargs: task_id, profile_name, board, assignee, run_id plus, per hook:
      # worker_spawned (DISPATCHER, after PID persisted, inside the dispatch lock — stay fast):
+@@ -1080,6 +1097,28 @@ for _name, _method in list(vars(PluginContext).items()):
+ del _name, _method
+ 
+ 
++_KANBAN_VETO_TIMEOUT_SECS = 3.0
++
++
++def _resolve_kanban_veto_timeout() -> float:
++    """Callback cap for the kanban veto hooks from ``kanban.veto_hook_timeout_seconds`` (default 3s).
++    ``kanban_pre_claim`` runs under the board's write lock, so the cap is short, always positive (a
++    non-positive or non-numeric value falls back to the default rather than unbounding the hook) and
++    clamped to ``_MAX_HOOK_CALLBACK_TIMEOUT_SECS``."""
++    default = _KANBAN_VETO_TIMEOUT_SECS
++    try:
++        kanban_cfg = (load_config_readonly() or {}).get("kanban")
++        if not isinstance(kanban_cfg, dict) or kanban_cfg.get("veto_hook_timeout_seconds") is None:
++            return default
++        timeout = float(kanban_cfg["veto_hook_timeout_seconds"])
++    except Exception:
++        return default
++    if timeout <= 0:
++        logger.warning("kanban.veto_hook_timeout_seconds=%g is not positive; using default %gs", timeout, default)
++        return default
++    return min(timeout, _MAX_HOOK_CALLBACK_TIMEOUT_SECS)
++
++
+ def _resolve_hook_callback_timeout() -> float:
+     """Effective hook-callback timeout from ``plugins.hook_callback_timeout`` (default 30s; ``<= 0``
+     disables the threaded path; clamped to ``_MAX_HOOK_CALLBACK_TIMEOUT_SECS``).
+diff --git a/hermes_cli/plugins_dispatch.py b/hermes_cli/plugins_dispatch.py
+index accb9c5ddc..263c11bdf0 100644
+--- a/hermes_cli/plugins_dispatch.py
++++ b/hermes_cli/plugins_dispatch.py
+@@ -27,7 +27,10 @@ logger = logging.getLogger("hermes_cli.plugins")
+ # abandon without join — joining reintroduced a shutdown hang). Unlisted hooks run synchronously.
+ # Intentionally unbounded: on_session_finalize/reset (last-chance flush — abandon can lose state);
+ # subagent_start (observer); pre_gateway_dispatch (policy gate — neither fail mode is acceptable);
+-# pre/post_approval_* (approval UX has its own timeout); kanban_* (own heartbeat/stale reclaim).
++# pre/post_approval_* (approval UX has its own timeout); kanban_task_* observers (own heartbeat/stale
++# reclaim). The kanban VETO hooks (kanban_pre_claim / kanban_pre_complete) ARE bounded, by their own short
++# cap (_resolve_kanban_veto_timeout, default 3s): kanban_pre_claim runs while the caller holds the SQLite
++# write lock, so a hung callback must be abandoned (fail-open) instead of wedging every board writer.
+ # The goal is to stop a hung Python plugin callback from wedging the conversation loop (#76821) without
+ # joining the worker (avoids the #6622 ThreadPoolExecutor shutdown hang). Hooks not listed below run
+ # synchronously to completion. (on_session_start/end stay bounded — they sit on the common session-boundary
+@@ -49,12 +52,27 @@ _HOOK_TIMEOUT_BOUNDED_HOOKS: set[str] = {
+     "pre_command",
+     # Fires inside the compression commit window (lease held): a hung plugin must not wedge the session.
+     "post_compaction",
++    # Kanban veto hooks: fail-open (abandoned worker -> _HOOK_SKIPPED -> the board proceeds) under the
++    # dedicated cap from _hook_timeout_for, NOT the 30s global one.
++    "kanban_pre_claim", "kanban_pre_complete",
+ }
+ # Hooks whose calls are told apart by another payload field: one session's commands are one
+ # sequence, so a still-running callback skips that session's next command, not another session's.
+ _HOOK_CALL_IDENTITY_FIELDS: dict[str, tuple[str, ...]] = {
+     "pre_command": ("session_key",), "post_compaction": ("session_id",),
++    "kanban_pre_claim": ("task_id",), "kanban_pre_complete": ("task_id",),
+ }
++_KANBAN_VETO_HOOKS = frozenset({"kanban_pre_claim", "kanban_pre_complete"})
++
++
++def _hook_timeout_for(hook_name: str) -> float:
++    """Callback timeout for *hook_name*: the short kanban veto cap for the veto hooks, else the global
++    ``plugins.hook_callback_timeout``."""
++    from hermes_cli.plugins import _resolve_hook_callback_timeout, _resolve_kanban_veto_timeout
++
++    if hook_name in _KANBAN_VETO_HOOKS:
++        return _resolve_kanban_veto_timeout()
++    return _resolve_hook_callback_timeout()
+ 
+ # Policy hooks: timeout / still-running must fail closed (block the tool).
+ _HOOK_TIMEOUT_FAIL_CLOSED_HOOKS: set[str] = {"pre_tool_call"}
+@@ -266,13 +284,12 @@ class PluginDispatchMixin:
+ 
+         if safe_worker_enabled():
+             return []
+-        from hermes_cli.plugins import _resolve_hook_callback_timeout
+         # Gateway platform events define event-local envelopes; a bus-wide version here would turn
+         # unrelated adapter payloads into one monolithic compatibility contract.
+         if hook_name != "gateway_platform_event":
+             kwargs.setdefault("telemetry_schema_version", OBSERVER_SCHEMA_VERSION)
+         results: list[Any] = []
+-        timeout = _resolve_hook_callback_timeout()
++        timeout = _hook_timeout_for(hook_name)
+         use_timeout = _hook_uses_callback_timeout(hook_name, timeout)
+         fail_closed = hook_name in _HOOK_TIMEOUT_FAIL_CLOSED_HOOKS
+         for cb in self._hooks.get(hook_name, []):
+@@ -545,11 +562,10 @@ class PluginDispatchMixin:
+         run inline. Bounded hooks keep ``plugins.hook_callback_timeout`` via ``asyncio.wait_for``
+         (the coroutine is cancelled, not abandoned); a timed-out ``pre_tool_call`` fails closed.
+         """
+-        from hermes_cli.plugins import _resolve_hook_callback_timeout
+         if hook_name != "gateway_platform_event":
+             kwargs.setdefault("telemetry_schema_version", OBSERVER_SCHEMA_VERSION)
+         results: list[Any] = []
+-        timeout = _resolve_hook_callback_timeout()
++        timeout = _hook_timeout_for(hook_name)
+         use_timeout = _hook_uses_callback_timeout(hook_name, timeout)
+         fail_closed = hook_name in _HOOK_TIMEOUT_FAIL_CLOSED_HOOKS
+         for cb in self._hooks.get(hook_name, []):
 diff --git a/plugins/kanban/dashboard/plugin_api.py b/plugins/kanban/dashboard/plugin_api.py
-index c38f8e399b..d69b29e818 100644
+index c38f8e399b..60f50e58b0 100644
 --- a/plugins/kanban/dashboard/plugin_api.py
 +++ b/plugins/kanban/dashboard/plugin_api.py
 @@ -25,7 +25,7 @@ from typing import Any, Callable, Iterator, Optional
@@ -196,7 +313,7 @@ index c38f8e399b..d69b29e818 100644
      "blocked": lambda conn, tid, p: kanban_db.block_task(conn, tid, reason=getattr(p, "block_reason", None)),
      "scheduled": lambda conn, tid, p: kanban_db.schedule_task(conn, tid, reason=getattr(p, "block_reason", None)),
      "review": lambda conn, tid, p: kanban_db.request_review(
-@@ -700,7 +700,11 @@ def update_task(task_id: str, payload: UpdateTaskBody, board: Optional[str] = Qu
+@@ -700,7 +700,12 @@ def update_task(task_id: str, payload: UpdateTaskBody, board: Optional[str] = Qu
              with _map_errors(409, RuntimeError):
                  _require_ok(kanban_db.assign_task(conn, task_id, payload.assignee or None))
          if payload.status is not None:
@@ -204,17 +321,18 @@ index c38f8e399b..d69b29e818 100644
 +            try:
 +                _patch_status(conn, task_id, payload, review_assignee_deferred)
 +            except kanban_db.CompletionRefused as refused:  # kanban_pre_complete plugin veto
-+                return JSONResponse(
-+                    status_code=409, content={"error": "completion_refused", "reason": refused.reason})
++                # ``detail`` mirrors HTTPException bodies so the UI toast shows the reason too.
++                return JSONResponse(status_code=409, content={
++                    "error": "completion_refused", "reason": refused.reason, "detail": refused.reason})
          for wanted, apply, _refused in _OVERRIDE_OPS:
              if wanted(payload):
                  with _map_errors(400, ValueError, RuntimeError):
 diff --git a/tests/hermes_cli/test_kanban_veto_hooks.py b/tests/hermes_cli/test_kanban_veto_hooks.py
 new file mode 100644
-index 0000000000..b5da7087a3
+index 0000000000..689db99c37
 --- /dev/null
 +++ b/tests/hermes_cli/test_kanban_veto_hooks.py
-@@ -0,0 +1,340 @@
+@@ -0,0 +1,446 @@
 +"""Tests for the ``kanban_pre_claim`` / ``kanban_pre_complete`` veto hooks.
 +
 +Unlike the observer hooks (``kanban_task_claimed`` & co.), these two fire BEFORE the
@@ -226,9 +344,12 @@ index 0000000000..b5da7087a3
 +from __future__ import annotations
 +
 +import argparse
++import importlib
 +import importlib.util
 +import json
 +import sys
++import threading
++import time
 +from pathlib import Path
 +
 +import pytest
@@ -466,6 +587,107 @@ index 0000000000..b5da7087a3
 +    assert "why" in str(err)
 +
 +
++def test_pre_claim_new_episode_logs_refusal_again(kanban_home, register):
++    """The dedupe is per claim episode: a ``claimed`` event newer than the last
++    ``claim_refused`` resets it, so the same reason is logged again."""
++    veto = {"on": True}
++    register("kanban_pre_claim", lambda **kw: {"refuse": "busy"} if veto["on"] else None)
++    with kbc.connect_closing() as conn:
++        tid = kb.create_task(conn, title="deploy")
++        assert kb.claim_task(conn, tid) is None
++        assert kb.claim_task(conn, tid) is None
++        assert _kinds(conn, tid).count("claim_refused") == 1
++        veto["on"] = False
++        assert kb.claim_task(conn, tid) is not None
++        assert kb.reclaim_task(conn, tid)
++        assert kb.get_task(conn, tid).status == "ready"
++        veto["on"] = True
++        assert kb.claim_task(conn, tid) is None
++        assert kb.claim_task(conn, tid) is None
++        assert _kinds(conn, tid).count("claim_refused") == 2
++
++
++def test_pre_complete_not_fired_for_terminal_card(kanban_home, register):
++    calls = []
++    register("kanban_pre_complete", lambda **kw: calls.append(kw))
++    with kbc.connect_closing() as conn:
++        tid = kb.create_task(conn, title="t")
++        assert kb.complete_task(conn, tid, summary="ok")
++        assert len(calls) == 1
++        assert kb.complete_task(conn, tid, summary="again") is False  # already done
++        assert len(calls) == 1
++
++
++def test_veto_hooks_not_queried_without_subscribers(kanban_home, monkeypatch):
++    """No subscriber -> no hook-only SELECT, no dispatch."""
++    from hermes_cli import lifecycle
++
++    fired = []
++    monkeypatch.setattr(lifecycle, "invoke_hook", lambda *a, **k: fired.append(a))
++    with kbc.connect_closing() as conn:
++        tid = kb.create_task(conn, title="t")
++        assert kb.claim_task(conn, tid) is not None
++        assert kb.complete_task(conn, tid, summary="ok", force=True)
++    assert not [a for a in fired if a and str(a[0]).startswith("kanban_pre_")]
++
++
++# --- bounded callbacks (fail-open on a hung plugin) -----------------------------
++
++def test_veto_hooks_are_bounded():
++    from hermes_cli import plugins_dispatch
++
++    assert "kanban_pre_claim" in plugins_dispatch._HOOK_TIMEOUT_BOUNDED_HOOKS
++    assert "kanban_pre_complete" in plugins_dispatch._HOOK_TIMEOUT_BOUNDED_HOOKS
++
++
++def test_veto_timeout_resolution(monkeypatch):
++    mod = importlib.import_module("hermes_cli.plugins")
++    dispatch = importlib.import_module("hermes_cli.plugins_dispatch")
++
++    def cfg(value):
++        monkeypatch.setattr(mod, "load_config_readonly", lambda: {"kanban": {"veto_hook_timeout_seconds": value}})
++        return mod._resolve_kanban_veto_timeout()
++
++    monkeypatch.setattr(mod, "load_config_readonly", lambda: {})
++    assert mod._resolve_kanban_veto_timeout() == 3.0
++    assert cfg(0.25) == 0.25
++    assert cfg(0) == 3.0 and cfg(-1) == 3.0 and cfg("x") == 3.0
++    assert cfg(10**6) == mod._MAX_HOOK_CALLBACK_TIMEOUT_SECS
++    # the dedicated cap applies to the veto hooks only
++    monkeypatch.setattr(mod, "load_config_readonly", lambda: {
++        "kanban": {"veto_hook_timeout_seconds": 0.5}, "plugins": {"hook_callback_timeout": 12}})
++    assert dispatch._hook_timeout_for("kanban_pre_claim") == 0.5
++    assert dispatch._hook_timeout_for("kanban_pre_complete") == 0.5
++    assert dispatch._hook_timeout_for("post_tool_call") == 12
++
++
++def test_hung_callbacks_fail_open_within_the_cap(kanban_home, register, monkeypatch):
++    mod = importlib.import_module("hermes_cli.plugins")
++    monkeypatch.setattr(mod, "load_config_readonly", lambda: {"kanban": {"veto_hook_timeout_seconds": 0.3}})
++    release = threading.Event()
++
++    def hung(**kw):
++        release.wait(30)  # far longer than the cap
++        return {"refuse": "too late"}
++
++    register("kanban_pre_claim", hung)
++    register("kanban_pre_complete", hung)
++    try:
++        with kbc.connect_closing() as conn:
++            tid = kb.create_task(conn, title="t")
++            started = time.monotonic()
++            assert kb.claim_task(conn, tid) is not None  # fail-open: claim proceeds
++            assert time.monotonic() - started < 5
++            assert "claim_refused" not in _kinds(conn, tid)
++            started = time.monotonic()
++            assert kb.complete_task(conn, tid, summary="ok", force=True)  # fail-open
++            assert time.monotonic() - started < 5
++            assert kb.get_task(conn, tid).status == "done"
++            assert "completion_refused" not in _kinds(conn, tid)
++    finally:
++        release.set()
++
++
 +# --- surfaces -----------------------------------------------------------------
 +
 +def test_cli_complete_prints_refused_and_exits_1(kanban_home, register, capsys):
@@ -544,7 +766,9 @@ index 0000000000..b5da7087a3
 +        json={"status": "done", "result": "done", "summary": "done"},
 +    )
 +    assert r.status_code == 409
-+    assert r.json() == {"error": "completion_refused", "reason": "gate sem veredito"}
++    assert r.json() == {
++        "error": "completion_refused", "reason": "gate sem veredito", "detail": "gate sem veredito",
++    }
 +    assert seen[0]["actor"] == "dashboard"
 +    with kbc.connect_closing() as conn:
 +        assert kb.get_task(conn, tid).status != "done"

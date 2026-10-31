@@ -56,6 +56,29 @@ def _latest_blocked(events: list) -> Any:
     return max(blocked, key=lambda e: e.id) if blocked else None
 
 
+def block_version(events: list) -> int:
+    """Version of a card's current block: its latest ``blocked`` event id, 0 when it has none."""
+    ev = _latest_blocked(events)
+    return int(ev.id) if ev is not None else 0
+
+
+def held_behind(api: Any, conn: Any, tid: str) -> list[str]:
+    """``todo`` descendants of ``tid``, breadth first, each once (only ``todo`` cards are walked)."""
+    held: list[str] = []
+    seen = {tid}
+    queue = deque([tid])
+    while queue:
+        for child in api.children(conn, queue.popleft()):
+            if child in seen:
+                continue
+            seen.add(child)
+            task = api.task(conn, child)
+            if task is not None and task.status == "todo":
+                held.append(child)
+                queue.append(child)
+    return held
+
+
 class WaitTracker:
     def __init__(self, settings: Settings, store: Store, api: Any = hermes_api) -> None:
         self.settings = settings
@@ -181,7 +204,7 @@ class WaitTracker:
                 return None  # re-blocked since the last sync: the new version is not tracked yet
             reason = _payload(ev).get("reason") if ev is not None else None
             reason = reason if isinstance(reason, str) else ""
-            held = self._held_behind(conn, tid)
+            held = held_behind(self.api, conn, tid)
         return Due(
             board=board,
             task_id=tid,
@@ -193,22 +216,6 @@ class WaitTracker:
             held_behind=held,
             reason=reason,
         )
-
-    def _held_behind(self, conn: Any, tid: str) -> list[str]:
-        """``todo`` descendants of ``tid``, breadth first, each once (only ``todo`` cards are walked)."""
-        held: list[str] = []
-        seen = {tid}
-        queue = deque([tid])
-        while queue:
-            for child in self.api.children(conn, queue.popleft()):
-                if child in seen:
-                    continue
-                seen.add(child)
-                task = self.api.task(conn, child)
-                if task is not None and task.status == "todo":
-                    held.append(child)
-                    queue.append(child)
-        return held
 
     # -- sent ----------------------------------------------------------------
     def mark_sent(self, due: Due, now: float) -> None:

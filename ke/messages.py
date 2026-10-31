@@ -85,6 +85,19 @@ EN: dict[str, str] = {
     "waits.how.group": "How to reply: reply \"{n} done\" to this message or run: hermes kanban-empowered done <id>",
     "waits.copy_of": "Escalated copy: this was sent to {owner}.",
     "waits.urgent": "🚨 URGENT: no escalation contact is configured, so only you received this.",
+    # inbound replies (Telegram) and the done command
+    "inbound.which_item": 'Which item? Reply "<n> done" with a number from 1 to {n}.',
+    "inbound.changed": "This request has changed since that message; nothing was changed.",
+    "inbound.expired": "This request has expired; nothing was changed.",
+    "inbound.not_owner": "This request belongs to {owner}; only they can resolve it.",
+    "inbound.error": "Something went wrong while processing this reply; check the card with: hermes kanban-empowered explain {id}",
+    "inbound.unblocked": "✅ Unblocked {board} · {id}.",
+    "inbound.held.none": "Nothing else is waiting on it.",
+    "inbound.held.one": "Next in line behind it: 1 card ({ids}).",
+    "inbound.held.many": "Next in line behind it: {n} cards ({ids}).",
+    "inbound.comment.telegram": "unblocked via Telegram by {name} ({user_id}): {text}",
+    "inbound.comment.cli": "unblocked via CLI by {user}",
+    "done.no_wait": "card {card} on board {board} has no open human wait; nothing was changed",
     # setup warnings
     "veto.warning": "kanban-empowered: this Hermes build lacks the kanban veto hooks (kanban_pre_claim / kanban_pre_complete). Guards run in cooperative-only mode. Run: hermes kanban-empowered doctor",
 }
@@ -178,6 +191,18 @@ def render_waits(owner: str, dues: list) -> str:
         lines.extend("   " + body for body in _wait_body(due))
     lines.append(t("waits.how.group", n=1))
     return "\n".join(lines)
+
+
+def render_done(board: str, task_id: str, held: list) -> str:
+    """Confirmation after a human resolved a wait: the card and what is next in line behind it."""
+    held = list(held)
+    if not held:
+        tail = t("inbound.held.none")
+    else:
+        shown = held[:_HELD_IDS_SHOWN]
+        ids = ", ".join(shown) + (", …" if len(held) > len(shown) else "")
+        tail = t("inbound.held.one", ids=ids) if len(held) == 1 else t("inbound.held.many", n=len(held), ids=ids)
+    return "\n".join([t("inbound.unblocked", board=board, id=task_id), tail])
 
 
 # -- Telegram delivery: size limit, splitting, urgent marker ------------------------------

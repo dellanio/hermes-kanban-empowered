@@ -35,6 +35,19 @@ def _telegram_from_env():
     return TelegramClient(token)
 
 
+def _register_inbound(ctx, settings, store, telegram) -> None:
+    """Register the ``pre_gateway_dispatch`` reply handler, in the coordinator profile only."""
+    try:
+        from .ke import hermes_api
+        from .ke.inbound import make_dispatch_hook
+
+        if hermes_api.active_profile() != settings.coordinator_profile:
+            return
+        ctx.register_hook("pre_gateway_dispatch", make_dispatch_hook(settings, store, hermes_api, telegram))
+    except Exception:
+        log.exception("kanban-empowered: failed to register the Telegram reply handler")
+
+
 def register(ctx) -> None:
     """Wire the dispatch-tick hook and the ``kanban-empowered`` CLI command.
 
@@ -66,6 +79,7 @@ def register(ctx) -> None:
                 coordinator.on_tick(board, result, dry_run=dry_run, **kw)
 
             ctx.register_hook("on_kanban_dispatch_tick", on_tick)
+            _register_inbound(ctx, settings, store, coordinator.telegram)
         except Exception:
             log.exception("kanban-empowered: failed to start the coordinator; hooks not registered")
 

@@ -35,6 +35,12 @@ class TelegramClient:
         self.timeout_s = timeout_s
         self._opener = opener
 
+    @property
+    def bot_id(self) -> Optional[int]:
+        """The bot's own user id (the numeric prefix of the token ``<id>:<secret>``), or ``None``."""
+        head = (self._token or "").split(":", 1)[0].strip()
+        return int(head) if head.isdigit() else None
+
     # -- Bot API methods ---------------------------------------------------
     def send(self, chat_id: int, text: str, reply_to: Optional[int] = None) -> int:
         """Send ``text`` (plain, no parse mode) and return the new ``message_id``."""

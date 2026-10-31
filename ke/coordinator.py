@@ -215,9 +215,11 @@ class Coordinator:
 
         ``counts`` is the per-pass message tally per recipient (capped at MAX_MESSAGES_PER_PASS).
         ``on_sent`` runs for each due right after its message went out; marking waits as sent
-        is left to the caller. A failed send calls ``on_failed(items, exc, terminal)``: ``items`` is
-        the chunk, or for a terminal 4xx (400/403: the chat itself is unusable) every item not yet
-        sent; a terminal 4xx also ends the group (one attempt per pass, logged once per error).
+        is left to the caller. A failed send calls ``on_failed(items, exc, terminal)`` (escalation
+        copies only): ``items`` is the chunk, or for a terminal 400/403 every item not yet sent,
+        and the group ends. Without ``on_failed`` (owner reminders) a 403 ends the group for the
+        pass (the chat is unusable), while a 400 is message-level: the next chunk is still tried.
+        Rejections are logged once per (chat, status, error).
         """
         chat_id = self.settings.owner_ids.get(recipient)
         if chat_id is None:
@@ -233,8 +235,11 @@ class Coordinator:
                 message_id = self._tg_send(chat_id, text)
             except Exception as exc:
                 status = getattr(exc, "status", None)
-                terminal = status in TERMINAL_HTTP
-                if status is not None and 400 <= status < 500 and status != 429:
+                # only an escalation copy (on_failed) gives up for good on a 400/403
+                terminal = on_failed is not None and status in TERMINAL_HTTP
+                if terminal:
+                    pass  # on_failed logs the single give-up warning
+                elif status is not None and 400 <= status < 500 and status != 429:
                     # a permanent rejection repeats every pass: say it once per (chat, error)
                     self._warn_once(
                         f"send:{chat_id}:{status}:{exc}",
@@ -248,9 +253,10 @@ class Coordinator:
                         on_failed(rest, exc, terminal)
                     except Exception:
                         log.exception("kanban-empowered: could not record a delivery failure")
-                if terminal or status is None or status == 429 or status >= 500:
-                    break  # unusable chat / transport trouble / rate limit: retry on a later pass
-                continue  # any other rejected message (4xx) must not hold back the ones behind it
+                if terminal or status in (None, 403, 429) or status >= 500:
+                    # 403 (bot blocked / chat unusable), transport trouble, rate limit: retry next pass
+                    break
+                continue  # a message-level 4xx (e.g. 400) must not hold back the chunks behind it
             try:
                 self.store.add_sent_message(
                     message_id,

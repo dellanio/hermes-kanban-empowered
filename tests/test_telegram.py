@@ -473,8 +473,8 @@ def test_permanent_copy_rejection_gives_up_after_one_attempt(tmp_path, fake_tg, 
     acts = [a for a in coord.store.actions_since(0) if a["kind"] == "escalation_copy_failed"]
     assert len(acts) == 1 and (acts[0]["board"], acts[0]["task_id"]) == ("b", "t_1")
     assert "bot was blocked" in acts[0]["detail"]
-    warns = [r for r in caplog.records if "escalation copy" in r.getMessage()]
-    assert len(warns) == 1 and "blocked" in warns[0].getMessage()
+    warns = [r for r in caplog.records if r.levelno >= logging.WARNING]
+    assert len(warns) == 1 and "escalation copy" in warns[0].getMessage() and "blocked" in warns[0].getMessage()
 
 
 def test_permanent_copy_rejection_gives_up_every_pending_card_of_the_group(tmp_path, fake_tg, clock):
@@ -487,6 +487,27 @@ def test_permanent_copy_rejection_gives_up_every_pending_card_of_the_group(tmp_p
     coord._deliver_waits(clock.now)
     assert attempts.count(222) == 1  # the first copy message fails, the rest are given up with it
     assert all(coord.store.kv_get(f"esc_copy:b:{d.task_id}:1") == "gave_up" for d in dues)
+
+
+def test_owner_400_on_one_chunk_does_not_hold_back_the_next(tmp_path, fake_tg, clock, caplog):
+    from ke.telegram import TelegramError
+
+    coord = _coord(tmp_path, fake_tg, clock)
+    dues = [_due(f"t_{i:02d}", need="x" * 900) for i in range(10)]  # three messages
+    for d in dues:
+        _wait_row(coord, d)
+    fake_tg.fail_next = TelegramError(400, "Bad Request: can't parse message text")  # first chunk only
+    coord.pending_dues = list(dues)
+    with caplog.at_level(logging.WARNING):
+        coord._deliver_waits(clock.now)
+    assert fake_tg.count("send") == 2  # chunks 2 and 3 went out
+    sent_ids = [i["task_id"] for r in _sent_rows(coord) for i in json.loads(r["items_json"])]
+    assert sent_ids == [d.task_id for d in dues[-len(sent_ids):]]
+    assert all(_stage(coord, d) == "reminder1" for d in dues if d.task_id in sent_ids)
+    unsent = [d for d in dues if d.task_id not in sent_ids]
+    assert unsent and all(_stage(coord, d) is None for d in unsent)  # the rejected chunk stays unmarked
+    assert [d.task_id for d in coord.pending_dues] == [d.task_id for d in unsent]
+    assert len([r for r in caplog.records if "rejected" in r.getMessage()]) == 1
 
 
 def test_permanent_owner_rejection_is_one_attempt_per_pass_and_logged_once(tmp_path, fake_tg, clock, caplog):

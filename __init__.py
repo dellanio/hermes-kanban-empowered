@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import atexit
 import logging
+import os
 
 log = logging.getLogger(__name__)
 
@@ -22,6 +23,16 @@ def _register_worker_guard(ctx, settings) -> None:
         ctx.register_hook("pre_tool_call", guard)
     except Exception:
         log.exception("kanban-empowered: failed to register the worker guard")
+
+
+def _telegram_from_env():
+    """A Bot API client from ``TELEGRAM_BOT_TOKEN`` of this process, or ``None`` without a token."""
+    token = (os.environ.get("TELEGRAM_BOT_TOKEN") or "").strip()
+    if not token:
+        return None
+    from .ke.telegram import TelegramClient
+
+    return TelegramClient(token)
 
 
 def register(ctx) -> None:
@@ -48,7 +59,7 @@ def register(ctx) -> None:
             from .ke.store import Store
 
             store = Store(settings.shared_state_dir / "state.db")
-            coordinator = Coordinator(settings, store)
+            coordinator = Coordinator(settings, store, telegram=_telegram_from_env())
             atexit.register(coordinator.leader.release)
 
             def on_tick(board=None, dry_run=False, result=None, **kw):

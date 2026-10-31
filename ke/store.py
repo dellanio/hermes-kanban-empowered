@@ -9,6 +9,7 @@ The file is a plain SQLite DB, so another process can open it read-only
 """
 from __future__ import annotations
 
+import json
 import sqlite3
 import threading
 from pathlib import Path
@@ -162,6 +163,31 @@ class Store:
                 "WHERE board = ? AND task_id = ? AND version = ?",
                 (stage, int(ts), board, task_id, int(version)),
             )
+
+    # -- sent telegram messages (reply mapping) --------------------------
+    def add_sent_message(
+        self, message_id: int, chat_id: int, kind: str, items: list, created_at: int
+    ) -> None:
+        """Remember a message we sent; ``items`` is its numbered item list, in numbering order."""
+        with self.lock:
+            self.conn.execute(
+                "INSERT OR REPLACE INTO sent_messages "
+                "(message_id, chat_id, kind, items_json, created_at) VALUES (?,?,?,?,?)",
+                (int(message_id), int(chat_id), kind, json.dumps(items), int(created_at)),
+            )
+
+    def get_sent_message(self, chat_id: int, message_id: int) -> Optional[dict]:
+        with self.lock:
+            row = self.conn.execute(
+                "SELECT message_id, chat_id, kind, items_json, created_at FROM sent_messages "
+                "WHERE chat_id = ? AND message_id = ?",
+                (int(chat_id), int(message_id)),
+            ).fetchone()
+        if row is None:
+            return None
+        out = dict(row)
+        out["items"] = json.loads(out.pop("items_json"))
+        return out
 
     # -- kv --------------------------------------------------------------
     def kv_get(self, key: str) -> Optional[str]:

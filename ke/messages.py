@@ -83,6 +83,9 @@ EN: dict[str, str] = {
     "waits.held.many": "What is held behind: {n} cards ({ids}).",
     "waits.how.single": "How to reply: reply \"done\" to this message or run: hermes kanban-empowered done {id}",
     "waits.how.group": "How to reply: reply \"{n} done\" to this message or run: hermes kanban-empowered done <id>",
+    "waits.urgent": "🚨 URGENT: no escalation contact is configured, so only you received this.",
+    # setup warnings
+    "veto.warning": "kanban-empowered: this Hermes build lacks the kanban veto hooks (kanban_pre_claim / kanban_pre_complete). Guards run in cooperative-only mode. Run: hermes kanban-empowered doctor",
 }
 
 
@@ -174,3 +177,57 @@ def render_waits(owner: str, dues: list) -> str:
         lines.extend("   " + body for body in _wait_body(due))
     lines.append(t("waits.how.group", n=1))
     return "\n".join(lines)
+
+
+# -- Telegram delivery: size limit, splitting, urgent marker ------------------------------
+TELEGRAM_LIMIT = 4096  # sendMessage text limit (UTF-16 code units)
+
+
+def _tg_len(text: str) -> int:
+    return len(text.encode("utf-16-le")) // 2
+
+
+def _clip_item(text: str, limit: int) -> str:
+    """Fit one rendered item in ``limit``: the head and the reply footer stay, the middle is clipped."""
+    if _tg_len(text) <= limit:
+        return text
+    lines = text.split("\n")
+    head, footer, middle = lines[0], lines[-1], "\n".join(lines[1:-1])
+    budget = limit - _tg_len(head) - _tg_len(footer) - 2
+    if budget < 2:  # pathological: no room for a footer, plain clip
+        return text[: max(0, limit - 1)] + "…"
+    while middle and _tg_len(middle) + 1 > budget:
+        middle = middle[:-1]
+    return "\n".join([head, middle.rstrip() + "…", footer])
+
+
+def render_waits_chunks(
+    owner: str, dues: list, urgent_escalation: bool = False, limit: int = TELEGRAM_LIMIT
+) -> list[tuple[str, list]]:
+    """Reminder messages for ``owner``, each within the Telegram limit, as ``(text, dues)`` pairs.
+
+    Dues are packed in order and a due is never split across messages; a single due that alone
+    exceeds the limit is clipped (its head and reply footer are kept). Numbering restarts at 1
+    in every message and ``dues`` is that message's item list, in numbering order, so a reply
+    to a message maps "n done" to ``dues[n - 1]`` of that message and no other.
+    ``urgent_escalation`` marks the messages that carry an escalation (nobody to escalate to).
+    """
+    def render(chunk: list, clip: bool = False) -> str:
+        urgent = urgent_escalation and any(d.stage == "escalation" for d in chunk)
+        marker = t("waits.urgent") + "\n" if urgent else ""
+        text = render_waits(owner, chunk)
+        return marker + (_clip_item(text, limit - _tg_len(marker)) if clip else text)
+
+    out: list[tuple[str, list]] = []
+    current: list = []
+    for due in dues:
+        if current and _tg_len(render(current + [due])) > limit:
+            out.append((render(current), current))
+            current = []
+        current = current + [due]
+        if len(current) == 1 and _tg_len(render(current)) > limit:
+            out.append((render(current, clip=True), current))
+            current = []
+    if current:
+        out.append((render(current), current))
+    return out

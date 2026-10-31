@@ -1,0 +1,488 @@
+import io
+import json
+import logging
+import urllib.error
+
+import pytest
+
+from conftest import make_coordinator
+from test_waits import _start, make_human_block
+
+H = 3600
+
+
+# -- client --------------------------------------------------------------------
+class _Resp:
+    def __init__(self, body):
+        self._body = json.dumps(body).encode() if not isinstance(body, bytes) else body
+        self.closed = False
+
+    def read(self):
+        return self._body
+
+    def close(self):
+        self.closed = True
+
+
+def fake_opener(calls, body=None, exc=None):
+    def opener(req, timeout=None):
+        calls.append(req)
+        req.timeout_seen = timeout
+        if exc is not None:
+            raise exc
+        return _Resp(body)
+
+    return opener
+
+
+def _client(calls, body=None, exc=None, token="T"):
+    from ke.telegram import TelegramClient
+
+    return TelegramClient(token, opener=fake_opener(calls, body, exc))
+
+
+def test_send_posts_json_and_returns_id():
+    calls = []
+    c = _client(calls, {"ok": True, "result": {"message_id": 42}})
+    assert c.send(6802889854, "oi") == 42
+    req = calls[0]
+    assert req.full_url == "https://api.telegram.org/botT/sendMessage"
+    assert req.get_method() == "POST"
+    assert req.get_header("Content-type") == "application/json"
+    assert json.loads(req.data) == {"chat_id": 6802889854, "text": "oi"}
+    assert req.timeout_seen == 10
+
+
+def test_send_reply_to_and_custom_base_and_timeout():
+    from ke.telegram import TelegramClient
+
+    calls = []
+    c = TelegramClient(
+        "T", base="http://x.test/", timeout_s=3,
+        opener=fake_opener(calls, {"ok": True, "result": {"message_id": 1}}),
+    )
+    c.send(5, "a", reply_to=9)
+    assert calls[0].full_url == "http://x.test/botT/sendMessage"
+    assert json.loads(calls[0].data)["reply_parameters"]["message_id"] == 9
+    assert calls[0].timeout_seen == 3
+
+
+def test_edit_and_pin_payloads():
+    calls = []
+    c = _client(calls, {"ok": True, "result": True})
+    assert c.edit(5, 77, "novo") is None
+    assert c.pin(5, 77) is None
+    assert calls[0].full_url.endswith("/botT/editMessageText")
+    assert json.loads(calls[0].data) == {"chat_id": 5, "message_id": 77, "text": "novo"}
+    assert calls[1].full_url.endswith("/botT/pinChatMessage")
+    assert json.loads(calls[1].data) == {"chat_id": 5, "message_id": 77, "disable_notification": True}
+
+
+def test_api_error_raises():
+    from ke.telegram import TelegramError
+
+    c = _client([], {"ok": False, "error_code": 429, "description": "Too Many Requests"}, token="123:abc")
+    with pytest.raises(TelegramError) as e:
+        c.send(1, "x")
+    assert e.value.status == 429 and e.value.description == "Too Many Requests"
+
+
+def test_http_error_body_is_parsed():
+    from ke.telegram import TelegramError
+
+    body = json.dumps({"ok": False, "error_code": 400, "description": "Bad Request: message to edit not found"})
+    err = urllib.error.HTTPError("u", 400, "Bad Request", {}, io.BytesIO(body.encode()))
+    with pytest.raises(TelegramError) as e:
+        _client([], exc=err).edit(1, 2, "x")
+    assert e.value.status == 400 and "message to edit not found" in e.value.description
+
+
+def test_transport_errors_become_telegram_error_without_the_token():
+    from ke.telegram import TelegramError
+
+    for exc in (urllib.error.URLError("dns failed for botSECRET"), TimeoutError("timed out SECRET")):
+        with pytest.raises(TelegramError) as e:
+            _client([], exc=exc, token="SECRET").send(1, "x")
+        assert e.value.status is None
+        assert "SECRET" not in str(e.value) and "SECRET" not in e.value.description
+
+
+def test_garbage_and_missing_message_id_raise():
+    from ke.telegram import TelegramError
+
+    with pytest.raises(TelegramError):
+        _client([], b"<html>").send(1, "x")
+    with pytest.raises(TelegramError):
+        _client([], {"ok": True, "result": {}}).send(1, "x")
+
+
+def test_client_never_retries():
+    calls = []
+    c = _client(calls, exc=urllib.error.URLError("down"))
+    with pytest.raises(Exception):
+        c.send(1, "x")
+    assert len(calls) == 1
+
+
+# -- message splitting ----------------------------------------------------------
+def _due(task_id="t_1", board="b", owner="sponsor", stage="reminder1", need="n", why="w", age_s=1800, held=()):
+    from ke.asks import Ask
+    from ke.waits import Due
+
+    return Due(board, task_id, 1, owner, stage, age_s, Ask(need, why, "r"), list(held), "")
+
+
+def test_small_batch_is_one_message_with_items_in_order():
+    from ke.messages import render_waits_chunks
+
+    dues = [_due("t_a"), _due("t_b"), _due("t_c")]
+    ((text, items),) = render_waits_chunks("sponsor", dues)
+    assert items == dues and "1. b · t_a" in text and "3. b · t_c" in text
+
+
+def test_oversized_batch_splits_at_item_boundaries_and_numbering_restarts():
+    from ke.messages import _tg_len, render_waits_chunks
+
+    dues = [_due(f"t_{i:02d}", need="x" * 900) for i in range(10)]
+    chunks = render_waits_chunks("sponsor", dues)
+    assert len(chunks) > 1
+    assert [d for _, items in chunks for d in items] == dues  # nothing lost, nothing repeated, order kept
+    for text, items in chunks:
+        assert _tg_len(text) <= 4096
+        if len(items) > 1:  # "n done" in this message maps to items[n-1] of this message only
+            for n, due in enumerate(items, start=1):
+                assert f"{n}. b · {due.task_id}" in text
+        else:
+            assert items[0].task_id in text or "t_" in text
+        assert "x" * 900 in text  # no item is cut when it fits
+
+
+def test_single_oversized_item_is_clipped_keeping_head_and_footer():
+    from ke.messages import _tg_len, render_waits_chunks
+
+    dues = [_due("t_big", need="y" * 6000), _due("t_ok")]
+    chunks = render_waits_chunks("sponsor", dues)
+    assert [[d.task_id for d in items] for _, items in chunks] == [["t_big"], ["t_ok"]]
+    text = chunks[0][0]
+    assert _tg_len(text) <= 4096 and "…" in text
+    assert text.splitlines()[0].startswith("🟠") and text.splitlines()[-1].startswith("How to reply")
+
+
+def test_urgent_marker_only_on_escalation_chunks_when_requested():
+    from ke.messages import render_waits_chunks, t
+
+    esc = [_due("t_e", stage="escalation")]
+    assert render_waits_chunks("s", esc, urgent_escalation=True)[0][0].startswith(t("waits.urgent"))
+    assert t("waits.urgent") not in render_waits_chunks("s", esc)[0][0]
+    assert t("waits.urgent") not in render_waits_chunks("s", [_due()], urgent_escalation=True)[0][0]
+
+
+def test_urgent_marker_fits_in_the_limit():
+    from ke.messages import _tg_len, render_waits_chunks
+
+    (text, _), = render_waits_chunks("s", [_due(stage="escalation", need="z" * 6000)], urgent_escalation=True)
+    assert _tg_len(text) <= 4096 and text.splitlines()[-1].startswith("How to reply")
+
+
+# -- coordinator delivery -------------------------------------------------------
+OWNERS = {"sponsor": 111, "ops": 222}
+
+
+def _coord(tmp_path, fake_tg, clock=None, **kw):
+    kw.setdefault("owner_ids", dict(OWNERS))
+    return make_coordinator(tmp_path, clock=clock, telegram=fake_tg, **kw)
+
+
+def _sent_rows(coord):
+    return [dict(r) for r in coord.store.conn.execute("SELECT * FROM sent_messages ORDER BY message_id")]
+
+
+def _real_wait(coord, clock, **block_kw):
+    from ke import hermes_api
+
+    # the real Hermes here has no veto hooks: mute that warning, it is not what these tests are about
+    coord.store.kv_set("veto_hooks_warned", "1")
+    coord.store.kv_set("veto_hooks_warn_sent", "1")
+    with hermes_api.connect("default") as conn:
+        tid, ev = make_human_block(conn, **block_kw)
+    _start(clock, ev)
+    coord.evaluate(clock.now)  # sync only
+    return tid, ev
+
+
+def test_failed_send_does_not_mark_sent(kanban_home, clock, fake_tg, tmp_path):
+    from ke import hermes_api
+    from ke.telegram import TelegramError
+
+    coord = _coord(tmp_path, fake_tg, clock, api=hermes_api)
+    tid, ev = _real_wait(coord, clock)
+    clock.advance(1800)
+    fake_tg.fail_next = TelegramError(500, "x")
+    coord.evaluate(clock.now)
+    assert fake_tg.count("send") == 0
+    assert coord.store.latest_wait("default", tid)["stage"] is None
+    assert [d.task_id for d in coord.pending_dues] == [tid]
+    assert _sent_rows(coord) == []
+    clock.advance(30)
+    coord.evaluate(clock.now)  # retried on the next evaluation
+    assert fake_tg.count("send") == 1
+    assert coord.store.latest_wait("default", tid)["stage"] == "reminder1"
+    assert coord.pending_dues == []
+
+
+def test_non_telegram_exception_is_contained_too(kanban_home, clock, fake_tg, tmp_path):
+    from ke import hermes_api
+
+    coord = _coord(tmp_path, fake_tg, clock, api=hermes_api)
+    tid, _ = _real_wait(coord, clock)
+    clock.advance(1800)
+    fake_tg.fail_next = OSError("network is down")
+    coord.evaluate(clock.now)
+    assert coord.store.latest_wait("default", tid)["stage"] is None
+
+
+def test_successful_send_records_message_and_marks_sent_once(kanban_home, clock, fake_tg, tmp_path):
+    from ke import hermes_api
+
+    coord = _coord(tmp_path, fake_tg, clock, api=hermes_api)
+    tid, ev = _real_wait(coord, clock)
+    clock.advance(1800)
+    coord.evaluate(clock.now)
+    (call,) = fake_tg.calls["send"]
+    assert call["chat_id"] == 111 and tid in call["text"]
+    (row,) = _sent_rows(coord)
+    assert (row["message_id"], row["chat_id"], row["kind"]) == (call["message_id"], 111, "waits")
+    assert json.loads(row["items_json"]) == [{"board": "default", "task_id": tid, "version": ev.id}]
+    assert row["created_at"] == int(clock.now)
+    assert coord.store.latest_wait("default", tid)["stage"] == "reminder1"
+    clock.advance(30)
+    coord.evaluate(clock.now)
+    assert fake_tg.count("send") == 1
+
+
+def test_dues_are_grouped_one_message_per_owner(tmp_path, fake_tg, clock):
+    coord = _coord(tmp_path, fake_tg, clock)
+    coord.pending_dues = [
+        _due("t_1", owner="sponsor"), _due("t_2", owner="ops"), _due("t_3", owner="sponsor"),
+    ]
+    coord._deliver_waits(clock.now)
+    by_chat = {c["chat_id"]: c for c in fake_tg.calls["send"]}
+    assert set(by_chat) == {111, 222} and fake_tg.count("send") == 2
+    assert "1. b · t_1" in by_chat[111]["text"] and "2. b · t_3" in by_chat[111]["text"]
+    assert "t_2" in by_chat[222]["text"] and "t_1" not in by_chat[222]["text"]
+    rows = {r["chat_id"]: json.loads(r["items_json"]) for r in _sent_rows(coord)}
+    assert [i["task_id"] for i in rows[111]] == ["t_1", "t_3"]  # same order as the numbering
+    assert coord.pending_dues == []
+
+
+def test_escalation_goes_to_owner_and_escalate_to(tmp_path, fake_tg, clock):
+    from ke.messages import t
+
+    coord = _coord(tmp_path, fake_tg, clock, escalate_to="ops")
+    coord.pending_dues = [_due("t_1", stage="escalation", age_s=8 * H)]
+    coord._deliver_waits(clock.now)
+    assert sorted(c["chat_id"] for c in fake_tg.calls["send"]) == [111, 222]
+    assert all(t("waits.urgent") not in c["text"] for c in fake_tg.calls["send"])
+    assert {r["chat_id"] for r in _sent_rows(coord)} == {111, 222}
+
+
+def test_escalation_without_escalate_to_is_owner_only_and_urgent(tmp_path, fake_tg, clock):
+    from ke.messages import t
+
+    coord = _coord(tmp_path, fake_tg, clock)
+    coord.pending_dues = [_due("t_1", stage="escalation", age_s=8 * H)]
+    coord._deliver_waits(clock.now)
+    (call,) = fake_tg.calls["send"]
+    assert call["chat_id"] == 111 and call["text"].startswith(t("waits.urgent"))
+
+
+def test_escalate_to_same_as_owner_sends_once(tmp_path, fake_tg, clock):
+    coord = _coord(tmp_path, fake_tg, clock, escalate_to="sponsor")
+    coord.pending_dues = [_due("t_1", stage="escalation")]
+    coord._deliver_waits(clock.now)
+    assert fake_tg.count("send") == 1
+
+
+def test_non_escalation_stages_are_not_copied(tmp_path, fake_tg, clock):
+    coord = _coord(tmp_path, fake_tg, clock, escalate_to="ops")
+    coord.pending_dues = [_due("t_1", stage="reminder2"), _due("t_2", stage="digest")]
+    coord._deliver_waits(clock.now)
+    assert [c["chat_id"] for c in fake_tg.calls["send"]] == [111]
+
+
+def test_escalation_copy_failure_does_not_unmark_the_owner_delivery(tmp_path, fake_tg, clock):
+    from ke.telegram import TelegramError
+
+    coord = _coord(tmp_path, fake_tg, clock, escalate_to="ops")
+    due = _due("t_1", stage="escalation")
+    coord.store.upsert_wait(due.board, due.task_id, due.version, due.owner, 0)
+    coord.pending_dues = [due]
+    orig = fake_tg.send
+
+    def send(chat_id, text, **kw):
+        if chat_id == 222:
+            raise TelegramError(500, "down")
+        return orig(chat_id, text, **kw)
+
+    fake_tg.send = send
+    coord._deliver_waits(clock.now)
+    assert coord.store.latest_wait(due.board, due.task_id)["stage"] == "escalation"  # owner got it
+
+
+def test_escalation_not_copied_when_owner_send_failed(tmp_path, fake_tg, clock):
+    from ke.telegram import TelegramError
+
+    coord = _coord(tmp_path, fake_tg, clock, escalate_to="ops")
+    coord.pending_dues = [_due("t_1", stage="escalation")]
+    fake_tg.fail_next = TelegramError(429, "slow down")
+    coord._deliver_waits(clock.now)
+    assert fake_tg.count("send") == 0 and len(coord.pending_dues) == 1
+
+
+def test_missing_chat_id_warns_once_and_does_not_mark_sent(tmp_path, fake_tg, clock, caplog):
+    coord = _coord(tmp_path, fake_tg, clock)
+    due = _due("t_1", owner="ghost")
+    coord.store.upsert_wait(due.board, due.task_id, due.version, "ghost", 0)
+    other = _due("t_2", owner="sponsor")
+    coord.pending_dues = [due, other]
+    with caplog.at_level(logging.WARNING):
+        coord._deliver_waits(clock.now)
+        coord.pending_dues = [due]
+        coord._deliver_waits(clock.now)
+    assert [c["chat_id"] for c in fake_tg.calls["send"]] == [111]  # the other owner still got theirs
+    assert coord.store.latest_wait(due.board, due.task_id)["stage"] is None
+    assert [d.task_id for d in coord.pending_dues] == ["t_1"]
+    warns = [r for r in caplog.records if "ghost" in r.getMessage()]
+    assert len(warns) == 1
+
+
+def test_missing_escalate_to_chat_id_does_not_block_the_owner(tmp_path, fake_tg, clock):
+    coord = _coord(tmp_path, fake_tg, clock, escalate_to="nobody")
+    coord.pending_dues = [_due("t_1", stage="escalation")]
+    coord._deliver_waits(clock.now)
+    assert [c["chat_id"] for c in fake_tg.calls["send"]] == [111]
+    assert coord.pending_dues == []
+
+
+def test_no_telegram_client_logs_once_and_keeps_dues(tmp_path, clock, caplog):
+    coord = make_coordinator(tmp_path, clock=clock, owner_ids=dict(OWNERS))
+    coord.pending_dues = [_due("t_1")]
+    with caplog.at_level(logging.WARNING):
+        coord._deliver_waits(clock.now)
+        coord._deliver_waits(clock.now)
+    assert len([r for r in caplog.records if "TELEGRAM_BOT_TOKEN" in r.getMessage()]) == 1
+    assert len(coord.pending_dues) == 1
+
+
+def test_oversized_group_is_split_and_each_message_has_its_own_items(tmp_path, fake_tg, clock):
+    coord = _coord(tmp_path, fake_tg, clock)
+    dues = [_due(f"t_{i}", need="x" * 900) for i in range(10)]
+    coord.pending_dues = dues
+    coord._deliver_waits(clock.now)
+    assert fake_tg.count("send") > 1
+    rows = _sent_rows(coord)
+    assert len(rows) == fake_tg.count("send")
+    all_ids = [i["task_id"] for r in rows for i in json.loads(r["items_json"])]
+    assert all_ids == [d.task_id for d in dues]
+    for call, row in zip(fake_tg.calls["send"], rows):
+        assert len(call["text"].encode("utf-16-le")) // 2 <= 4096
+        items = json.loads(row["items_json"])
+        if len(items) > 1:
+            assert f"{len(items)}. b · {items[-1]['task_id']}" in call["text"]
+    assert coord.pending_dues == []
+
+
+def test_rate_limit_stops_that_owner_but_not_the_others(tmp_path, fake_tg, clock):
+    from ke.telegram import TelegramError
+
+    coord = _coord(tmp_path, fake_tg, clock)
+    coord.pending_dues = [_due(f"t_{i}", need="x" * 900) for i in range(10)]
+    coord.pending_dues.append(_due("t_ops", owner="ops"))
+    fake_tg.fail_next = TelegramError(429, "slow down")
+    coord._deliver_waits(clock.now)
+    assert [c["chat_id"] for c in fake_tg.calls["send"]] == [222]  # sponsor's batch halted at once
+    assert len(coord.pending_dues) == 10
+
+
+def test_delivery_failure_does_not_stop_later_steps(tmp_path, fake_tg, clock):
+    coord = _coord(tmp_path, fake_tg, clock)
+    ran = []
+    coord.register_step("guards", lambda now: ran.append("guards"))
+
+    def boom():
+        raise RuntimeError("x")
+
+    coord._deliver_waits = lambda now: boom()
+    coord.evaluate(clock.now)
+    assert ran == ["guards"]
+
+
+# -- veto hooks warning over Telegram -------------------------------------------
+def test_veto_warning_is_sent_once_to_default_owner(tmp_path, fake_tg, clock):
+    from ke.messages import t
+
+    coord = _coord(tmp_path, fake_tg, clock, veto_hooks=False)
+    coord.evaluate(1.0)
+    coord.evaluate(2.0)
+    (call,) = fake_tg.calls["send"]
+    assert call["chat_id"] == 111 and call["text"] == t("veto.warning")
+    assert coord.store.kv_get("veto_hooks_warned") == "1"
+    assert coord.store.kv_get("veto_hooks_warn_sent") == "1"
+
+
+def test_veto_warning_send_failure_is_retried_later(tmp_path, fake_tg, clock):
+    from ke.telegram import TelegramError
+
+    coord = _coord(tmp_path, fake_tg, clock, veto_hooks=False)
+    fake_tg.fail_next = TelegramError(500, "x")
+    coord.evaluate(1.0)
+    assert coord.store.kv_get("veto_hooks_warned") == "1"  # logged
+    assert coord.store.kv_get("veto_hooks_warn_sent") is None
+    coord.evaluate(2.0)
+    assert fake_tg.count("send") == 1 and coord.store.kv_get("veto_hooks_warn_sent") == "1"
+
+
+def test_veto_warning_waits_for_a_telegram_client(tmp_path, clock, fake_tg):
+    coord = make_coordinator(tmp_path, clock=clock, veto_hooks=False, owner_ids=dict(OWNERS))
+    coord.evaluate(1.0)
+    assert coord.store.kv_get("veto_hooks_warn_sent") is None
+    coord.telegram = fake_tg
+    coord.evaluate(2.0)
+    assert fake_tg.count("send") == 1
+
+
+def test_veto_warning_without_default_owner_chat_is_logged_not_sent(tmp_path, fake_tg, clock):
+    coord = _coord(tmp_path, fake_tg, clock, veto_hooks=False, owner_ids={"ops": 222})
+    coord.evaluate(1.0)
+    assert fake_tg.count("send") == 0 and coord.store.kv_get("veto_hooks_warn_sent") is None
+
+
+def test_veto_warning_not_sent_when_hooks_present(tmp_path, fake_tg, clock):
+    coord = _coord(tmp_path, fake_tg, clock, veto_hooks=True)
+    coord.evaluate(1.0)
+    assert fake_tg.count("send") == 0
+
+
+# -- plugin wiring --------------------------------------------------------------
+def test_register_builds_the_client_only_with_a_token(load_plugin, monkeypatch):
+    mod = load_plugin("ke_plugin_tg")
+    monkeypatch.delenv("TELEGRAM_BOT_TOKEN", raising=False)
+    assert mod._telegram_from_env() is None
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "123:abc")
+    client = mod._telegram_from_env()
+    assert type(client).__name__ == "TelegramClient"
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "   ")
+    assert mod._telegram_from_env() is None
+
+
+# -- store ----------------------------------------------------------------------
+def test_store_sent_message_roundtrip(tmp_path):
+    from ke.store import Store
+
+    s = Store(tmp_path / "s.db")
+    items = [{"board": "b", "task_id": "t", "version": 3}]
+    s.add_sent_message(10, 99, "waits", items, 1234)
+    assert s.get_sent_message(99, 10) == {
+        "message_id": 10, "chat_id": 99, "kind": "waits", "items": items, "created_at": 1234,
+    }
+    assert s.get_sent_message(99, 11) is None

@@ -15,7 +15,8 @@ import time
 from typing import Any, Callable, Optional
 
 from . import hermes_api
-from .messages import render_waits_chunks, t
+from .guards_watch import GuardWatch
+from .messages import render_guard_chunks, render_waits_chunks, t
 from .leader import LeaderLock
 from .settings import Settings
 from .store import Store
@@ -54,9 +55,13 @@ class Coordinator:
         # in ``pending_dues`` for the sender; nothing is marked sent here.
         self.waits = WaitTracker(settings, store, api)
         self.pending_dues: list[Due] = []
+        # Respawn guards: every board tick feeds the watch (see ``on_tick``); the guards step
+        # sends the alerts that are due.
+        self.guards = GuardWatch(settings, store, api)
         self._warned: set[str] = set()  # log-once keys (per process)
         self._tg_down = False
         self.register_step("waits", self._waits_step)
+        self.register_step("guards", self._guards_step)
 
     # -- wiring --------------------------------------------------------------
     def register_step(self, name: str, fn: Step) -> None:
@@ -69,6 +74,53 @@ class Coordinator:
         self.waits.sync(now)
         self.pending_dues = self.waits.collect_due(now)
         self._deliver_waits(now)
+
+    # -- respawn guards ------------------------------------------------------------
+    def _guards_step(self, now: float) -> None:
+        """Alert each board's owner, in one message, about the guards that outlasted the limit.
+
+        ``GuardWatch.observe`` already ran on every tick; here only the due, unalerted rows are
+        sent. An alert is marked only after its message went out, so a failure is retried on the
+        next evaluation. Bounded like the reminders: ``MAX_MESSAGES_PER_PASS`` per recipient and
+        a transport failure ends the pass.
+        """
+        due = self.guards.due_alerts(now)
+        if not due or not self._telegram_ready():
+            return
+        due = self.guards.enrich(due, now)
+        if not due:
+            return
+        by_owner: dict[str, list[dict]] = {}
+        for alert in due:
+            by_owner.setdefault(self.settings.owner_for(alert["board"]), []).append(alert)
+        counts: dict[str, int] = {}
+        for owner, group in by_owner.items():
+            if self._tg_down:
+                break
+            chat_id = self._owner_chat(owner)
+            if chat_id is None:
+                continue
+            for text, items in render_guard_chunks(group):
+                if self._tg_down or counts.get(owner, 0) >= MAX_MESSAGES_PER_PASS:
+                    break
+                counts[owner] = counts.get(owner, 0) + 1
+                try:
+                    message_id = self._tg_send(chat_id, text)
+                except Exception as exc:
+                    self._log_send_failure(owner, chat_id, exc)
+                    if self._send_ends_pass(exc):
+                        break
+                    continue
+                # kind "guard": the reply handler only resolves kind "waits", so "done" to this does nothing
+                self._record_sent(
+                    message_id, chat_id, "guard",
+                    [{"board": a["board"], "task_id": a["task_id"]} for a in items], now,
+                )
+                for alert in items:
+                    try:
+                        self.guards.mark_alerted(alert, now)
+                    except Exception:
+                        log.exception("kanban-empowered: could not mark a guard alert as sent")
 
     # -- Telegram delivery of the reminders -------------------------------------
     def _warn_once(self, key: str, msg: str, *args: Any) -> None:
@@ -85,6 +137,56 @@ class Coordinator:
                 self._tg_down = True
             raise
 
+    def _telegram_ready(self) -> bool:
+        """False (with a once-only warning) when this process has no Bot API client."""
+        if self.telegram is None:
+            self._warn_once(
+                "no_telegram",
+                "kanban-empowered: TELEGRAM_BOT_TOKEN is not set in the coordinator process; "
+                "Telegram messages are disabled",
+            )
+            return False
+        return True
+
+    def _owner_chat(self, owner: str) -> Optional[int]:
+        """The Telegram chat id of ``owner`` (a once-only warning and ``None`` when unknown)."""
+        chat_id = self.settings.owner_ids.get(owner)
+        if chat_id is None:
+            self._warn_once("no_chat:" + owner, "kanban-empowered: no Telegram chat id for owner %r", owner)
+        return chat_id
+
+    def _log_send_failure(self, recipient: str, chat_id: int, exc: Exception, terminal: bool = False) -> None:
+        """Log a failed send: a permanent rejection once per (chat, error), anything else every time.
+
+        ``terminal`` (the caller gives up for good and logs that itself) logs nothing here.
+        """
+        status = getattr(exc, "status", None)
+        if terminal:
+            return
+        if status is not None and 400 <= status < 500 and status != 429:
+            # a permanent rejection repeats every pass: say it once per (chat, error)
+            self._warn_once(
+                f"send:{chat_id}:{status}:{exc}",
+                "kanban-empowered: Telegram rejected the message to %r: %s", recipient, exc,
+            )
+        else:
+            log.warning("kanban-empowered: Telegram send to %r failed: %s", recipient, exc)
+
+    @staticmethod
+    def _send_ends_pass(exc: Exception) -> bool:
+        """403 (chat unusable), transport trouble, 429 or 5xx: the rest waits for a later pass.
+
+        A message-level 4xx (e.g. 400) does not: the messages behind it are still tried.
+        """
+        status = getattr(exc, "status", None)
+        return status is None or status in (403, 429) or status >= 500
+
+    def _record_sent(self, message_id: int, chat_id: int, kind: str, items: list, now: float) -> None:
+        try:
+            self.store.add_sent_message(message_id, chat_id, kind, items, int(now))
+        except Exception:
+            log.exception("kanban-empowered: could not record sent message %s", message_id)
+
     def _deliver_waits(self, now: float) -> None:
         """Send ``pending_dues`` grouped by owner; ``mark_sent`` only for what was actually sent.
 
@@ -100,12 +202,7 @@ class Coordinator:
         dues = list(self.pending_dues)
         if not dues:
             return
-        if self.telegram is None:
-            self._warn_once(
-                "no_telegram",
-                "kanban-empowered: TELEGRAM_BOT_TOKEN is not set in the coordinator process; "
-                "Telegram messages are disabled",
-            )
+        if not self._telegram_ready():
             return
         s = self.settings
         target = s.escalate_to
@@ -221,9 +318,8 @@ class Coordinator:
         pass (the chat is unusable), while a 400 is message-level: the next chunk is still tried.
         Rejections are logged once per (chat, status, error).
         """
-        chat_id = self.settings.owner_ids.get(recipient)
+        chat_id = self._owner_chat(recipient)
         if chat_id is None:
-            self._warn_once("no_chat:" + recipient, "kanban-empowered: no Telegram chat id for owner %r", recipient)
             return []
         sent: list[Due] = []
         chunks = render_waits_chunks(label, group, urgent_escalation=urgent, lead=lead)
@@ -237,36 +333,21 @@ class Coordinator:
                 status = getattr(exc, "status", None)
                 # only an escalation copy (on_failed) gives up for good on a 400/403
                 terminal = on_failed is not None and status in TERMINAL_HTTP
-                if terminal:
-                    pass  # on_failed logs the single give-up warning
-                elif status is not None and 400 <= status < 500 and status != 429:
-                    # a permanent rejection repeats every pass: say it once per (chat, error)
-                    self._warn_once(
-                        f"send:{chat_id}:{status}:{exc}",
-                        "kanban-empowered: Telegram rejected the message to %r: %s", recipient, exc,
-                    )
-                else:
-                    log.warning("kanban-empowered: Telegram send to %r failed: %s", recipient, exc)
+                self._log_send_failure(recipient, chat_id, exc, terminal)  # terminal: on_failed logs it
                 if on_failed is not None:
                     rest = [d for _, chunk_items in chunks[index:] for d in chunk_items] if terminal else items
                     try:
                         on_failed(rest, exc, terminal)
                     except Exception:
                         log.exception("kanban-empowered: could not record a delivery failure")
-                if terminal or status in (None, 403, 429) or status >= 500:
+                if terminal or self._send_ends_pass(exc):
                     # 403 (bot blocked / chat unusable), transport trouble, rate limit: retry next pass
                     break
                 continue  # a message-level 4xx (e.g. 400) must not hold back the chunks behind it
-            try:
-                self.store.add_sent_message(
-                    message_id,
-                    chat_id,
-                    "waits",
-                    [{"board": d.board, "task_id": d.task_id, "version": d.version} for d in items],
-                    int(now),
-                )
-            except Exception:
-                log.exception("kanban-empowered: could not record sent message %s", message_id)
+            self._record_sent(
+                message_id, chat_id, "waits",
+                [{"board": d.board, "task_id": d.task_id, "version": d.version} for d in items], now,
+            )
             for due in items:
                 if on_sent is not None:
                     try:
@@ -289,6 +370,7 @@ class Coordinator:
             now = self.clock()
             if not self.leader.acquire(now):  # also renews the heartbeat when we lead
                 return
+            self._observe_guards(board, result, now)  # every tick, whatever the evaluation throttle says
             last = self.store.kv_get("last_eval")
             if last is not None:
                 try:
@@ -300,6 +382,15 @@ class Coordinator:
             self.evaluate(now)
         except Exception:
             log.exception("kanban-empowered: coordinator tick failed (board=%s)", board)
+
+    def _observe_guards(self, board: str, result: Any, now: float) -> None:
+        guarded = getattr(result, "respawn_guarded", None)
+        if guarded is None:
+            return
+        try:
+            self.guards.observe(board, list(guarded), now)
+        except Exception:
+            log.exception("kanban-empowered: recording the respawn guards of board %r failed", board)
 
     # -- evaluation ----------------------------------------------------------
     def evaluate(self, now: float) -> None:
@@ -337,17 +428,10 @@ class Coordinator:
         Retried on later evaluations until it lands, but after a failed attempt at most once
         every ``VETO_RETRY_S``.
         """
-        if self.telegram is None:
-            self._warn_once(
-                "no_telegram",
-                "kanban-empowered: TELEGRAM_BOT_TOKEN is not set in the coordinator process; "
-                "Telegram messages are disabled",
-            )
+        if not self._telegram_ready():
             return
-        owner = self.settings.default_owner
-        chat_id = self.settings.owner_ids.get(owner)
+        chat_id = self._owner_chat(self.settings.default_owner)
         if chat_id is None:
-            self._warn_once("no_chat:" + owner, "kanban-empowered: no Telegram chat id for owner %r", owner)
             return
         last = self.store.kv_get("veto_hooks_warn_try")
         try:

@@ -11,6 +11,8 @@ the YAML catalogs and Hermes use.
 """
 from __future__ import annotations
 
+import time
+
 from . import hermes_api
 
 PREFIX = "kanban_empowered."
@@ -97,6 +99,23 @@ EN: dict[str, str] = {
     "inbound.comment.telegram": "unblocked via Telegram by {name} ({user_id}): {text}",
     "inbound.comment.cli": "unblocked via CLI by {user}",
     "done.no_wait": "card {card} on board {board} has no open human wait; nothing was changed",
+    # guards: alert about cards held by a respawn guard, and the release command
+    "guards.head.one": "🔒 1 card is stuck behind a respawn guard",
+    "guards.head.many": "🔒 {n} cards are stuck behind a respawn guard",
+    "guards.item.line": "{n}. {board} · {id} · {title}",
+    "guards.item.detail": "   Held for {age} · {reason} · assigned to {assignee}",
+    "guards.item.pr": "   Latest PR: {url} (commented {when})",
+    "guards.no_assignee": "nobody",
+    "guards.reason.active_pr": "a PR is already open (active_pr)",
+    "guards.reason.blocker_auth": "quota or auth blocker (blocker_auth)",
+    "guards.how": "To hand a card to another profile, run: hermes kanban-empowered release <id> --to <profile>",
+    "release.done": "released: assigned to {to}",
+    "release.no_profile": "profile {to} does not exist",
+    "release.same_profile": "handing off to the same profile does not release the guard",
+    "release.no_exit": "no compatible exit: {reason}",
+    "release.no_guard": "no guard",
+    "release.running": "card is running; release not possible now",
+    "release.comment": "released the respawn guard ({reason}): assigned to {to} (was {previous}) by {actor}",
     # setup warnings
     "veto.warning": "kanban-empowered: this Hermes build lacks the kanban veto hooks (kanban_pre_claim / kanban_pre_complete). Guards run in cooperative-only mode. Run: hermes kanban-empowered doctor",
 }
@@ -273,3 +292,57 @@ def render_waits_chunks(
     if current:
         out.append((render(current), current))
     return out
+
+
+# -- guard alerts (Telegram) -------------------------------------------------------------
+_TITLE_MAX = 100
+_URL_MAX = 300
+_GUARD_REASONS = ("active_pr", "blocker_auth")
+
+
+def _guard_reason_text(reason: str) -> str:
+    return t(f"guards.reason.{reason}") if reason in _GUARD_REASONS else _clip_to(reason, _TITLE_MAX)
+
+
+def _clip_to(text: str, limit: int) -> str:
+    text = " ".join(str(text).split())
+    return text if len(text) <= limit else text[: limit - 1] + "…"
+
+
+def _guard_item(n: int, alert: dict) -> list[str]:
+    lines = [
+        t("guards.item.line", n=n, board=alert["board"], id=alert["task_id"],
+          title=_clip_to(alert.get("title") or "", _TITLE_MAX)),
+        t("guards.item.detail", age=human_age(alert.get("age_s", 0)), reason=_guard_reason_text(alert["reason"]),
+          assignee=alert.get("assignee") or t("guards.no_assignee")),
+    ]
+    if alert.get("pr_url"):
+        when = time.strftime("%Y-%m-%d %H:%M", time.localtime(alert.get("pr_at") or 0))
+        lines.append(t("guards.item.pr", url=_clip_to(alert["pr_url"], _URL_MAX), when=when))
+    return lines
+
+
+def render_guards(alerts: list) -> str:
+    """One alert message: a headline, one numbered block per card, and how to release them."""
+    if not alerts:
+        return ""
+    head = t("guards.head.one") if len(alerts) == 1 else t("guards.head.many", n=len(alerts))
+    lines = [head]
+    for n, alert in enumerate(alerts, start=1):
+        lines.extend(_guard_item(n, alert))
+    lines.append(t("guards.how"))
+    return "\n".join(lines)
+
+
+def render_guard_chunks(alerts: list, limit: int = TELEGRAM_LIMIT) -> list[tuple[str, list]]:
+    """Alert messages within the Telegram limit as ``(text, alerts)`` pairs; an alert is never split."""
+    out: list[tuple[str, list]] = []
+    current: list = []
+    for alert in alerts:
+        if current and _tg_len(render_guards(current + [alert])) > limit:
+            out.append((render_guards(current), current))
+            current = []
+        current = current + [alert]
+    if current:
+        out.append((render_guards(current), current))
+    return [(_prefix(text, limit), items) for text, items in out]

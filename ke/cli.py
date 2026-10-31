@@ -4,7 +4,7 @@ from __future__ import annotations
 import time
 from typing import Any, Optional
 
-from . import conditions, hermes_api, inbound
+from . import conditions, guards_watch, hermes_api, inbound
 from .leader import LeaderLock
 from .messages import render_done, t
 from .settings import Settings
@@ -35,6 +35,10 @@ def setup(parser: Any) -> None:
     dn = sub.add_parser("done", help="Resolve a card's human wait (same as replying \"done\" on Telegram)")
     dn.add_argument("card", help="card id (e.g. t_1a2b3c4d)")
     dn.add_argument("--board", default=None, help="board slug (default: search all boards)")
+    rl = sub.add_parser("release", help="Hand a guarded card to another profile (active_pr / blocker_auth guards)")
+    rl.add_argument("card", help="card id (e.g. t_1a2b3c4d)")
+    rl.add_argument("--to", required=True, help="profile that takes the card over")
+    rl.add_argument("--board", default=None, help="board slug (default: search all boards)")
     parser.set_defaults(ke_parser=parser)
 
 
@@ -51,11 +55,13 @@ def run(args: Any) -> int:
         return run_status(settings)
     if cmd == "done":
         return run_done(settings, args.card, getattr(args, "board", None))
+    if cmd == "release":
+        return run_release(settings, args.card, args.to, getattr(args, "board", None))
     parser = getattr(args, "ke_parser", None)
     if parser is not None:
         parser.print_help()
     else:
-        print("usage: hermes kanban-empowered {doctor,explain,status,done}")
+        print("usage: hermes kanban-empowered {doctor,explain,status,done,release}")
     return 0 if cmd is None else 2
 
 
@@ -107,33 +113,61 @@ def _os_user() -> str:
         return "unknown"
 
 
+def _locate_card(card: str, board: Optional[str]) -> Optional[str]:
+    """The slug of the one board holding ``card`` (all boards, or only ``board``).
+
+    Prints why and returns ``None`` when the card is not found, is on several boards, or the
+    requested board cannot be read.
+    """
+    candidates = [board] if board else hermes_api.boards()
+    found = []
+    for b in candidates:
+        try:
+            with hermes_api.connect(b) as conn:
+                if hermes_api.task(conn, card) is not None:
+                    found.append(b)
+        except Exception as exc:
+            if board:
+                print(t("explain.board_error", board=b, error=exc))
+                return None
+    if not found:
+        where = t("explain.where_board", board=board) if board else t("explain.where_any")
+        print(t("explain.not_found", card=card, where=where))
+        return None
+    if len(found) > 1:
+        print(t("explain.ambiguous", card=card, boards=", ".join(found)))
+        return None
+    return found[0]
+
+
+def run_release(settings: Settings, card: str, to_profile: str, board: Optional[str]) -> int:
+    """Hand a guarded card to ``to_profile``. Exit 1 when nothing was released (the output says why)."""
+    b = _locate_card(card, board)
+    if b is None:
+        return 1
+    store = _open_store(settings)
+    try:
+        with hermes_api.connect(b) as conn:
+            ok, text = guards_watch.release_result(
+                conn, b, card, to_profile, hermes_api, store=store, now=time.time(), actor="cli:" + _os_user()
+            )
+        print(text)
+        return 0 if ok else 1
+    finally:
+        store.close()
+
+
 def run_done(settings: Settings, card: str, board: Optional[str]) -> int:
     """Resolve the open human wait of ``card`` from the command line. Exit 1 when nothing changed.
 
     Same state and version checks as a Telegram reply: the card must still be blocked on the
     block the plugin is tracking (its wait row), otherwise nothing is touched.
     """
+    b = _locate_card(card, board)
+    if b is None:
+        return 1
     store = _open_store(settings)
     try:
-        candidates = [board] if board else hermes_api.boards()
-        found = []
-        for b in candidates:
-            try:
-                with hermes_api.connect(b) as conn:
-                    if hermes_api.task(conn, card) is not None:
-                        found.append(b)
-            except Exception as exc:
-                if board:
-                    print(t("explain.board_error", board=b, error=exc))
-                    return 1
-        if not found:
-            where = t("explain.where_board", board=board) if board else t("explain.where_any")
-            print(t("explain.not_found", card=card, where=where))
-            return 1
-        if len(found) > 1:
-            print(t("explain.ambiguous", card=card, boards=", ".join(found)))
-            return 1
-        b = found[0]
         wait = store.latest_wait(b, card)
         if wait is None:
             print(t("done.no_wait", card=card, board=b))

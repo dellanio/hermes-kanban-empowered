@@ -141,12 +141,24 @@ def _guard_hits(events: list) -> tuple[list, str]:
     return hits, payload.get("reason") or t("explain.guard.unknown_reason")
 
 
-def _guard(conn, board, task, store, now, settings) -> Condition:
-    hits, reason = _guard_hits(_events(conn, task.id))
+def current_guard(conn: Any, tid: str) -> Optional[dict]:
+    """The card's active respawn guard: ``{"reason", "count", "since"}`` or ``None``.
+
+    Built from the ``respawn_guarded`` events since the last ``claimed``; ``reason`` is the latest
+    one and ``since`` the time of the first. The one implementation behind ``explain`` and ``release``.
+    """
+    hits, reason = _guard_hits(_events(conn, tid))
     if not hits:
+        return None
+    return {"reason": reason, "count": len(hits), "since": hits[0].created_at}
+
+
+def _guard(conn, board, task, store, now, settings) -> Condition:
+    guard = current_guard(conn, task.id)
+    if guard is None:
         return Condition("guard", True, t("explain.guard.none"))
-    since = human_age(_age(now, hits[0].created_at))
-    return Condition("guard", False, t("explain.guard.active", reason=reason, count=len(hits), age=since))
+    since = human_age(_age(now, guard["since"]))
+    return Condition("guard", False, t("explain.guard.active", reason=guard["reason"], count=guard["count"], age=since))
 
 
 def _live(conn, board, task, store, now, settings) -> Condition:

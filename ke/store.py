@@ -189,6 +189,69 @@ class Store:
         out["items"] = json.loads(out.pop("items_json"))
         return out
 
+    # -- guard alerts ------------------------------------------------------
+    _GUARD_COLS = "board, task_id, reason, first_seen, last_seen, alerted_at"
+
+    def upsert_guard_alert(self, board: str, task_id: str, reason: str, now: int) -> None:
+        """Record that ``task_id`` was seen guarded for ``reason`` at ``now``.
+
+        A new card starts the clock; the same reason only refreshes ``last_seen``; a different
+        reason is a new episode: ``first_seen`` restarts and the alert is owed again.
+        """
+        with self.lock:
+            self.conn.execute(
+                "INSERT INTO guard_alerts (board, task_id, reason, first_seen, last_seen) "
+                "VALUES (?,?,?,?,?) ON CONFLICT(board, task_id) DO UPDATE SET "
+                "first_seen = CASE WHEN reason = excluded.reason THEN first_seen ELSE excluded.first_seen END, "
+                "alerted_at = CASE WHEN reason = excluded.reason THEN alerted_at ELSE NULL END, "
+                "last_seen = excluded.last_seen, reason = excluded.reason",
+                (board, task_id, reason, int(now), int(now)),
+            )
+
+    def get_guard_alert(self, board: str, task_id: str) -> Optional[dict]:
+        with self.lock:
+            row = self.conn.execute(
+                f"SELECT {self._GUARD_COLS} FROM guard_alerts WHERE board = ? AND task_id = ?",
+                (board, task_id),
+            ).fetchone()
+        return None if row is None else dict(row)
+
+    def guard_alerts(self, board: Optional[str] = None) -> list[dict]:
+        """Tracked guard rows (of one board, or all), ordered by board and ``first_seen``."""
+        sql = f"SELECT {self._GUARD_COLS} FROM guard_alerts"
+        args: tuple = ()
+        if board is not None:
+            sql += " WHERE board = ?"
+            args = (board,)
+        with self.lock:
+            rows = self.conn.execute(sql + " ORDER BY board, first_seen, task_id", args).fetchall()
+        return [dict(r) for r in rows]
+
+    def due_guard_alerts(self, first_seen_before: float) -> list[dict]:
+        """Rows never alerted whose ``first_seen`` is at or before ``first_seen_before``."""
+        with self.lock:
+            rows = self.conn.execute(
+                f"SELECT {self._GUARD_COLS} FROM guard_alerts "
+                "WHERE alerted_at IS NULL AND first_seen <= ? ORDER BY board, first_seen, task_id",
+                (first_seen_before,),
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    def mark_guard_alerted(self, board: str, task_id: str, reason: str, ts: int) -> bool:
+        """Mark the alert sent, only while the row still has ``reason`` (False otherwise)."""
+        with self.lock:
+            cur = self.conn.execute(
+                "UPDATE guard_alerts SET alerted_at = ? WHERE board = ? AND task_id = ? AND reason = ?",
+                (int(ts), board, task_id, reason),
+            )
+            return cur.rowcount == 1
+
+    def delete_guard_alert(self, board: str, task_id: str) -> None:
+        with self.lock:
+            self.conn.execute(
+                "DELETE FROM guard_alerts WHERE board = ? AND task_id = ?", (board, task_id)
+            )
+
     # -- kv --------------------------------------------------------------
     def kv_get(self, key: str) -> Optional[str]:
         with self.lock:

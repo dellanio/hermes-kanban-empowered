@@ -48,6 +48,25 @@ def _register_inbound(ctx, settings, store, telegram) -> None:
         log.exception("kanban-empowered: failed to register the Telegram reply handler")
 
 
+def _register_infra(ctx, settings, infra) -> None:
+    """Register the ``on_kanban_worker_exited`` recorder, in the coordinator profile only."""
+    try:
+        from .ke import hermes_api
+
+        if hermes_api.active_profile() != settings.coordinator_profile:
+            return
+
+        def on_exited(**kw):
+            try:
+                infra.on_worker_exited(**kw)
+            except Exception:  # an observer must never break the dispatcher
+                log.exception("kanban-empowered: worker-exited hook failed")
+
+        ctx.register_hook("on_kanban_worker_exited", on_exited)
+    except Exception:
+        log.exception("kanban-empowered: failed to register the worker-exited hook")
+
+
 def register(ctx) -> None:
     """Wire the dispatch-tick hook and the ``kanban-empowered`` CLI command.
 
@@ -80,6 +99,7 @@ def register(ctx) -> None:
 
             ctx.register_hook("on_kanban_dispatch_tick", on_tick)
             _register_inbound(ctx, settings, store, coordinator.telegram)
+            _register_infra(ctx, settings, coordinator.infra)
         except Exception:
             log.exception("kanban-empowered: failed to start the coordinator; hooks not registered")
 

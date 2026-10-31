@@ -116,6 +116,13 @@ EN: dict[str, str] = {
     "release.no_guard": "no guard",
     "release.running": "card is running; release not possible now",
     "release.comment": "released the respawn guard ({reason}): assigned to {to} (was {previous}) by {actor}",
+    # infra recovery: the comment on an undone breaker block, and the alerts to the owner
+    "infra.undo_comment.one": "block undone: {n} infrastructure failure ({pattern}), not a problem with the work",
+    "infra.undo_comment.many": "block undone: {n} infrastructure failures ({pattern}), not a problem with the work",
+    "infra.budget.head": "🔴 {board} · {id} · {title}",
+    "infra.budget.detail": "   Blocked again by infrastructure failures. The automatic undo budget ({count} in {window}) is used up; I will not retry.",
+    "infra.budget.how": "   Check the infrastructure (gateway, workers), then unblock the card yourself. Details: hermes kanban-empowered explain {id} --board {board}",
+    "infra.systemic": "🟠 {n} worker exits caused by infrastructure in {window}. Workers keep dying for reasons unrelated to their work (gateway, persistence); check the host.",
     # setup warnings
     "veto.warning": "kanban-empowered: this Hermes build lacks the kanban veto hooks (kanban_pre_claim / kanban_pre_complete). Guards run in cooperative-only mode. Run: hermes kanban-empowered doctor",
 }
@@ -346,3 +353,21 @@ def render_guard_chunks(alerts: list, limit: int = TELEGRAM_LIMIT) -> list[tuple
     if current:
         out.append((render_guards(current), current))
     return [(_prefix(text, limit), items) for text, items in out]
+
+
+# -- infra recovery alerts (Telegram) ---------------------------------------------------
+def undo_comment(n: int, pattern: str) -> str:
+    """The card comment that explains why a breaker block was undone."""
+    return t("infra.undo_comment.one" if n == 1 else "infra.undo_comment.many", n=n, pattern=pattern)
+
+
+def render_infra_alert(alert: dict) -> str:
+    """One infra alert: ``kind`` "budget" (a card whose undo budget is used up) or "systemic"."""
+    if alert.get("kind") == "systemic":
+        return t("infra.systemic", n=alert.get("n", 0), window=human_age(alert.get("window_s", 0)))
+    board, tid = alert["board"], alert["task_id"]
+    return "\n".join([
+        t("infra.budget.head", board=board, id=tid, title=_clip_to(alert.get("title") or "", _TITLE_MAX)),
+        t("infra.budget.detail", count=alert.get("count", 0), window=human_age(alert.get("window_s", 0))),
+        t("infra.budget.how", board=board, id=tid),
+    ])

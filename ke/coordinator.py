@@ -16,7 +16,8 @@ from typing import Any, Callable, Optional
 
 from . import hermes_api
 from .guards_watch import GuardWatch
-from .messages import render_guard_chunks, render_waits_chunks, t
+from .infra import InfraRecovery
+from .messages import render_guard_chunks, render_infra_alert, render_waits_chunks, t
 from .leader import LeaderLock
 from .settings import Settings
 from .store import Store
@@ -58,10 +59,14 @@ class Coordinator:
         # Respawn guards: every board tick feeds the watch (see ``on_tick``); the guards step
         # sends the alerts that are due.
         self.guards = GuardWatch(settings, store, api)
+        # Infrastructure-failure recovery: exits are recorded by the worker-exited hook, the infra
+        # step undoes the qualifying breaker blocks and sends the alerts that are owed.
+        self.infra = InfraRecovery(settings, store, api, clock=clock)
         self._warned: set[str] = set()  # log-once keys (per process)
         self._tg_down = False
         self.register_step("waits", self._waits_step)
         self.register_step("guards", self._guards_step)
+        self.register_step("infra", self._infra_step)
 
     # -- wiring --------------------------------------------------------------
     def register_step(self, name: str, fn: Step) -> None:
@@ -121,6 +126,49 @@ class Coordinator:
                         self.guards.mark_alerted(alert, now)
                     except Exception:
                         log.exception("kanban-empowered: could not mark a guard alert as sent")
+
+    # -- infrastructure recovery ---------------------------------------------------
+    def _infra_step(self, now: float) -> None:
+        """Run the recovery, then tell the owner about the budgets that ran out and a systemic burst.
+
+        A card's budget alert goes to its board's owner, the systemic one to the default owner.
+        Like the guard alerts: marked only after the message went out (a failure is retried on
+        the next evaluation), at most ``MAX_MESSAGES_PER_PASS`` per recipient, a transport
+        failure ends the pass. Recorded as kind "infra" (the reply handler ignores it).
+        """
+        alerts = self.infra.evaluate(now)
+        if not alerts or not self._telegram_ready():
+            return
+        by_owner: dict[str, list[dict]] = {}
+        for alert in alerts:
+            owner = (
+                self.settings.owner_for(alert["board"]) if alert["kind"] == "budget" else self.settings.default_owner
+            )
+            by_owner.setdefault(owner, []).append(alert)
+        counts: dict[str, int] = {}
+        for owner, group in by_owner.items():
+            if self._tg_down:
+                break
+            chat_id = self._owner_chat(owner)
+            if chat_id is None:
+                continue
+            for alert in group:
+                if self._tg_down or counts.get(owner, 0) >= MAX_MESSAGES_PER_PASS:
+                    break
+                counts[owner] = counts.get(owner, 0) + 1
+                try:
+                    message_id = self._tg_send(chat_id, render_infra_alert(alert))
+                except Exception as exc:
+                    self._log_send_failure(owner, chat_id, exc)
+                    if self._send_ends_pass(exc):
+                        break
+                    continue
+                items = [{"board": alert["board"], "task_id": alert["task_id"]}] if alert["kind"] == "budget" else []
+                self._record_sent(message_id, chat_id, "infra", items, now)
+                try:
+                    self.infra.mark_alerted(alert, now)
+                except Exception:
+                    log.exception("kanban-empowered: could not mark an infra alert as sent")
 
     # -- Telegram delivery of the reminders -------------------------------------
     def _warn_once(self, key: str, msg: str, *args: Any) -> None:

@@ -118,6 +118,40 @@ class Store:
             ).fetchall()
         return [dict(r) for r in rows]
 
+    def action_exists(self, board: str, task_id: str, kind: str, detail: str) -> bool:
+        """True when an action with exactly this ``(board, task_id, kind, detail)`` was logged."""
+        with self.lock:
+            row = self.conn.execute(
+                "SELECT 1 FROM actions WHERE board = ? AND task_id = ? AND kind = ? AND detail = ? LIMIT 1",
+                (board, task_id, kind, detail),
+            ).fetchone()
+        return row is not None
+
+    def count_actions_since(self, kind: str, ts: int, detail_prefix: str = "") -> int:
+        """Actions of ``kind`` with ``ts >= ts`` whose detail starts with ``detail_prefix``."""
+        with self.lock:
+            row = self.conn.execute(
+                "SELECT COUNT(*) AS n FROM actions WHERE kind = ? AND ts >= ? AND substr(detail, 1, ?) = ?",
+                (kind, int(ts), len(detail_prefix), detail_prefix),
+            ).fetchone()
+        return int(row["n"])
+
+    # -- infra undo budget -------------------------------------------------
+    def add_infra_undo(self, board: str, task_id: str, ts: int) -> None:
+        with self.lock:
+            self.conn.execute(
+                "INSERT INTO infra_undos (board, task_id, ts) VALUES (?,?,?)", (board, task_id, int(ts))
+            )
+
+    def infra_undos_since(self, board: str, task_id: str, ts: float) -> int:
+        """How many times the block of this card was undone at or after ``ts``."""
+        with self.lock:
+            row = self.conn.execute(
+                "SELECT COUNT(*) AS n FROM infra_undos WHERE board = ? AND task_id = ? AND ts >= ?",
+                (board, task_id, float(ts)),
+            ).fetchone()
+        return int(row["n"])
+
     # -- waits (read side; rows are written by the wait tracker) ---------
     def latest_wait(self, board: str, task_id: str) -> Optional[dict]:
         """The highest-``version`` wait row of a card, or ``None``."""

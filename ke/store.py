@@ -137,11 +137,17 @@ class Store:
         return int(row["n"])
 
     # -- infra undo budget -------------------------------------------------
-    def add_infra_undo(self, board: str, task_id: str, ts: int) -> None:
+    def add_infra_undo(self, board: str, task_id: str, ts: int) -> int:
+        """Record one undo; returns its row id (for :meth:`delete_infra_undo`)."""
         with self.lock:
-            self.conn.execute(
+            cur = self.conn.execute(
                 "INSERT INTO infra_undos (board, task_id, ts) VALUES (?,?,?)", (board, task_id, int(ts))
             )
+            return int(cur.lastrowid)
+
+    def delete_infra_undo(self, row_id: int) -> None:
+        with self.lock:
+            self.conn.execute("DELETE FROM infra_undos WHERE rowid = ?", (int(row_id),))
 
     def infra_undos_since(self, board: str, task_id: str, ts: float) -> int:
         """How many times the block of this card was undone at or after ``ts``."""

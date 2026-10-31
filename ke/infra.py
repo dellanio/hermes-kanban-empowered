@@ -47,8 +47,9 @@ INFRA, QUOTA, CONTENT, UNKNOWN = "infra", "quota", "content", "unknown"
 # Run outcomes that are not failures: a handoff or a deliberate block is not the work crashing.
 # Any other outcome that is not "completed" counts as a failure (and an unclassifiable one vetoes).
 _NOT_FAILURES = frozenset({"blocked", "review_requested", "changes_requested", "scheduled"})
-# gave_up payload flags of trips a retry cannot heal: never undone, whatever the error text says.
-_UNHEALABLE_FLAGS = ("terminal_provider", "protocol_violation", "protocol_violations")
+# gave_up payload flags of trips a retry cannot heal, or that Hermes holds for an operator
+# (``sticky``: systemic same-error bursts and force_trip): never undone, whatever the error says.
+_UNHEALABLE_FLAGS = ("sticky", "terminal_provider", "protocol_violation", "protocol_violations")
 
 
 def matched_pattern(error_text: Optional[str], patterns) -> Optional[str]:
@@ -190,7 +191,12 @@ class InfraRecovery:
             return
         trip_id, count, patterns = first
         # Spend the budget first: if anything below fails, the safe side is one undo too few.
-        self.store.add_infra_undo(board, task.id, int(now))
+        # Then count again: a second coordinator (leader handover) may have spent in between, and
+        # whoever sees more undos than the budget gives its own row back and does nothing.
+        row_id = self.store.add_infra_undo(board, task.id, int(now))
+        if self.store.infra_undos_since(board, task.id, now - s.infra_undo_window_s) > s.infra_undo_count:
+            self.store.delete_infra_undo(row_id)
+            return
         if not self.api.unblock(conn, task.id):
             log.warning("kanban-empowered: could not unblock %s/%s after an infra assessment", board, task.id)
             return
@@ -212,6 +218,8 @@ class InfraRecovery:
             return None
         events = self.api.events(conn, tid)
         if not events or events[-1].kind != "gave_up":
+            if any(e.kind == "gave_up" for e in events):
+                log.debug("kanban-empowered: %s is not undone: an event follows its gave_up (%s)", tid, events[-1].kind)
             return None
         trip = events[-1]
         payload = trip.payload if isinstance(trip.payload, dict) else {}

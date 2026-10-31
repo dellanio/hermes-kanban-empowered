@@ -308,7 +308,7 @@ def test_a_card_blocked_without_a_gave_up_is_ignored(kanban_home, tmp_path, cloc
     assert _status(tid) == "blocked"
 
 
-@pytest.mark.parametrize("flag", ["terminal_provider", "protocol_violation"])
+@pytest.mark.parametrize("flag", ["sticky", "terminal_provider", "protocol_violation"])
 def test_terminal_provider_and_protocol_violation_trips_are_never_undone(kanban_home, tmp_path, clock, flag):
     from ke import hermes_api
     from hermes_cli import kanban_db_dispatch as kd
@@ -323,6 +323,42 @@ def test_terminal_provider_and_protocol_violation_trips_are_never_undone(kanban_
         )
     ir.evaluate(clock.now)
     assert _status(tid) == "blocked"
+
+
+def test_force_tripped_sticky_block_is_never_undone(kanban_home, tmp_path, clock):
+    """Hermes holds a sticky gave_up (force_trip, systemic same-error burst) for an operator."""
+    from ke import hermes_api
+    from hermes_cli import kanban_db_dispatch as kd
+
+    ir, store = _ir(tmp_path, clock)
+    with hermes_api.connect("default") as conn:
+        tid = create_task(conn, title="x", assignee="dev")
+        _fail_run(conn, tid, INFRA_ERR)
+        _fail_run(conn, tid, INFRA_ERR)
+        assert kd._record_task_failure(
+            conn, tid, error=INFRA_ERR, outcome="crashed", force_trip=True, release_claim=False, end_run=False,
+        )
+        events = hermes_api.events(conn, tid)
+        assert events[-1].kind == "gave_up" and events[-1].payload.get("sticky") is True
+    ir.evaluate(clock.now)
+    assert _status(tid) == "blocked" and _undo_count(store, tid) == 0
+
+
+def test_overlapping_coordinators_cannot_both_spend_the_last_unit(kanban_home, tmp_path, clock):
+    """Another coordinator spends the budget between our check and our insert: we give our row back."""
+    ir, store = _ir(tmp_path, clock, infra_undo_count=1)
+    tid = gave_up_with_runs(["infra", "infra"])
+    real = store.add_infra_undo
+
+    def racing(board, task_id, ts):
+        store.log_action(board, task_id, "x", None, ts)  # (no-op marker)
+        real(board, task_id, ts)  # the other coordinator's undo lands first
+        return real(board, task_id, ts)
+
+    store.add_infra_undo = racing
+    ir.evaluate(clock.now)
+    assert _status(tid) == "blocked"
+    assert _undo_count(store, tid) == 1  # only the other coordinator's row remains
 
 
 def test_version_changes_between_the_check_and_the_unblock_abort_the_undo(kanban_home, tmp_path, clock):

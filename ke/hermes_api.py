@@ -155,6 +155,62 @@ def resolve_language(value: str) -> str | None:
     return resolve_language_id(value)
 
 
+_LOCALE_SENTINEL = "kanban_empowered.waits.header"
+_dashboard_packs: list = []
+
+
+def ensure_locales(locales_dir: Path) -> bool:
+    """Register the plugin's locale catalogs with Hermes when no one did (the dashboard backend can run
+    in a process where the agent half's ``provides_locales`` was not loaded). Returns True when it
+    registered them; a no-op when Hermes already translates the plugin's keys. Never raises."""
+    if translate(_LOCALE_SENTINEL, lang="en") is not None or _dashboard_packs:
+        return False
+    try:
+        from agent.i18n_layers import parse_locale_file, register_pack
+
+        for file in sorted(Path(locales_dir).glob("*.yaml")):
+            lang = file.stem
+            if "." in lang:  # <lang>.tui.yaml / <lang>.desktop.yaml: not the core surface
+                continue
+            _dashboard_packs.append(
+                register_pack(lang, "core", parse_locale_file(file), source="plugin:kanban-empowered:dashboard")
+            )
+    except Exception:
+        return False
+    return bool(_dashboard_packs)
+
+
+def release_locales() -> None:
+    """Drop the catalogs :func:`ensure_locales` registered (tests, reloads)."""
+    try:
+        from agent.i18n_layers import unregister_pack
+    except Exception:
+        _dashboard_packs.clear()
+        return
+    while _dashboard_packs:
+        try:
+            unregister_pack(_dashboard_packs.pop())
+        except Exception:
+            pass
+
+
+def plugin_settings(plugin: str = "kanban-empowered") -> dict:
+    """A deep copy of ``plugins.entries.<plugin>.settings`` from the active profile's config (``{}`` when
+    unset or unreadable): what ``ctx.get_config`` reads, for code that has no plugin ``ctx`` (the dashboard)."""
+    import copy
+
+    try:
+        from hermes_cli.config import load_config_readonly
+
+        cfg = load_config_readonly() or {}
+    except Exception:
+        return {}
+    node = cfg
+    for part in ("plugins", "entries", plugin, "settings"):
+        node = node.get(part) if isinstance(node, dict) else None
+    return copy.deepcopy(node) if isinstance(node, dict) else {}
+
+
 def language() -> str | None:
     """The user's Hermes language id (``agent.i18n.get_language``), ``None`` when it cannot be read."""
     try:

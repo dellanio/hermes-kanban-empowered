@@ -118,6 +118,20 @@ class Store:
             ).fetchall()
         return [dict(r) for r in rows]
 
+    def recent_actions(self, kinds, limit: int = 20) -> list[dict]:
+        """The newest ``limit`` actions whose kind is in ``kinds``, newest first."""
+        kinds = list(kinds)
+        if not kinds:
+            return []
+        marks = ",".join("?" * len(kinds))
+        with self.lock:
+            rows = self.conn.execute(
+                f"SELECT id, ts, board, task_id, kind, detail FROM actions WHERE kind IN ({marks}) "
+                "ORDER BY ts DESC, id DESC LIMIT ?",
+                (*kinds, int(limit)),
+            ).fetchall()
+        return [dict(r) for r in rows]
+
     def action_exists(self, board: str, task_id: str, kind: str, detail: str) -> bool:
         """True when an action with exactly this ``(board, task_id, kind, detail)`` was logged."""
         with self.lock:
@@ -227,6 +241,31 @@ class Store:
             return None
         out = dict(row)
         out["items"] = json.loads(out.pop("items_json"))
+        return out
+
+    def recent_sent_messages(self, kinds, limit: int = 20) -> list[dict]:
+        """The newest ``limit`` sent messages whose kind is in ``kinds`` (by ``created_at``), items parsed.
+
+        A live panel is one row whose ``created_at`` moves to its last update (see ``panel.record_items``).
+        """
+        kinds = list(kinds)
+        if not kinds:
+            return []
+        marks = ",".join("?" * len(kinds))
+        with self.lock:
+            rows = self.conn.execute(
+                f"SELECT message_id, chat_id, kind, items_json, created_at FROM sent_messages "
+                f"WHERE kind IN ({marks}) ORDER BY created_at DESC, message_id DESC LIMIT ?",
+                (*kinds, int(limit)),
+            ).fetchall()
+        out = []
+        for row in rows:
+            item = dict(row)
+            try:
+                item["items"] = json.loads(item.pop("items_json"))
+            except ValueError:
+                item["items"] = []
+            out.append(item)
         return out
 
     # -- guard alerts ------------------------------------------------------

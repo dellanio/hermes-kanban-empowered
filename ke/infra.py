@@ -286,6 +286,48 @@ class InfraRecovery:
         # a worker that outlived its own run (closed rows keep its pid) is still executing
         return any(_live_pid(run.worker_pid) for run in failed)
 
+    def exhausted(self, now: float, boards: Optional[list] = None) -> list[dict]:
+        """Cards parked by infrastructure failures whose undo budget is used up. Read-only: no undo, no alert.
+
+        The same assessment as :meth:`evaluate` (every undo condition holds) with the budget spent; a board
+        or card that cannot be read is skipped. Each row: ``board``, ``task_id``, ``title``, ``attempts``
+        (undos used in the window), ``failures`` (failed runs since the last success), ``patterns``,
+        ``last_error_class`` (always ``"infra"``: anything else vetoes the assessment) and ``since`` (the
+        breaker's ``gave_up`` time).
+        """
+        s = self.settings
+        out: list[dict] = []
+        try:
+            boards = list(self.api.boards()) if boards is None else list(boards)
+        except Exception:
+            log.exception("kanban-empowered: could not list the boards")
+            return out
+        for board in boards:
+            try:
+                with self.api.connect(board) as conn:
+                    for task in self.api.list_tasks(conn, status="blocked"):
+                        try:
+                            first = self._assess(conn, task.id)
+                            if first is None:
+                                continue
+                            used = self.store.infra_undos_since(board, task.id, now - s.infra_undo_window_s)
+                            if used < s.infra_undo_count:
+                                continue
+                            trip_id, failures, patterns = first
+                            since = next(
+                                (int(e.created_at) for e in self.api.events(conn, task.id) if e.id == trip_id), None
+                            )
+                            out.append({
+                                "board": board, "task_id": task.id, "title": task.title, "attempts": used,
+                                "failures": failures, "patterns": list(patterns), "last_error_class": INFRA,
+                                "since": since,
+                            })
+                        except Exception:
+                            log.exception("kanban-empowered: could not assess %s/%s", board, task.id)
+            except Exception:
+                log.exception("kanban-empowered: could not read board %s for exhausted cards", board)
+        return out
+
     # -- alerts ------------------------------------------------------------------
     def _budget_alert(self, board: str, task: Any, used: int, now: float) -> Optional[dict]:
         key = f"infra_budget_alert:{board}:{task.id}"

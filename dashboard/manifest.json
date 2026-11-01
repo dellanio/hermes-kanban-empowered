@@ -1,0 +1,12 @@
+{
+  "name": "kanban-empowered",
+  "label": "Kanban Empowered",
+  "description": "Backend of the Empowered dashboard in Hermes Desktop: what needs you, running cards, coordinator actions, infrastructure, and answers typed in the app.",
+  "icon": "Package",
+  "version": "0.1.0",
+  "tab": {
+    "path": "/kanban-empowered",
+    "hidden": true
+  },
+  "api": "plugin_api.py"
+}

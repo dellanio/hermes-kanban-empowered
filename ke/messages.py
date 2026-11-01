@@ -125,6 +125,8 @@ EN: dict[str, str] = {
     "inbound.comment.choice": "choice: {letter} — {label}",
     "inbound.comment.note": "noted via Telegram from {name} ({user_id}), still waiting: {text}",
     "inbound.comment.cli": "unblocked via CLI by {user}",
+    "inbound.comment.desktop": "unblocked via Kanban-Empowered (desktop): {text}",
+    "inbound.comment.note_desktop": "noted via Kanban-Empowered (desktop), still waiting: {text}",
     "reply.resolved": "✅ {board}: {action}",
     "reply.choice": "Choice: {letter} — {label}",
     "reply.held.none": "Nothing else was waiting on it.",
@@ -208,6 +210,90 @@ EN: dict[str, str] = {
         "so it reaches only you.\n"
         "Set escalate_to (and its chat id in telegram.owner_ids) in the plugin settings."
     ),
+    # Hermes Desktop "Empowered" dashboard (desktop/plugin.js asks for every ui.* key through GET /i18n)
+    "ui.subtitle": "Flow coordinator",
+    "ui.filter.all": "All boards",
+    "ui.live": "Live",
+    "ui.updated": "updated {age} ago",
+    "ui.offline": "Offline",
+    "ui.settings": "Plugin settings",
+    "ui.loading": "Loading…",
+    "ui.age.s": "{n} s",
+    "ui.age.min": "{n} min",
+    "ui.age.h": "{n} h",
+    "ui.age.d": "{n} d",
+    "ui.metric.needs_you": "Need you",
+    "ui.metric.impacted": "Impacted cards",
+    "ui.metric.workers": "Active workers",
+    "ui.metric.incidents": "Incidents",
+    "ui.section.needs_you": "Needs you",
+    "ui.section.running": "Running now",
+    "ui.section.timeline": "Coordinator at work",
+    "ui.section.infra": "Infrastructure",
+    "ui.needs.ago": "{age} ago",
+    "ui.needs.blocks.one": "Blocks {n} card",
+    "ui.needs.blocks.many": "Blocks {n} cards",
+    "ui.needs.details": "View details",
+    "ui.needs.reminder_sent": "Reminder sent · next in {age}",
+    "ui.needs.reminder_next": "First reminder in {age}",
+    "ui.needs.reminder_overdue": "Reminder due now",
+    "ui.needs.empty": "Nothing needs you right now.",
+    "ui.needs.exhausted": "Retries exhausted",
+    "ui.needs.exhausted_text": "Parked by infrastructure failures; the automatic undo budget is used up. Check the gateway and workers, then unblock it yourself.",
+    "ui.running.card": "Card / agent",
+    "ui.running.board": "Board",
+    "ui.running.activity": "Last activity",
+    "ui.running.empty": "No worker is running.",
+    "ui.activity.started": "started",
+    "ui.activity.heartbeat": "heartbeat {age} ago",
+    "ui.timeline.human_done": "Unblocked via {source}",
+    "ui.timeline.source.telegram": "Telegram",
+    "ui.timeline.source.desktop": "desktop",
+    "ui.timeline.source.cli": "CLI",
+    "ui.timeline.source.other": "another channel",
+    "ui.timeline.guard_release": "Respawn guard released",
+    "ui.timeline.infra_undo": "Infrastructure failure undone",
+    "ui.timeline.reminder_sent.one": "Reminder sent ({n} item)",
+    "ui.timeline.reminder_sent.many": "Reminder sent ({n} items)",
+    "ui.timeline.panel_updated": "Telegram panel updated",
+    "ui.timeline.empty": "No coordinator action yet.",
+    "ui.infra.recent": "Infrastructure failures (last hour)",
+    "ui.infra.systemic": "Systemic alert",
+    "ui.infra.systemic.on": "active",
+    "ui.infra.systemic.off": "none",
+    "ui.infra.telegram": "Telegram path",
+    "ui.infra.telegram.host": "normal",
+    "ui.infra.telegram.ip": "IPv4 fallback",
+    "ui.infra.telegram.unknown": "unknown",
+    "ui.infra.telegram.none": "not recorded yet",
+    "ui.infra.telegram.no_token": "no bot token in this process",
+    "ui.infra.budget": "Retries exhausted",
+    "ui.infra.budget.none": "No card has used up its retries.",
+    "ui.infra.attempts.one": "{n} automatic undo used",
+    "ui.infra.attempts.many": "{n} automatic undos used",
+    "ui.drawer.project": "Project",
+    "ui.drawer.card": "Card",
+    "ui.drawer.why": "Why it needs you",
+    "ui.drawer.options": "Options",
+    "ui.drawer.reply": "Your answer",
+    "ui.drawer.reply_hint": "Reply “{word}” or describe what is missing.",
+    "ui.drawer.reply_hint_options": "Pick an option above or write your answer.",
+    "ui.drawer.send": "Send",
+    "ui.drawer.sending": "Sending…",
+    "ui.drawer.close": "Close",
+    "ui.drawer.conditions": "Conditions",
+    "ui.drawer.comments": "Recent comments",
+    "ui.drawer.no_comments": "No comments yet.",
+    "ui.drawer.stage": "Reminder stage: {stage}",
+    "ui.stage.reminder": "reminder {n}",
+    "ui.stage.escalation": "escalation",
+    "ui.stage.digest": "digest",
+    "ui.stage.none": "no reminder sent yet",
+    "ui.answer.not_found": "This card is not waiting on you any more.",
+    "ui.answer.failed": "Could not send the answer: {error}",
+    "ui.error.title": "Kanban Empowered is not answering",
+    "ui.error.backend": "Enable the kanban-empowered plugin (plugins.enabled in config.yaml) and restart the gateway.",
+    "ui.error.retry": "Retry",
 }
 
 
@@ -584,6 +670,21 @@ def _wait_item(due, number: int, copy: bool = False) -> list[str]:
     if context:
         lines += ["", context]
     return lines
+
+
+def render_wait_item(due) -> str:
+    """One reminder item exactly as Telegram shows it on a single-item message (no header, brand or footer)."""
+    return "\n".join(_wait_item(due, 0))
+
+
+def context_line(ask, body="", action: str = "") -> str:
+    """The item's context line as the reminder shows it (``Next step: …``, the why, or the body's first sentence)."""
+    return _context_line(ask, body, action)
+
+
+def reply_instruction(ask) -> str:
+    """The item's reply instruction as the reminder shows it (``Then reply: “done”.`` / the neutral line)."""
+    return _reply_line(ask)
 
 
 def render_waits(owner: str, dues: list, copy: bool = False) -> str:

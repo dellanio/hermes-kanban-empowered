@@ -48,12 +48,12 @@ def setup(parser: Any) -> None:
     rl.add_argument("--board", default=None, help="board slug (default: search all boards)")
     bs = sub.add_parser(
         "board-status",
-        help="List the boards with their status, or set one (active/suspended/done; ativo/suspenso/concluido)",
+        help="List the boards with their status, or set one (active/suspended/done; ativo/suspenso/concluído)",
     )
     bs.add_argument("board", nargs="?", default=None, help="board slug (omit to list every board)")
     bs.add_argument(
         "status", nargs="?", default=None,
-        help="new status: active|suspended|done (or ativo|suspenso|concluido); omit to show it",
+        help="new status: active|suspended|done (or ativo|suspenso|concluído); omit to show it",
     )
     parser.set_defaults(ke_parser=parser)
 
@@ -245,7 +245,7 @@ def run_board_status(settings: Settings, board: Optional[str], status: Optional[
             return 0
         previous = store.set_board_status(board, wanted, int(time.time()), "cli")
         if previous is None:
-            print(t("board_status.unchanged", board=board, status=board_status.label(wanted)))
+            print(t("board_status.unchanged", board=board, status=board_status.label(wanted).lower()))
             return 0
         print(t("board_status.set", board=board, old=board_status.label(previous), new=board_status.label(wanted)))
         print(t("board_status.set.reactivated" if wanted == "active" else "board_status.set.held"))

@@ -249,7 +249,7 @@ kanban_empowered.board_status.set.held: "New cards on this board will not be sta
 kanban_empowered.board_status.set.reactivated: "Claims flow again and the reminders restart from now."
 kanban_empowered.board_status.unchanged: "{board} is already {status}"
 kanban_empowered.board_status.unknown_board: "board {board} not found"
-kanban_empowered.board_status.bad_status: "unknown status {status}: use active, suspended or done (ativo, suspenso, concluido)"
+kanban_empowered.board_status.bad_status: "unknown status: {status}. Use active, suspended or done (ativo, suspenso, concluído)."
 kanban_empowered.doctor.board_status: "{board} ({status})"
 kanban_empowered.explain.wait.paused: "waiting on {owner} for {age}; reminders paused (project {status})"
 kanban_empowered.panel.suspended.one: "⏸ {n} suspended project"

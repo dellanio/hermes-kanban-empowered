@@ -249,7 +249,7 @@ kanban_empowered.board_status.set.held: "Novos cards deste quadro não serão in
 kanban_empowered.board_status.set.reactivated: "Os cards voltam a ser iniciados e os lembretes recomeçam a partir de agora."
 kanban_empowered.board_status.unchanged: "{board} já está {status}"
 kanban_empowered.board_status.unknown_board: "quadro {board} não encontrado"
-kanban_empowered.board_status.bad_status: "status desconhecido {status}: use ativo, suspenso ou concluido (active, suspended, done)"
+kanban_empowered.board_status.bad_status: "status desconhecido: {status}. Use ativo, suspenso ou concluído (active, suspended, done)."
 kanban_empowered.doctor.board_status: "{board} ({status})"
 kanban_empowered.explain.wait.paused: "esperando {owner} há {age}; lembretes pausados (projeto {status})"
 kanban_empowered.panel.suspended.one: "⏸ {n} projeto suspenso"

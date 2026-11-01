@@ -306,7 +306,7 @@ EN: dict[str, str] = {
     "board_status.set.reactivated": "Claims flow again and the reminders restart from now.",
     "board_status.unchanged": "{board} is already {status}",
     "board_status.unknown_board": "board {board} not found",
-    "board_status.bad_status": "unknown status {status}: use active, suspended or done (ativo, suspenso, concluido)",
+    "board_status.bad_status": "unknown status: {status}. Use active, suspended or done (ativo, suspenso, concluído).",
     "doctor.board_status": "{board} ({status})",
     "explain.wait.paused": "waiting on {owner} for {age}; reminders paused (project {status})",
     "panel.suspended.one": "⏸ {n} suspended project",

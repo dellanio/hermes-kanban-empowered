@@ -1068,7 +1068,7 @@ def test_cli_reactivation_and_unchanged(kanban_home, tmp_path, capsys):
     out = capsys.readouterr().out
     assert "voz-hermes: Suspended → Active" in out and "reminders restart from now" in out
     assert cli.run_board_status(s, "voz-hermes", "active") == 0
-    assert "voz-hermes is already Active" in capsys.readouterr().out
+    assert "voz-hermes is already active" in capsys.readouterr().out
 
 
 def test_cli_rejects_a_bad_status_or_board(kanban_home, tmp_path, capsys):
@@ -1077,7 +1077,7 @@ def test_cli_rejects_a_bad_status_or_board(kanban_home, tmp_path, capsys):
     _two_boards()
     s = _cli_settings(tmp_path)
     assert cli.run_board_status(s, "voz-hermes", "paused") == 2
-    assert "unknown status paused" in capsys.readouterr().out
+    assert "unknown status: paused." in capsys.readouterr().out
     assert cli.run_board_status(s, "nope", "suspenso") == 1
     assert "board nope not found" in capsys.readouterr().out
     st = _cli_store(s)
@@ -1395,3 +1395,19 @@ def test_desktop_suspended_header_counts_distinct_projects():
     assert "new Set(items.map(item => item.board)).size" in block
     assert "t('ui.section.suspended') + ' (' + projects + ')'" in block
     assert "' (' + items.length + ')'" not in block
+
+
+# -- review Minor 10: Portuguese CLI wording ------------------------------------------------------------
+def test_cli_wording_in_pt_br(kanban_home, tmp_path, capsys, pt_br):  # noqa: F811
+    from ke import cli
+
+    _two_boards()
+    s = _cli_settings(tmp_path)
+    cli.run_board_status(s, "voz-hermes", "suspenso")
+    capsys.readouterr()
+    cli.run_board_status(s, "voz-hermes", "suspenso")
+    assert "voz-hermes já está suspenso" in capsys.readouterr().out  # no capital mid-sentence
+    assert cli.run_board_status(s, "voz-hermes", "pausado") == 2
+    out = capsys.readouterr().out
+    assert "status desconhecido: pausado." in out
+    assert "concluído" in out and "concluido" not in out  # teach the accented spelling

@@ -10,8 +10,8 @@ Replies to the panel. The "Needs you" items are numbered, and ``"1 done"`` answe
 panel resolves item 1 exactly like a reply to a reminder (same authentication, version and TTL
 rules, see ``inbound``). Because the message is edited in place its numbering changes over time,
 so the panel is recorded as ``sent_messages(kind="panel")`` whose items are the CURRENT numbered
-list ``[{board, task_id, version}]``, and the last two lists are kept with the time each became
-current (``kv panel_hist:<chat>:<message>``). A reply is resolved against the list that was
+list ``[{board, task_id, version}]``, and the last two lists (plus the last one known to have
+been applied) are kept with the time each became current (``kv panel_hist:<chat>:<message>``). A reply is resolved against the list that was
 current at the reply's own date, and when the list the user may have been looking at differs
 from the current one at the referenced position, the reply is refused ("the panel changed;
 reply again") instead of guessing.
@@ -219,6 +219,34 @@ def load_history(store: Store, chat_id: int, message_id: int) -> dict:
     return {"entries": data["entries"], "truncated": bool(data.get("truncated"))}
 
 
+def _trim(entries: list, hist: dict) -> list:
+    """Keep the last ``HISTORY_LEN`` lists AND the last certain one (the only list known to have been
+    on screen, however many unknown-outcome edits came since).
+
+    ``hist["truncated"]`` is set when something before the first kept list was dropped; a kept list
+    whose predecessor in time was dropped is flagged ``gap`` (unknown lists may have been on screen
+    just before it became current).
+    """
+    n = len(entries)
+    keep = set(range(max(0, n - HISTORY_LEN), n))
+    last_certain = max((i for i, e in enumerate(entries) if not e.get("uncertain")), default=None)
+    if last_certain is not None:
+        keep.add(last_certain)
+    if len(keep) == n:
+        return entries
+    out: list = []
+    prev = None
+    for i in sorted(keep):
+        e = dict(entries[i])
+        if prev is not None and i != prev + 1:
+            e["gap"] = True
+        out.append(e)
+        prev = i
+    if min(keep) > 0:
+        hist["truncated"] = True
+    return out
+
+
 def record_items(
     store: Store, chat_id: int, message_id: int, items: list, now: float, certain: bool = True
 ) -> None:
@@ -238,9 +266,7 @@ def record_items(
             if not certain:
                 entry["uncertain"] = True
             entries.append(entry)
-            if len(entries) > HISTORY_LEN:
-                del entries[: len(entries) - HISTORY_LEN]
-                hist["truncated"] = True
+            hist["entries"] = entries = _trim(entries, hist)
             store.kv_set(_hist_key(chat_id, message_id), json.dumps(hist))
         elif certain and entries[-1].pop("uncertain", None):
             store.kv_set(_hist_key(chat_id, message_id), json.dumps(hist))
@@ -293,16 +319,29 @@ def view_for_reply(
         j = 0
     chosen = entries[j]
     others: list = []
-    unknown_older = False
-    if reply_ts - chosen["ts"] < SEE_GRACE_S or chosen.get("uncertain"):  # may not have seen it yet
-        if j > 0:
-            others.append(entries[j - 1]["items"])
-        elif hist["truncated"]:
-            unknown_older = True
-    if j + 1 < len(entries) and entries[j + 1]["ts"] - reply_ts < SEE_GRACE_S:  # may already have seen the next
-        others.append(entries[j + 1]["items"])
+    unknown = False
+    # lists that may have been on screen before the chosen one: walk back while the chosen list is
+    # fresh or of unknown outcome, through uncertain lists, up to (and including) a certain one
+    k, need = j, reply_ts - chosen["ts"] < SEE_GRACE_S or bool(chosen.get("uncertain"))
+    while need:
+        if entries[k].get("gap"):
+            unknown = True  # lists that were dropped may have been on screen just before it
+        if k == 0:
+            if hist["truncated"] or entries[0].get("uncertain"):
+                unknown = True  # no certain list is known
+            break
+        others.append(entries[k - 1]["items"])
+        need = bool(entries[k - 1].get("uncertain"))
+        k -= 1
+    # lists after it: the next ones (soon after the reply) may already have been on screen
+    m = j + 1
+    if m < len(entries) and entries[m].get("gap"):
+        unknown = True  # dropped lists lie between the chosen one and the next
+    while m < len(entries) and entries[m]["ts"] - reply_ts < SEE_GRACE_S:
+        others.append(entries[m]["items"])
+        m += 1
     pick = _pick(chosen["items"], number)
-    ambiguous = unknown_older or any(not _same(pick, _pick(o, number)) for o in others)
+    ambiguous = unknown or any(not _same(pick, _pick(o, number)) for o in others)
     return ReplyView(chosen["items"], ambiguous, _scope(chosen["items"], others, number) if ambiguous else chosen["items"])
 
 

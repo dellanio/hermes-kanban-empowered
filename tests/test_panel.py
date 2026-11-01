@@ -921,3 +921,65 @@ def test_panel_and_a_due_reminder_in_the_same_evaluation(coord, fake_tg, clock):
     r = Rig(coord, fake_tg, clock)
     assert r.handle(str(OWNER), "done", clock.now, number_reply_to=kinds["waits"])["action"] == "skip"
     assert r.status(tid) != "blocked"
+
+
+# -- fix round 2 ---------------------------------------------------------------------------
+def test_two_unknown_outcome_edits_keep_the_last_certain_list(rig, fake_tg, clock):
+    from ke.panel import load_history
+    from ke.telegram import TelegramError
+
+    a = _add(rig, clock, "aaa", 600)
+    t0 = clock.now
+    rig.c.update_panel(t0)  # [A] certain
+    msg = rig.msg
+    c = _add(rig, clock, "ccc", 7200)
+    fake_tg.fail_next_edit = TelegramError(None, "timeout")
+    clock.now = t0 + 60
+    rig.c.update_panel(clock.now)  # [C, A] uncertain
+    d = _add(rig, clock, "ddd", 9000)
+    rig.c._tg_down = False
+    fake_tg.fail_next_edit = TelegramError(None, "timeout")
+    clock.now = t0 + 120
+    rig.c.update_panel(clock.now)  # [D, C, A] uncertain
+    hist = load_history(rig.c.store, OWNER, msg)
+    assert [bool(e.get("uncertain")) for e in hist["entries"]] == [False, True, True]  # certain list kept
+    clock.now = t0 + 300
+    assert rig.handle(str(OWNER), "1 done", t0 + 300)["action"] == "skip"
+    assert all(rig.status(x) == "blocked" for x in (a, c, d))  # the user may never have seen [D, C, A]
+    assert "panel changed" in fake_tg.last_text.lower()
+
+
+def test_dropped_uncertain_lists_leave_a_gap_that_is_ambiguous(rig, fake_tg, clock):
+    from ke.panel import load_history
+    from ke.telegram import TelegramError
+
+    a = _add(rig, clock, "aaa", 100)
+    t0 = clock.now
+    rig.c.update_panel(t0)  # X = [A] certain
+    msg = rig.msg
+    ids = [a]
+    for k in (1, 2, 3):  # three more unknown-outcome edits, each inserting an older card
+        ids.append(_add(rig, clock, f"n{k}", 1000 * (k + 1)))
+        rig.c._tg_down = False
+        fake_tg.fail_next_edit = TelegramError(502, "bad gateway")
+        clock.now = t0 + 60 * k
+        rig.c.update_panel(clock.now)
+    hist = load_history(rig.c.store, OWNER, msg)
+    assert len(hist["entries"]) == 3 and hist["entries"][0].get("uncertain") is None
+    assert hist["entries"][1].get("gap") is True  # a list between X and the next kept one was dropped
+    clock.now = t0 + 400
+    # dated in the window of the dropped list: what was on screen is unknown
+    assert rig.handle(str(OWNER), "1 done", t0 + 90)["action"] == "skip"
+    assert all(rig.status(x) == "blocked" for x in ids)
+    assert "panel changed" in fake_tg.last_text.lower()
+
+
+def test_history_without_any_certain_list_is_ambiguous(coord, fake_tg, clock):
+    from ke.panel import view_for_reply
+
+    store = coord.store
+    items = [{"board": "default", "task_id": "t_1", "version": 1}]
+    store.kv_set("panel_hist:1:2", json.dumps({"entries": [{"ts": 100, "items": items, "uncertain": True}],
+                                                "truncated": False}))
+    view = view_for_reply(store, 1, 2, items, 5000, 1)
+    assert view.ambiguous is True

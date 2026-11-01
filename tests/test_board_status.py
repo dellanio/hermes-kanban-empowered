@@ -1426,3 +1426,44 @@ def test_docs_state_telegram_replies_and_the_reader_sidecars():
     from ke import board_status
 
     assert "-shm" in board_status.StatusReader.__doc__ and "-wal" in board_status.StatusReader.__doc__
+
+
+# -- review Important #1: review-lane claims are not held yet (documented, doctor hint) ---------------
+def test_doctor_states_the_hold_scope(kanban_home, tmp_path, capsys, monkeypatch):
+    from ke import cli, hermes_api
+
+    s = _cli_settings(tmp_path)
+    monkeypatch.setattr(hermes_api, "veto_hooks_available", lambda: True)
+    cli.run_doctor(s)
+    out = _doctor(capsys)
+    assert list(out).index("boards_hold_scope") == list(out).index("boards_suspended") + 1
+    assert out["boards_hold_scope"].startswith("new claims held, except review-lane claims")
+    assert "core patch update" in out["boards_hold_scope"]
+    monkeypatch.setattr(hermes_api, "veto_hooks_available", lambda: False)
+    cli.run_doctor(s)
+    assert _doctor(capsys)["boards_hold_scope"] == "none: veto hooks missing, claims are not held"
+
+
+def test_doctor_hold_scope_in_pt_br(kanban_home, tmp_path, capsys, monkeypatch, pt_br):  # noqa: F811
+    from ke import cli, hermes_api
+
+    monkeypatch.setattr(hermes_api, "veto_hooks_available", lambda: True)
+    cli.run_doctor(_cli_settings(tmp_path))
+    assert _doctor(capsys)["boards_hold_scope"].startswith("novos inícios bloqueados, exceto na fila de revisão")
+
+
+def test_suspending_from_the_cli_mentions_the_review_lane(kanban_home, tmp_path, capsys):
+    from ke import cli
+
+    _two_boards()
+    cli.run_board_status(_cli_settings(tmp_path), "voz-hermes", "suspenso")
+    assert "Cards in review may still be picked up by a reviewer." in capsys.readouterr().out
+
+
+def test_readme_states_the_review_lane_limitation():
+    from pathlib import Path
+
+    text = " ".join((Path(__file__).resolve().parent.parent / "README.md").read_text(encoding="utf-8").split())
+    section = text.split("### Project status")[1].split("## Commands")[0]
+    assert "Review-lane claims are not held yet" in section and "core patch update" in section
+    assert "| `boards_hold_scope` |" in text

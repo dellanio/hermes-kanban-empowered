@@ -246,7 +246,9 @@ A **Suspended** or **Done** board:
 - has its new claims held through the core veto hook `kanban_pre_claim` (the card stays *ready*, with a
   `claim_refused` event "Project suspended in Kanban Empowered — reactivate it to continue."); workers
   already running finish normally. Without the veto hooks patch (`doctor`: `veto_hooks: missing`) claims
-  are not held; the rest still applies.
+  are not held; the rest still applies. **Review-lane claims are not held yet**: the dispatcher picks up a
+  card in *review* through `claim_review_task`, which the current core patch does not hook, so a reviewer
+  can still start on such a board; this needs a core patch update (`doctor` row `boards_hold_scope`).
 
 `hermes kanban-empowered explain <card>` shows "start held: project suspended" for a ready card of such a
 board. While the only ready cards are on suspended/done boards, the gateway may log its "kanban dispatcher
@@ -307,6 +309,7 @@ with its author.
 | `telegram_token` | `present` / `missing`: `TELEGRAM_BOT_TOKEN` in **this** process (the token itself is never printed). |
 | `owner_chats` | Number of entries in `telegram.owner_ids`. |
 | `boards_suspended` | Boards whose project status is Suspended or Done (`slug`, `slug (Done)`), or `none`. Read-only. |
+| `boards_hold_scope` | What a Suspended/Done board holds: new claims, except review-lane claims (not hooked by the current core patch; needs a core patch update), or nothing when the veto hooks are missing. |
 | `telegram_path` | Only once a Telegram client has recorded one: how the Bot API was reached last, `<host> (hostname)` or `<ip> (IPv4 fallback)`. |
 | `config_conflict` | One row per settings-form value that shadows a different `config.yaml` value, or a `telegram_owner_id` that `telegram.owner_ids` leaves unused. |
 | `config` | Only when the settings are invalid: the error. The plugin then runs the worker guard on defaults and does not start the coordinator. |

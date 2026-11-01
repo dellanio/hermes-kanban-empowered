@@ -302,7 +302,7 @@ EN: dict[str, str] = {
     "board_status.list.row": "{board}  {status}  {name}",
     "board_status.list.empty": "no boards",
     "board_status.set": "{board}: {old} → {new}",
-    "board_status.set.held": "New cards on this board will not be started; running ones finish normally.",
+    "board_status.set.held": "New cards on this board will not be started; running ones finish normally. Cards in review may still be picked up by a reviewer.",
     "board_status.set.reactivated": "Claims flow again and the reminders restart from now.",
     "board_status.unchanged": "{board} is already {status}",
     "board_status.unknown_board": "board {board} not found",
@@ -324,6 +324,8 @@ EN: dict[str, str] = {
     "ui.timeline.board_status.suspended": "Project {board} suspended",
     "ui.timeline.board_status.done": "Project {board} marked done",
     "explain.project.held": "start held: project {status}",
+    "doctor.hold_scope.partial": "new claims held, except review-lane claims (a reviewer can still pick up a card in review; needs a core patch update)",
+    "doctor.hold_scope.none": "none: veto hooks missing, claims are not held",
 }
 
 

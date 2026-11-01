@@ -361,6 +361,11 @@ def run_doctor(settings: Settings, config_error: Optional[str] = None) -> None:
         ("owner_chats", t("doctor.owner_chats", n=len(settings.owner_ids))),
     ]
     rows.append(("boards_suspended", _suspended_boards(settings)))
+    # what a suspended/done board holds: claim_task is hooked, claim_review_task (review lane) is not yet
+    rows.append((
+        "boards_hold_scope",
+        t("doctor.hold_scope.partial") if hermes_api.veto_hooks_available() else t("doctor.hold_scope.none"),
+    ))
     path = telegram.read_path_file(settings.shared_state_dir / "telegram_path")
     if path is not None:  # only once a client has recorded one; opens no Store
         kind = telegram.classify_path(path)

@@ -56,35 +56,36 @@ _SENT_KINDS = ("waits", "panel")
 _cache: dict[str, Any] = {}
 
 
-def load_settings(api: Any = hermes_api) -> Settings:
+def load_settings(api: Any = hermes_api, apply_messages: bool = True) -> Settings:
     """The plugin settings of the active profile (cached until the config or the Hermes home changes).
 
     An invalid config falls back to the defaults (the dashboard stays usable; ``doctor`` names the
-    error). The language override and the role names are applied to the message layer, exactly as
-    the agent half's ``register`` does.
+    error). ``apply_messages`` applies the language override and the role names to the message layer,
+    as the agent half's ``register`` does: ``plugin_api`` passes it only when it runs on its private copy
+    of the package (no agent half in the process). With the agent half present the message layer is the
+    agent's (shared with the coordinator's Telegram rendering) and is never rewritten from here.
     """
     raw = api.plugin_settings(PLUGIN_ID)
     try:
         home = str(api.hermes_home())
     except Exception:
         home = os.environ.get("HERMES_HOME", "")
-    key = json.dumps([home, raw], sort_keys=True, default=str)
+    key = json.dumps([home, raw, bool(apply_messages)], sort_keys=True, default=str)
     cached = _cache.get("settings")
     if cached is not None and cached[0] == key:
-        if messages._LANG != cached[2]:
-            messages._LANG = cached[2]  # someone else (a test, a reload) moved it: put ours back
         return cached[1]
     try:
         settings = Settings.from_mapping(raw)
     except Exception as exc:
         log.warning("kanban-empowered: invalid plugin config (%s); the dashboard uses the defaults", exc)
         settings = Settings.from_mapping({})
-    messages.set_language(settings.language)
-    roles = set(settings.owner_ids)
-    if settings.escalate_to:
-        roles.add(settings.escalate_to)
-    messages.set_roles(roles)
-    _cache["settings"] = (key, settings, messages._LANG)
+    if apply_messages:
+        messages.set_language(settings.language)
+        roles = set(settings.owner_ids)
+        if settings.escalate_to:
+            roles.add(settings.escalate_to)
+        messages.set_roles(roles)
+    _cache["settings"] = (key, settings)
     return settings
 
 

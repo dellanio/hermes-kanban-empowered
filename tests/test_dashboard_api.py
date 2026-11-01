@@ -522,3 +522,22 @@ def test_web_dashboard_bundle_is_a_slot_only_placeholder():
     assert 'register("kanban-empowered"' in src and "__HERMES_PLUGINS__" in src
     assert "import" not in src and "fetch" not in src  # nothing but the placeholder
     assert data["tab"]["hidden"] is True
+
+
+def test_settings_never_rewrite_the_agent_halfs_message_language(kanban_home, monkeypatch):
+    """Review minor 5: with the agent half in the process the dashboard reads the language it set; only the
+    dashboard's private package copy applies the config's language and role names itself."""
+    from ke import dashboard, hermes_api, messages
+
+    monkeypatch.setattr(hermes_api, "plugin_settings", lambda plugin="kanban-empowered": {"language": "pt",
+                                                                                          "escalate_to": "boss"})
+    dashboard._cache.clear()
+    monkeypatch.setattr(messages, "_LANG", None)
+    monkeypatch.setattr(messages, "_ROLES", frozenset({"sponsor"}))
+    s = dashboard.load_settings(apply_messages=False)
+    assert s.language == "pt"
+    assert messages._LANG is None and messages._ROLES == frozenset({"sponsor"})
+    dashboard._cache.clear()
+    dashboard.load_settings(apply_messages=True)
+    assert messages._LANG == "pt" and "boss" in messages._ROLES
+    dashboard._cache.clear()

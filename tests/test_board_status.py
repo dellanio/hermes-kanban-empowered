@@ -180,15 +180,29 @@ def test_reader_never_writes(tmp_path):
 
 
 class Where:
-    """A stand-in board locator: ``{task_id: board}``; records every lookup."""
+    """A stand-in board locator: ``{task_id: board}``; records every lookup.
 
-    def __init__(self, cards=None):
+    ``live`` is the list of live boards the hook may look at (default: every board named in ``cards``
+    plus ``extra``); ``lists`` counts how often the hook asked for it.
+    """
+
+    def __init__(self, cards=None, live=None, step=None, clock=None):
         self.cards = dict(cards or {})
         self.calls = []
+        self.lists = 0
+        self._live = list(live) if live is not None else sorted(set(self.cards.values()))
+        self.step = step
+        self.clock = clock
 
-    def __call__(self, board, task_id):
+    def __call__(self, board, task_id, *_rest):
         self.calls.append((board, task_id))
+        if self.step:
+            self.clock.now += self.step
         return self.cards.get(task_id) == board
+
+    def live(self):
+        self.lists += 1
+        return list(self._live)
 
 
 KW = {"assignee": "dev", "workspace_path": None, "claimer": "host:1", "telemetry_schema_version": 1}
@@ -204,13 +218,17 @@ def _statuses(tmp_path, **by_board):
     s.close()
 
 
-def test_hook_refuses_cards_of_suspended_and_done_boards(tmp_path):
-    """The card's own board decides, whatever ``board`` Hermes passes (it is the *current* board)."""
+def _hook(reader, where, **kw):
     from ke.board_status import make_pre_claim_hook
 
+    return make_pre_claim_hook(reader, locate=where, boards=where.live, **kw)
+
+
+def test_hook_refuses_cards_of_suspended_and_done_boards(tmp_path):
+    """The card's own board decides, whatever ``board`` Hermes passes (it is the *current* board)."""
     _statuses(tmp_path, frozen="suspended", finished="done", back="suspended,active")
     where = Where({"t_f": "frozen", "t_d": "finished", "t_b": "back", "t_a": "default"})
-    hook = make_pre_claim_hook(_reader(tmp_path), locate=where)
+    hook = _hook(_reader(tmp_path), where)
     assert hook(task_id="t_f", board="default", **KW) == SUSPENDED_EN
     assert hook(task_id="t_d", board="frozen", **KW) == DONE_EN
     assert hook(task_id="t_b", board="back", **KW) is None  # reactivated
@@ -219,35 +237,34 @@ def test_hook_refuses_cards_of_suspended_and_done_boards(tmp_path):
     assert hook(task_id=None, board="frozen", **KW) is None
 
 
-def test_hook_looks_only_at_non_active_boards_and_the_hint_first(tmp_path):
-    from ke.board_status import make_pre_claim_hook
-
-    _statuses(tmp_path, a="suspended", b="done", c="suspended,active")
-    where = Where({"t_1": "b"})
-    hook = make_pre_claim_hook(_reader(tmp_path), locate=where)
+def test_hook_looks_only_at_live_non_active_boards_and_the_hint_first(tmp_path):
+    _statuses(tmp_path, a="suspended", b="done", c="suspended,active", gone="suspended")
+    where = Where({"t_1": "b"}, live=["default", "a", "b", "c"])
+    hook = _hook(_reader(tmp_path), where)
     assert hook(task_id="t_1", board="b") == DONE_EN
     assert where.calls == [("b", "t_1")]  # the board Hermes named is tried first
     where.calls.clear()
     assert hook(task_id="t_9", board="default") is None
-    assert sorted(where.calls) == [("a", "t_9"), ("b", "t_9")]  # never the active ones
+    assert sorted(where.calls) == [("a", "t_9"), ("b", "t_9")]  # never the active ones, never a dead board
 
 
 def test_hook_touches_no_board_while_every_board_is_active(tmp_path):
-    from ke.board_status import make_pre_claim_hook
-
-    def locate(board, task_id):
+    def locate(*a):
         raise AssertionError("no board lookup expected")
 
-    assert make_pre_claim_hook(_reader(tmp_path), locate=locate)(task_id="t", board="default") is None
+    def boards():
+        raise AssertionError("no board listing expected")
+
+    from ke.board_status import make_pre_claim_hook
+
+    assert make_pre_claim_hook(_reader(tmp_path), locate=locate, boards=boards)(task_id="t", board="default") is None
     _statuses(tmp_path, x="suspended,active")
-    assert make_pre_claim_hook(_reader(tmp_path), locate=locate)(task_id="t", board="default") is None
+    assert make_pre_claim_hook(_reader(tmp_path), locate=locate, boards=boards)(task_id="t", board="default") is None
 
 
 def test_hook_reason_in_pt_br(tmp_path, pt_br):  # noqa: F811
-    from ke.board_status import make_pre_claim_hook
-
     _statuses(tmp_path, frozen="suspended", finished="done")
-    hook = make_pre_claim_hook(_reader(tmp_path), locate=Where({"t_f": "frozen", "t_d": "finished"}))
+    hook = _hook(_reader(tmp_path), Where({"t_f": "frozen", "t_d": "finished"}))
     assert hook(task_id="t_f", board="default") == {
         "refuse": "Projeto suspenso no Kanban Empowered — reative para continuar."
     }
@@ -262,29 +279,31 @@ def test_hook_fails_open_on_store_error(tmp_path):
     path = tmp_path / "state" / "state.db"
     path.parent.mkdir(parents=True)
     path.write_bytes(b"this is not a sqlite database" * 100)
-    assert make_pre_claim_hook(_reader(tmp_path), locate=Where({"t": "b"}))(task_id="t", board="b") is None
+    assert _hook(_reader(tmp_path), Where({"t": "b"}))(task_id="t", board="b") is None
 
     class Broken:
         def statuses(self):
             raise RuntimeError("boom")
 
-    assert make_pre_claim_hook(Broken(), locate=Where({"t": "b"}))(task_id="t", board="b") is None
+    where = Where({"t": "b"})
+    assert make_pre_claim_hook(Broken(), locate=where, boards=where.live)(task_id="t", board="b") is None
 
 
-def test_hook_fails_open_when_the_board_lookup_fails(tmp_path):
+def test_hook_fails_open_when_the_board_listing_fails(tmp_path):
     from ke.board_status import make_pre_claim_hook
 
     _statuses(tmp_path, frozen="suspended")
 
-    def locate(board, task_id):
-        raise TimeoutError("database is locked")
+    def boards():
+        raise OSError("boards dir unreadable")
 
-    assert make_pre_claim_hook(_reader(tmp_path), locate=locate)(task_id="t", board="frozen") is None
+    hook = make_pre_claim_hook(_reader(tmp_path), locate=Where({"t": "frozen"}), boards=boards)
+    assert hook(task_id="t", board="frozen") is None
 
 
 def test_hook_fails_open_when_the_store_is_locked(tmp_path):
     """A writer holding an exclusive lock: the read gives up after its short busy timeout, fail-open."""
-    from ke.board_status import StatusReader, make_pre_claim_hook
+    from ke.board_status import StatusReader
 
     s = _store(tmp_path)
     s.set_board_status("frozen", "suspended", 1, "cli")
@@ -293,11 +312,134 @@ def test_hook_fails_open_when_the_store_is_locked(tmp_path):
     try:
         reader = StatusReader(tmp_path / "state" / "state.db", busy_ms=50, clock=Tick())
         started = time.monotonic()
-        assert make_pre_claim_hook(reader, locate=Where({"t": "frozen"}))(task_id="t", board="frozen") is None
+        assert _hook(reader, Where({"t": "frozen"}))(task_id="t", board="frozen") is None
         assert time.monotonic() - started < 2.0
     finally:
         s.conn.execute("ROLLBACK")
         s.close()
+
+
+# -- hook cost: one listing per scan, lookup cache, time budget (review Important #2) ----------------
+def test_hook_lists_the_live_boards_once_per_scan(tmp_path):
+    _statuses(tmp_path, **{f"b{i}": "suspended" for i in range(6)})
+    where = Where({}, live=[f"b{i}" for i in range(6)])
+    clock = Tick()
+    hook = _hook(_reader(tmp_path, clock), where, clock=clock)
+    assert hook(task_id="t_new", board="default") is None
+    assert where.lists == 1 and len(where.calls) == 6
+
+
+def test_hook_caches_a_hit_until_the_statuses_change(tmp_path):
+    from ke.board_status import CACHE_TTL_S
+
+    _statuses(tmp_path, frozen="suspended", other="done")
+    clock = Tick()
+    where = Where({"t_f": "frozen"}, live=["frozen", "other"])
+    hook = _hook(_reader(tmp_path, clock), where, clock=clock)
+    for _ in range(3):
+        assert hook(task_id="t_f", board="default") == SUSPENDED_EN
+        clock.now += 60  # every dispatcher tick retries the held card
+    assert where.calls == [("frozen", "t_f")] and where.lists == 1  # one scan, then the cache
+    s = _store(tmp_path)
+    s.set_board_status("third", "suspended", 9, "cli")  # the statuses change: the cache is dropped
+    s.close()
+    clock.now += CACHE_TTL_S + 1
+    assert hook(task_id="t_f", board="default") == SUSPENDED_EN
+    assert len(where.calls) == 2
+
+
+def test_hook_caches_a_miss_for_a_short_ttl(tmp_path):
+    from ke.board_status import NEGATIVE_TTL_S
+
+    assert 0 < NEGATIVE_TTL_S <= 60
+    _statuses(tmp_path, frozen="suspended")
+    clock = Tick()
+    where = Where({"t_live": "default"}, live=["default", "frozen"])
+    hook = _hook(_reader(tmp_path, clock), where, clock=clock)
+    assert hook(task_id="t_live", board="default") is None
+    clock.now += NEGATIVE_TTL_S - 1
+    assert hook(task_id="t_live", board="default") is None
+    assert len(where.calls) == 1
+    clock.now += 2
+    assert hook(task_id="t_live", board="default") is None
+    assert len(where.calls) == 2  # expired: looked up again
+
+
+def test_hook_cache_is_bounded(tmp_path):
+    from ke.board_status import LOOKUP_CACHE_MAX
+
+    _statuses(tmp_path, frozen="suspended")
+    clock = Tick()
+    where = Where({}, live=["frozen"])
+    hook = _hook(_reader(tmp_path, clock), where, clock=clock)
+    for i in range(LOOKUP_CACHE_MAX + 10):
+        hook(task_id=f"t_{i}", board="default")
+    calls = len(where.calls)
+    hook(task_id="t_0", board="default")  # the oldest entry was evicted
+    assert len(where.calls) == calls + 1
+    hook(task_id=f"t_{LOOKUP_CACHE_MAX + 9}", board="default")  # the newest is still cached
+    assert len(where.calls) == calls + 1
+
+
+def test_hook_scan_has_a_time_budget_well_under_the_core_cap(tmp_path, caplog):
+    """Many non-active boards and slow lookups: the scan stops at the budget, fails open and says so once."""
+    import logging
+
+    from ke import board_status
+    from ke.board_status import SCAN_BUDGET_S
+
+    assert 0 < SCAN_BUDGET_S <= 1.0  # the core abandons the callback at 3 s
+    boards = [f"done-{i:03d}" for i in range(300)]
+    _statuses(tmp_path, **{b: "done" for b in boards})
+    clock = Tick()
+    where = Where({"t_x": boards[-1]}, live=boards, step=0.01, clock=clock)  # 10 ms per lookup
+    board_status._budget_warned = False
+    hook = _hook(_reader(tmp_path, clock), where, clock=clock)
+    with caplog.at_level(logging.WARNING, logger="ke.board_status"):
+        assert hook(task_id="t_x", board="default") is None  # budget ran out before the last board
+        first = len(where.calls)
+        assert first <= SCAN_BUDGET_S / 0.01 + 2
+        assert hook(task_id="t_x", board="default") is None  # not cached: scanned (and cut) again
+        assert len(where.calls) > first
+    warnings = [r for r in caplog.records if "budget" in r.getMessage()]
+    assert len(warnings) == 1  # once per process
+
+
+def test_hook_with_many_real_non_active_boards_scans_once_per_card(kanban_home, tmp_path, monkeypatch):
+    """Real boards: the second claim attempt of the same ready card opens no board at all."""
+    from hermes_cli import kanban_db_boards as kbb
+    from ke import hermes_api
+    from ke.board_status import StatusReader, make_pre_claim_hook
+    from conftest import create_task
+
+    s = _store(tmp_path)
+    for i in range(8):
+        kbb.create_board(f"old-{i}")
+        with hermes_api.connect(f"old-{i}") as conn:
+            pass
+        s.set_board_status(f"old-{i}", "done", 1, "cli")
+    with hermes_api.connect("default") as conn:
+        live = create_task(conn, title="live", assignee="dev")
+    with hermes_api.connect("old-5") as conn:
+        frozen = create_task(conn, title="frozen", assignee="dev")
+    s.close()
+    hook = make_pre_claim_hook(StatusReader(tmp_path / "state" / "state.db"))
+    opened = []
+    real_connect = hermes_api.connect
+
+    def counting_connect(board):
+        opened.append(board)
+        return real_connect(board)
+
+    monkeypatch.setattr(hermes_api, "connect", counting_connect)
+    started = time.monotonic()
+    assert hook(task_id=live, board="default", **KW) is None
+    assert hook(task_id=frozen, board="default", **KW) == DONE_EN
+    assert time.monotonic() - started < 1.0
+    n = len(opened)
+    assert hook(task_id=live, board="default", **KW) is None
+    assert hook(task_id=frozen, board="default", **KW) == DONE_EN
+    assert len(opened) == n  # both answers came from the cache
 
 
 def test_reader_caches_for_at_most_the_ttl(tmp_path):

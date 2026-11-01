@@ -35,10 +35,11 @@ def board_exists(board: str) -> bool:
     return bool(board) and board in boards()
 
 
-def task_exists(board: str, tid: str) -> bool:
+def task_exists(board: str, tid: str, live=None) -> bool:
     """True when card ``tid`` is on the live board ``board`` (False for an unknown or archived board, which
-    is never opened, so a lookup can never create a board)."""
-    if not board_exists(board):
+    is never opened, so a lookup can never create a board). ``live`` is the caller's list of live boards
+    (:func:`boards`), so a scan over several boards lists them once; ``None`` lists them here."""
+    if not board or board not in (boards() if live is None else live):
         return False
     with connect(board) as conn:
         return _kb.get_task(conn, tid) is not None

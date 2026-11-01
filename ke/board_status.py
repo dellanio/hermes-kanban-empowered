@@ -21,14 +21,23 @@ Which board is the card on? Not the hook's ``board`` argument: Hermes fills it w
 (``get_current_board()``: the context override, ``HERMES_KANBAN_BOARD`` or the ``current`` file), and the
 gateway dispatcher claims every board's cards without pinning that board as current. So while every board
 is active the hook answers at once without touching any board; otherwise it looks the card up on each
-suspended/done board (the named board first) through ``hermes_api.task_exists`` (a plain read; the board
-being claimed is in WAL mode, so the claim's open write transaction does not block it). Card ids are
+live suspended/done board (the named board first) through ``hermes_api.task_exists`` (a plain read; the
+board being claimed is in WAL mode, so the claim's open write transaction does not block it). Card ids are
 random per card, so a hit identifies the card's board.
+
+Cost. The scan runs under the claimed board's write lock and a refused card stays ``ready``, so every
+dispatcher tick asks again. Therefore: the live boards are listed once per scan; the answer is cached per
+card id (a hit until the statuses change, since cards never move between boards; a miss for
+``NEGATIVE_TTL_S``; at most ``LOOKUP_CACHE_MAX`` ids); and the whole scan has a time budget,
+``SCAN_BUDGET_S``, well under the core's 3 s cap. When the budget runs out the hook fails open (the claim
+proceeds), nothing is cached, and a warning is logged once per process. A single lookup cannot be
+interrupted, so the budget is checked between boards; the core's cap still bounds a lookup that hangs.
 """
 from __future__ import annotations
 
 import logging
 import sqlite3
+from collections import OrderedDict
 import threading
 import time
 import unicodedata
@@ -43,6 +52,11 @@ log = logging.getLogger(__name__)
 
 CACHE_TTL_S = 5.0  # a status change reaches every claimer within this long
 BUSY_MS = 250  # how long a read waits on a locked Store before giving up (fail-open)
+SCAN_BUDGET_S = 1.0  # the whole board scan of one claim; the core abandons the callback at 3 s
+NEGATIVE_TTL_S = 30.0  # "this card is on no non-active board" is trusted this long
+LOOKUP_CACHE_MAX = 2048  # card ids remembered by the hook
+
+_budget_warned = False  # the scan-budget warning is logged once per process
 
 _ALIASES = {
     "active": "active", "ativo": "active", "ativa": "active",
@@ -130,32 +144,110 @@ class StatusReader:
         return self.statuses().get(board, "active")
 
 
+class _LookupCache:
+    """``task_id -> (board or None, expires_at or None)``, bounded LRU, dropped whenever the set of non-active
+    boards changes (a hit is then no longer known to matter, a miss may have become a hit)."""
+
+    def __init__(self, max_size: int = LOOKUP_CACHE_MAX) -> None:
+        self.max_size = max_size
+        self._lock = threading.Lock()
+        self._key: Optional[frozenset] = None
+        self._items: "OrderedDict[str, tuple[Optional[str], Optional[float]]]" = OrderedDict()
+
+    def get(self, key: frozenset, task_id: str, now: float) -> tuple[bool, Optional[str]]:
+        with self._lock:
+            if key != self._key:
+                self._key, self._items = key, OrderedDict()
+                return False, None
+            hit = self._items.get(task_id)
+            if hit is None:
+                return False, None
+            board, expires = hit
+            if expires is not None and now >= expires:
+                del self._items[task_id]
+                return False, None
+            self._items.move_to_end(task_id)
+            return True, board
+
+    def put(self, key: frozenset, task_id: str, board: Optional[str], expires: Optional[float]) -> None:
+        with self._lock:
+            if key != self._key:
+                self._key, self._items = key, OrderedDict()
+            self._items[task_id] = (board, expires)
+            self._items.move_to_end(task_id)
+            while len(self._items) > self.max_size:
+                self._items.popitem(last=False)
+
+
+def _warn_budget(task_id: Any, scanned: int, total: int) -> None:
+    global _budget_warned
+    if _budget_warned:
+        return
+    _budget_warned = True
+    log.warning(
+        "kanban-empowered: the board status check ran out of its %.1f s budget after %d of %d suspended/done "
+        "boards (card %s); claims proceed unchecked when this happens (logged once per process)",
+        SCAN_BUDGET_S, scanned, total, task_id,
+    )
+
+
 def make_pre_claim_hook(
-    reader: Any, locate: Optional[Callable[[str, str], bool]] = None
+    reader: Any,
+    locate: Optional[Callable[..., bool]] = None,
+    boards: Optional[Callable[[], Any]] = None,
+    clock: Callable[[], float] = time.monotonic,
+    budget_s: Optional[float] = None,
 ) -> Callable[..., Optional[dict]]:
     """The ``kanban_pre_claim`` callback: ``{"refuse": reason}`` for a card of a suspended/done board, else ``None``.
 
     Hermes calls it with ``task_id, board, assignee, workspace_path, claimer`` (+ ``telemetry_schema_version``).
-    ``board`` is only a hint (see the module doc): ``locate(board, task_id)`` (default
-    ``hermes_api.task_exists``) tells whether the card is on one of the non-active boards. Any error
-    (unreadable Store, board lookup, timeout, translation) returns ``None``: fail-open.
+    ``board`` is only a hint (see the module doc). ``boards()`` (default ``hermes_api.boards``) lists the live
+    boards once per scan; ``locate(board, task_id)`` (default ``hermes_api.task_exists`` against that list)
+    tells whether the card is on that board. Answers are cached (see the module doc) and the scan is bounded
+    by ``budget_s`` (default ``SCAN_BUDGET_S``). Any error returns ``None``: fail-open.
     """
-    find = locate if locate is not None else hermes_api.task_exists
+    lister = boards if boards is not None else hermes_api.boards
+    cache = _LookupCache()
 
     def kanban_pre_claim(task_id: Any = None, board: Any = None, **_kw: Any) -> Optional[dict]:
         try:
             if not task_id:
                 return None
+            tid = str(task_id)
             off = {b: s for b, s in reader.statuses().items() if s != "active"}
             if not off:
                 return None  # the common case: nothing to look up
-            for candidate in sorted(off, key=lambda b: (b != board, b)):
-                if find(candidate, str(task_id)):
-                    reason = refuse_reason(off[candidate])
-                    return {"refuse": reason} if reason else None
-            return None
+            key = frozenset(off.items())
+            now = clock()
+            known, where = cache.get(key, tid, now)
+            if not known:
+                where = _scan(tid, board, off, now)
+                if where is _OUT_OF_BUDGET:
+                    return None
+                cache.put(key, tid, where, None if where else now + NEGATIVE_TTL_S)
+            if where is None:
+                return None
+            reason = refuse_reason(off[where])
+            return {"refuse": reason} if reason else None
         except Exception as exc:
             log.debug("kanban-empowered: board status check failed for %r (fail-open): %s", task_id, exc)
             return None
 
+    def _scan(tid: str, hint: Any, off: dict, started: float) -> Any:
+        live = list(lister())
+        live_set = set(live)
+        find = locate if locate is not None else (lambda b, t: hermes_api.task_exists(b, t, live=live))
+        candidates = [b for b in sorted(off, key=lambda b: (b != hint, b)) if b in live_set]
+        budget = SCAN_BUDGET_S if budget_s is None else budget_s
+        for n, candidate in enumerate(candidates):
+            if clock() - started >= budget:
+                _warn_budget(tid, n, len(candidates))
+                return _OUT_OF_BUDGET
+            if find(candidate, tid):
+                return candidate
+        return None
+
     return kanban_pre_claim
+
+
+_OUT_OF_BUDGET = object()

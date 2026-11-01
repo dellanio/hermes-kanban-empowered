@@ -1,14 +1,17 @@
 """``hermes kanban-empowered ...`` command line."""
 from __future__ import annotations
 
+import os
 import time
 from typing import Any, Optional
 
-from . import conditions, guards_watch, hermes_api, inbound
+from . import conditions, guards_watch, hermes_api, inbound, panel
 from .leader import LeaderLock
 from .messages import render_done, t
 from .settings import Settings
 from .store import Store
+
+WATCH_INTERVAL_S = 5
 
 _settings: Optional[Settings] = None
 _config_error: Optional[str] = None
@@ -31,7 +34,11 @@ def setup(parser: Any) -> None:
     ex = sub.add_parser("explain", help="Explain why a card is (not) moving")
     ex.add_argument("card", help="card id (e.g. t_1a2b3c4d)")
     ex.add_argument("--board", default=None, help="board slug (default: search all boards)")
-    sub.add_parser("status", help="Show what is running, waiting and resolved across boards")
+    st = sub.add_parser("status", help="Show what is running, waiting and resolved across boards")
+    st.add_argument(
+        "--watch", action="store_true", default=False,
+        help="Live panel: redraw every %d s until Ctrl+C" % WATCH_INTERVAL_S,
+    )
     dn = sub.add_parser("done", help="Resolve a card's human wait (same as replying \"done\" on Telegram)")
     dn.add_argument("card", help="card id (e.g. t_1a2b3c4d)")
     dn.add_argument("--board", default=None, help="board slug (default: search all boards)")
@@ -52,6 +59,8 @@ def run(args: Any) -> int:
     if cmd == "explain":
         return run_explain(settings, args.card, getattr(args, "board", None))
     if cmd == "status":
+        if getattr(args, "watch", False):
+            return run_status_watch(settings)
         return run_status(settings)
     if cmd == "done":
         return run_done(settings, args.card, getattr(args, "board", None))
@@ -191,6 +200,43 @@ def run_status(settings: Settings) -> int:
     store = _open_store(settings)
     try:
         print(conditions.format_status(conditions.fleet_status(store, time.time(), settings=settings)))
+        return 0
+    finally:
+        store.close()
+
+
+def _clear_screen() -> None:
+    """``cls`` on Windows, the ANSI clear-and-home sequence elsewhere."""
+    if os.name == "nt":
+        os.system("cls")
+    else:
+        print("[2J[H", end="", flush=True)
+
+
+def run_status_watch(
+    settings: Settings,
+    interval: float = WATCH_INTERVAL_S,
+    sleep: Any = time.sleep,
+    clear: Any = _clear_screen,
+) -> int:
+    """Redraw the live panel every ``interval`` seconds until Ctrl+C (exit code 0).
+
+    A failing refresh prints the error and the next refresh tries again.
+    """
+    store = _open_store(settings)
+    try:
+        while True:
+            now = time.time()
+            try:
+                body = panel.render_terminal(panel.build_snapshot(store, hermes_api, now, settings=settings))
+            except Exception as exc:
+                body = t("status.watch.error", error=exc)
+            clear()
+            print(body)
+            print()
+            print(t("status.watch.hint", n=int(interval)))
+            sleep(interval)
+    except KeyboardInterrupt:
         return 0
     finally:
         store.close()

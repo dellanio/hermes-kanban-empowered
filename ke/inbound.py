@@ -20,6 +20,13 @@ From step 3 on the message is consumed: any later failure still returns skip.
 Only then is the card read: it must still be ``blocked`` with the same block version as
 the item in the message (the live latest ``blocked`` event id, and the tracked wait row
 when there is one), so a "done" answered to an old reminder can never resolve a newer block.
+
+The same rules apply to replies to the live panel (``sent_messages`` kind "panel"), a message the
+coordinator edits in place. Its numbering changes over time, so the reply is resolved against the
+list that was current at the reply's own date (``panel.view_for_reply``); when the user may have
+been looking at another list that differs at the referenced position the reply is consumed and
+answered "the panel changed; reply again" instead of being applied. The panel mixes the boards of
+several owners, so the sender must own EVERY item the reply could mean (otherwise ``None``).
 """
 from __future__ import annotations
 
@@ -30,6 +37,7 @@ import threading
 import time
 from typing import Any, Callable, Optional
 
+from . import panel
 from .messages import render_done, t
 from .waits import block_version, held_behind
 
@@ -109,6 +117,21 @@ def _replied_to_our_bot(event: Any, telegram: Any) -> bool:
     return str(author) == str(bot_id)
 
 
+def _owner_chat(settings: Any, item: dict) -> Optional[str]:
+    """The canonical Telegram id of the configured owner of ``item``'s board, or ``None``."""
+    return _canonical_id(settings.owner_ids.get(settings.owner_for(str(item["board"]))))
+
+
+def _reply_ts(event: Any, now: float) -> float:
+    """When the user wrote the message (Telegram's date), never later than ``now``; ``now`` when unknown."""
+    stamp = getattr(event, "timestamp", None)
+    try:
+        value = float(stamp.timestamp()) if hasattr(stamp, "timestamp") else float(stamp)
+    except (TypeError, ValueError, OverflowError, OSError):
+        return float(now)
+    return min(value, float(now))
+
+
 def _clip(text: str) -> str:
     text = " ".join(str(text or "").split())
     return text if len(text) <= _COMMENT_TEXT_MAX else text[: _COMMENT_TEXT_MAX - 1] + "…"
@@ -184,7 +207,7 @@ def handle_inbound(event: Any, settings: Any, store: Any, api: Any, telegram: An
     if match is None:
         return None  # not an explicit confirmation: a normal message for the agent
     sent = store.get_sent_message(int(chat), int(reply_to))
-    if sent is None or sent.get("kind") != "waits":
+    if sent is None or sent.get("kind") not in ("waits", "panel"):
         return None
     if not _replied_to_our_bot(event, telegram):
         return None  # same chat and message id, but a message of another bot (DM ids are per bot)
@@ -192,33 +215,55 @@ def handle_inbound(event: Any, settings: Any, store: Any, api: Any, telegram: An
     if not isinstance(items, list) or not items:
         return None
     number = int(match.group(1)) if match.group(1) else None
+    is_panel = sent["kind"] == "panel"
+    ambiguous = False
+    scope_items = None
+    if is_panel:
+        view = panel.view_for_reply(
+            store, int(chat), int(reply_to), items, _reply_ts(event, now), number
+        )
+        items, ambiguous, scope_items = view.items, view.ambiguous, view.scope
+        if not items:
+            return None
     if number is not None:
         selected = items[number - 1] if 1 <= number <= len(items) else None
     else:
         selected = items[0] if len(items) == 1 else None
 
     # -- 2. the sender is the configured owner of the selected item -------------------------
-    scope = [selected] if selected is not None else items
-    owners = {settings.owner_for(str(item["board"])) for item in scope}
-    allowed = {_canonical_id(settings.owner_ids.get(o)) for o in owners} - {None}
-    if sender not in allowed:
-        return None  # not the owner (configured identity or stranger): untouched, flows on
+    if scope_items is not None and ambiguous:
+        scope = scope_items
+    else:
+        scope = [selected] if selected is not None else items
+    if is_panel:  # mixed owners: the sender must own every item the reply could mean
+        if not all(_owner_chat(settings, item) == sender for item in scope):
+            return None
+    else:
+        owners = {settings.owner_for(str(item["board"])) for item in scope}
+        allowed = {_canonical_id(settings.owner_ids.get(o)) for o in owners} - {None}
+        if sender not in allowed:
+            return None  # not the owner (configured identity or stranger): untouched, flows on
 
     # -- 3. each update acts at most once ---------------------------------------------------
     if not store.mark_update(f"tg:{chat}:{message}", int(now)):
         return _skip()
     try:
-        _act(event, source, settings, store, api, telegram, now, sent, items, selected, chat, sender, message)
+        _act(event, source, settings, store, api, telegram, now, sent, items, selected, chat, sender, message, ambiguous)
     except Exception:
         log.exception("kanban-empowered: handling a consumed Telegram reply failed")
     return _skip()
 
 
-def _act(event, source, settings, store, api, telegram, now, sent, items, selected, chat, sender, message) -> None:
+def _act(
+    event, source, settings, store, api, telegram, now, sent, items, selected, chat, sender, message, ambiguous=False
+) -> None:
     """Everything after the update was consumed; the caller returns skip whatever happens here."""
     # -- 4. the request is still fresh ------------------------------------------------------
     if now - int(sent["created_at"]) >= settings.reply_ttl_s:
         _reply(telegram, int(chat), int(message), t("inbound.expired"))
+        return
+    if ambiguous:
+        _reply(telegram, int(chat), int(message), t("inbound.panel_changed"))
         return
     if selected is None:
         _reply(telegram, int(chat), int(message), t("inbound.which_item", n=len(items)))

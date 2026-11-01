@@ -10,11 +10,12 @@ plain ``callable(now)`` and runs in the fixed order of ``STEP_ORDER``.
 """
 from __future__ import annotations
 
+import hashlib
 import logging
 import time
 from typing import Any, Callable, Optional
 
-from . import hermes_api
+from . import hermes_api, panel
 from .guards_watch import GuardWatch
 from .infra import InfraRecovery
 from .messages import render_guard_chunks, render_infra_alert, render_waits_chunks, t
@@ -67,6 +68,7 @@ class Coordinator:
         self.register_step("waits", self._waits_step)
         self.register_step("guards", self._guards_step)
         self.register_step("infra", self._infra_step)
+        self.register_step("panel", self.update_panel)
 
     # -- wiring --------------------------------------------------------------
     def register_step(self, name: str, fn: Step) -> None:
@@ -169,6 +171,112 @@ class Coordinator:
                     self.infra.mark_alerted(alert, now)
                 except Exception:
                     log.exception("kanban-empowered: could not mark an infra alert as sent")
+
+    # -- live panel (pinned message) ---------------------------------------------------
+    def update_panel(self, now: float) -> None:
+        """Keep the pinned panel message in sync with a fresh snapshot (default owner's chat).
+
+        First time: ``send`` + ``pin``, remembering ``kv panel_message_id`` (and its chat). Afterwards
+        ``edit`` only when the text changed (``kv panel_hash``). The message is recreated (send + pin,
+        id overwritten) when Telegram says it is gone or cannot be edited (also when the owner's chat
+        changed); any other error is logged and the id kept, so the next evaluation retries.
+        At most one new message per call, so the per-pass message cap is never in play; a transport
+        failure marks Telegram down for the rest of the evaluation. The numbered items are recorded
+        as ``sent_messages(kind="panel")`` on every send and edit so ``"1 done"`` works on the panel.
+        """
+        s = self.settings
+        if not s.pin_live_panel or self._tg_down or not self._telegram_ready():
+            return
+        owner = s.default_owner
+        chat_id = self._owner_chat(owner)
+        if chat_id is None:
+            return
+        snap = panel.build_snapshot(self.store, self.api, now, settings=s)
+        text = panel.render_telegram(snap)
+        items = panel.panel_items(snap)
+        digest = hashlib.sha256(text.encode("utf-8")).hexdigest()
+        message_id = self._panel_message_id(chat_id)
+        if message_id is not None:
+            if self.store.kv_get("panel_hash") == digest:
+                self._panel_sync_items(chat_id, message_id, items, now)
+                self._ensure_pinned(owner, chat_id, message_id)
+                return
+            try:
+                self._tg_call("edit", chat_id, message_id, text)
+            except Exception as exc:
+                reason = str(getattr(exc, "description", "") or exc).lower()
+                if "message is not modified" in reason:
+                    pass  # Telegram already shows exactly this text
+                elif "message to edit not found" in reason or "message can't be edited" in reason:
+                    message_id = None  # gone: fall through to a new message
+                else:
+                    self._log_send_failure(owner, chat_id, exc)
+                    return
+            if message_id is not None:
+                self.store.kv_set("panel_hash", digest)
+                self._panel_record(chat_id, message_id, items, now)
+                self._ensure_pinned(owner, chat_id, message_id)
+                return
+        try:
+            message_id = self._tg_send(chat_id, text)
+        except Exception as exc:
+            self._log_send_failure(owner, chat_id, exc)
+            return
+        self.store.kv_set("panel_message_id", str(message_id))
+        self.store.kv_set("panel_chat_id", str(chat_id))
+        self.store.kv_set("panel_hash", digest)
+        self.store.kv_set("panel_pin_done", "")
+        self._panel_record(chat_id, message_id, items, now)
+        self._ensure_pinned(owner, chat_id, message_id)
+
+    def _panel_message_id(self, chat_id: int) -> Optional[int]:
+        """The tracked panel message id, or ``None`` (none yet, unreadable, or sent to another chat)."""
+        raw, chat = self.store.kv_get("panel_message_id"), self.store.kv_get("panel_chat_id")
+        try:
+            if raw and chat is not None and int(chat) == int(chat_id):
+                return int(raw)
+        except ValueError:
+            pass
+        return None
+
+    def _panel_record(self, chat_id: int, message_id: int, items: list, now: float) -> None:
+        try:
+            panel.record_items(self.store, chat_id, message_id, items, now)
+        except Exception:
+            log.exception("kanban-empowered: could not record the panel items of message %s", message_id)
+
+    def _panel_sync_items(self, chat_id: int, message_id: int, items: list, now: float) -> None:
+        """Same text, but maybe other versions: replies are validated against what is current."""
+        try:
+            sent = self.store.get_sent_message(chat_id, message_id)
+            if sent is None or sent.get("kind") != "panel" or sent.get("items") != items:
+                panel.record_items(self.store, chat_id, message_id, items, now)
+        except Exception:
+            log.exception("kanban-empowered: could not refresh the panel items of message %s", message_id)
+
+    def _ensure_pinned(self, owner: str, chat_id: int, message_id: int) -> None:
+        """Pin the panel once. A transient failure is retried on a later evaluation; a rejection
+        (e.g. the bot may not pin here) is logged once and not retried."""
+        if self.store.kv_get("panel_pin_done") == "1" or self._tg_down:
+            return
+        try:
+            self._tg_call("pin", chat_id, message_id)
+        except Exception as exc:
+            self._log_send_failure(owner, chat_id, exc)
+            status = getattr(exc, "status", None)
+            if status is not None and 400 <= status < 500 and status != 429:
+                self.store.kv_set("panel_pin_done", "1")
+            return
+        self.store.kv_set("panel_pin_done", "1")
+
+    def _tg_call(self, method: str, *args: Any) -> Any:
+        """``telegram.edit`` / ``telegram.pin`` that remembers a transport failure (like ``_tg_send``)."""
+        try:
+            return getattr(self.telegram, method)(*args)
+        except Exception as exc:
+            if getattr(exc, "status", None) is None:
+                self._tg_down = True
+            raise
 
     # -- Telegram delivery of the reminders -------------------------------------
     def _warn_once(self, key: str, msg: str, *args: Any) -> None:

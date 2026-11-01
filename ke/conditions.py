@@ -271,20 +271,22 @@ def _local_midnight(now: float) -> int:
     return int(time.mktime((lt.tm_year, lt.tm_mon, lt.tm_mday, 0, 0, 0, 0, 0, -1)))
 
 
-def fleet_status(store: Store, now: float, settings: Optional[Settings] = None) -> dict:
+def fleet_status(store: Store, now: float, settings: Optional[Settings] = None, api: Any = None) -> dict:
     """Snapshot across all boards: running cards, human waits, guarded cards, resolved today.
 
-    A board that cannot be read is skipped rather than failing the whole status.
+    A board that cannot be read is skipped rather than failing the whole status. ``api`` is the
+    Hermes adapter to read the boards through (default: ``hermes_api``).
     """
     settings = settings if settings is not None else Settings.from_mapping({})
-    boards = hermes_api.boards()
+    api = api if api is not None else hermes_api
+    boards = api.boards()
     running: list[dict] = []
     human_waits: list[dict] = []
     guarded: list[dict] = []
     for board in boards:
         try:
-            with hermes_api.connect(board) as conn:
-                for task in hermes_api.list_tasks(conn, status="running"):
+            with api.connect(board) as conn:
+                for task in api.list_tasks(conn, status="running"):
                     running.append(
                         {
                             "board": board,
@@ -295,7 +297,7 @@ def fleet_status(store: Store, now: float, settings: Optional[Settings] = None) 
                             "heartbeat_age_s": _age(now, task.last_heartbeat_at) if task.last_heartbeat_at else None,
                         }
                     )
-                for task in hermes_api.list_tasks(conn, status="blocked"):
+                for task in api.list_tasks(conn, status="blocked"):
                     if not _is_human_block(task, settings):
                         continue
                     wait = store.latest_wait(board, task.id)
@@ -311,7 +313,7 @@ def fleet_status(store: Store, now: float, settings: Optional[Settings] = None) 
                             "age_s": _age(now, since),
                         }
                     )
-                for task in hermes_api.list_tasks(conn, status="ready"):
+                for task in api.list_tasks(conn, status="ready"):
                     hits, reason = _guard_hits(_events(conn, task.id))
                     if not hits:
                         continue

@@ -171,6 +171,9 @@ def make_coordinator(
     from ke.coordinator import Coordinator
     from ke.store import Store
 
+    # The live panel sends its own pinned message on every evaluation; suites about other messages
+    # opt out (tests/test_panel.py turns it back on).
+    settings_overrides.setdefault("pin_live_panel", False)
     settings = settings_for_test(
         tmp_path, coordinator_profile=coordinator_profile, **settings_overrides
     )

@@ -221,6 +221,11 @@ the Desktop half enabled in **Capabilities > Plugins**.
   a comment; any other text is the answer and is posted on the card) and the card comment says
   "via Kanban-Empowered (desktop)". The answer is applied only while the card is still blocked on the
   block you were looking at.
+  Only a card waiting on a person can be answered (as on Telegram); a card parked by Hermes'
+  failure breaker is shown read-only.
+- Any authenticated Hermes Desktop or web-dashboard session against this gateway can answer the
+  waits of any board (Telegram checks the owner of each board; the dashboard does not), and the answer
+  is recorded as "desktop" without a user name.
 
 Texts follow the plugin language (`language`, else Hermes'); the product name is not translated.
 

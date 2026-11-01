@@ -1334,3 +1334,55 @@ def test_explain_hold_in_pt_br(kanban_home, tmp_path, pt_br):  # noqa: F811
         cc = conditions.explain(conn, "default", tid, store, time.time(), settings_for_test(tmp_path))
     assert next(c for c in cc.conditions if c.name == "project").text == "início bloqueado: projeto suspenso"
     store.close()
+
+
+# -- review Minor 8: migrations are transactional -----------------------------------------------------
+def test_a_failing_migration_step_leaves_nothing_behind(tmp_path, monkeypatch):
+    from ke import store as store_mod
+
+    s = _store(tmp_path)
+    s.close()
+    broken = store_mod._MIGRATIONS + ((3, "CREATE TABLE half_done (x INTEGER); THIS IS NOT SQL;"),)
+    monkeypatch.setattr(store_mod, "_MIGRATIONS", broken)
+    monkeypatch.setattr(store_mod, "SCHEMA_VERSION", 3)
+    with pytest.raises(sqlite3.OperationalError):
+        store_mod.Store(tmp_path / "state" / "state.db")
+    raw = sqlite3.connect(str(tmp_path / "state" / "state.db"))
+    try:
+        assert raw.execute("PRAGMA user_version").fetchone()[0] == 2
+        assert raw.execute("SELECT name FROM sqlite_master WHERE name = 'half_done'").fetchone() is None
+    finally:
+        raw.close()
+
+
+def test_concurrent_opens_apply_a_non_idempotent_step_once(tmp_path, monkeypatch):
+    import threading
+
+    from ke import store as store_mod
+
+    s = _store(tmp_path)
+    s.close()
+    steps = store_mod._MIGRATIONS + ((3, "ALTER TABLE kv ADD COLUMN note TEXT;"),)
+    monkeypatch.setattr(store_mod, "_MIGRATIONS", steps)
+    monkeypatch.setattr(store_mod, "SCHEMA_VERSION", 3)
+    barrier = threading.Barrier(8)
+    errors, stores = [], []
+
+    def open_one():
+        barrier.wait()
+        try:
+            stores.append(store_mod.Store(tmp_path / "state" / "state.db"))
+        except Exception as exc:  # pragma: no cover - the failure being tested
+            errors.append(exc)
+
+    threads = [threading.Thread(target=open_one) for _ in range(8)]
+    for th in threads:
+        th.start()
+    for th in threads:
+        th.join()
+    assert errors == []
+    cols = [r["name"] for r in stores[0].conn.execute("PRAGMA table_info(kv)").fetchall()]
+    assert cols.count("note") == 1
+    assert stores[0].conn.execute("PRAGMA user_version").fetchone()[0] == 3
+    for st in stores:
+        st.close()

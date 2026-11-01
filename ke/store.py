@@ -77,8 +77,10 @@ CREATE TABLE IF NOT EXISTS kv (
 BOARD_STATUSES = ("active", "suspended", "done")
 
 # Schema migrations, applied in order on open while ``PRAGMA user_version`` is below their number.
-# Version 1 is ``_SCHEMA`` above (every statement idempotent); each later step must be idempotent too
-# (``IF NOT EXISTS``), because two processes may open an old file at the same time.
+# Version 1 is ``_SCHEMA`` above (every statement idempotent). Each step runs in its own ``BEGIN IMMEDIATE``
+# transaction that re-reads ``user_version`` first, so a step is applied once even when several processes
+# open an old file together, and a failing step leaves nothing behind. Keep steps idempotent anyway
+# (``IF NOT EXISTS``): it costs nothing and survives a hand-edited ``user_version``.
 _MIGRATIONS: tuple[tuple[int, str], ...] = (
     (2, """
 CREATE TABLE IF NOT EXISTS board_status (
@@ -90,6 +92,24 @@ CREATE TABLE IF NOT EXISTS board_status (
 """),
 )
 SCHEMA_VERSION = _MIGRATIONS[-1][0]
+
+
+_BLANK = " \t\r\n;"  # what is left of an empty statement
+
+
+def _statements(script: str) -> list[str]:
+    """The SQL statements of ``script`` (split on statement-ending semicolons, quotes respected)."""
+    out: list[str] = []
+    buf = ""
+    for part in script.split(";"):
+        buf += part + ";"
+        if sqlite3.complete_statement(buf):
+            if buf.strip(_BLANK):
+                out.append(buf.strip())
+            buf = ""
+    if buf.strip(_BLANK):
+        out.append(buf.strip())
+    return out
 
 
 class Store:
@@ -114,15 +134,21 @@ class Store:
         self._migrate()
 
     def _migrate(self) -> None:
-        """Bring the file to ``SCHEMA_VERSION`` (a no-op once there)."""
+        """Bring the file to ``SCHEMA_VERSION`` (a no-op once there); one transaction per step."""
         with self.lock:
-            current = int(self.conn.execute("PRAGMA user_version").fetchone()[0])
+            if int(self.conn.execute("PRAGMA user_version").fetchone()[0]) >= SCHEMA_VERSION:
+                return
             for version, script in _MIGRATIONS:
-                if version <= current:
-                    continue
-                self.conn.executescript(script)
-                self.conn.execute(f"PRAGMA user_version = {int(version)}")
-                current = version
+                self.conn.execute("BEGIN IMMEDIATE")
+                try:
+                    if int(self.conn.execute("PRAGMA user_version").fetchone()[0]) < version:
+                        for statement in _statements(script):
+                            self.conn.execute(statement)  # not executescript: it would commit on its own
+                        self.conn.execute(f"PRAGMA user_version = {int(version)}")
+                    self.conn.execute("COMMIT")
+                except BaseException:
+                    self.conn.execute("ROLLBACK")
+                    raise
 
     def close(self) -> None:
         with self.lock:

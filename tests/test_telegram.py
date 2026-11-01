@@ -577,7 +577,11 @@ def test_transport_failure_in_the_veto_warning_skips_the_deliveries(tmp_path, fa
     coord.evaluate(1000.0)
     assert attempts == [111] and len(coord.pending_dues) == 1
     del fail[111]
-    coord.evaluate(1001.0)  # the veto warning is backing off, the reminder goes out
+    coord.evaluate(1001.0)  # Telegram unreachable: nothing is attempted during the transport back-off
+    assert attempts == [111] and len(coord.pending_dues) == 1
+    from ke.coordinator import TG_BACKOFF_S
+
+    coord.evaluate(1000.0 + TG_BACKOFF_S)  # the veto warning is still backing off, the reminder goes out
     assert attempts == [111, 111] and coord.pending_dues == []
 
 
@@ -763,3 +767,40 @@ def test_store_sent_message_roundtrip(tmp_path):
         "message_id": 10, "chat_id": 99, "kind": "waits", "items": items, "created_at": 1234,
     }
     assert s.get_sent_message(99, 11) is None
+
+
+# -- a transport failure backs off delivery across evaluations (final review M-2) ---------------
+def test_transport_failure_backs_off_delivery_across_evaluations(kanban_home, clock, fake_tg, tmp_path):
+    from ke import hermes_api
+    from ke.coordinator import TG_BACKOFF_S
+    from ke.telegram import TelegramError
+
+    coord = _coord(tmp_path, fake_tg, clock, api=hermes_api)
+    tid, _ = _real_wait(coord, clock)
+    clock.advance(1800)
+    attempts, fail = _track(coord, fake_tg, {111: TelegramError(None, "timed out")})
+    coord.evaluate(clock.now)
+    assert attempts == [111]  # one blocking attempt, then Telegram counts as down
+    del fail[111]
+    for _ in range(TG_BACKOFF_S // 30 - 1):  # the next evaluations inside the back-off try nothing
+        clock.advance(30)
+        coord.evaluate(clock.now)
+    assert attempts == [111] and coord.store.latest_wait("default", tid)["stage"] is None
+    clock.advance(30)  # back-off over
+    coord.evaluate(clock.now)
+    assert attempts == [111, 111] and coord.store.latest_wait("default", tid)["stage"] == "reminder1"
+
+
+def test_an_http_error_does_not_back_off_the_next_evaluation(kanban_home, clock, fake_tg, tmp_path):
+    from ke import hermes_api
+    from ke.telegram import TelegramError
+
+    coord = _coord(tmp_path, fake_tg, clock, api=hermes_api)
+    tid, _ = _real_wait(coord, clock)
+    clock.advance(1800)
+    attempts, fail = _track(coord, fake_tg, {111: TelegramError(500, "Internal Server Error")})
+    coord.evaluate(clock.now)
+    del fail[111]
+    clock.advance(30)
+    coord.evaluate(clock.now)  # Telegram answered: it is reachable, retried on the next evaluation
+    assert attempts == [111, 111] and coord.store.latest_wait("default", tid)["stage"] == "reminder1"

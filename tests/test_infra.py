@@ -480,7 +480,9 @@ def test_failed_alert_send_is_retried_and_not_marked(kanban_home, tmp_path, cloc
     fake_tg.fail_next = OSError("network down")
     co.evaluate(clock.now)
     assert fake_tg.count("send") == 0 and _sent(co.store) == []
-    co.evaluate(clock.now)
+    from ke.coordinator import TG_BACKOFF_S
+
+    co.evaluate(clock.advance(TG_BACKOFF_S))  # retried once the transport back-off is over
     assert fake_tg.count("send") == 1 and len(_sent(co.store)) == 1
 
 

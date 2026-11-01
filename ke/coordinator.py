@@ -32,6 +32,9 @@ MAX_MESSAGES_PER_PASS = 3  # Telegram messages per recipient per evaluation (tic
 VETO_RETRY_S = 600  # back-off between failed attempts to send the veto-hooks warning
 COPY_RETRY_S = 600  # back-off between failed attempts to send one escalation copy
 TERMINAL_HTTP = (400, 403)  # chat not found, bot blocked: retrying cannot help
+# After a transport failure (no HTTP answer: network, DNS, timeout) no message is attempted for this
+# long, across evaluations: each attempt can block a dispatcher tick for the client's whole timeout.
+TG_BACKOFF_S = 180
 
 Step = Callable[[float], Any]
 
@@ -65,6 +68,8 @@ class Coordinator:
         self.infra = InfraRecovery(settings, store, api, clock=clock)
         self._warned: set[str] = set()  # log-once keys (per process)
         self._tg_down = False
+        self._tg_retry_at = 0.0  # no Telegram attempt before this time (transport back-off)
+        self._now = 0.0  # time of the evaluation in progress
         self.register_step("waits", self._waits_step)
         self.register_step("guards", self._guards_step)
         self.register_step("infra", self._infra_step)
@@ -286,8 +291,13 @@ class Coordinator:
             return getattr(self.telegram, method)(*args)
         except Exception as exc:
             if getattr(exc, "status", None) is None:
-                self._tg_down = True
+                self._transport_failed()
             raise
+
+    def _transport_failed(self) -> None:
+        """No HTTP answer: Telegram is down for this evaluation and the next ``TG_BACKOFF_S``."""
+        self._tg_down = True
+        self._tg_retry_at = self._now + TG_BACKOFF_S
 
     # -- Telegram delivery of the reminders -------------------------------------
     def _warn_once(self, key: str, msg: str, *args: Any) -> None:
@@ -301,7 +311,7 @@ class Coordinator:
             return self.telegram.send(chat_id, text)
         except Exception as exc:
             if getattr(exc, "status", None) is None:  # no HTTP answer: network, DNS, timeout
-                self._tg_down = True
+                self._transport_failed()
             raise
 
     def _telegram_ready(self) -> bool:
@@ -562,7 +572,10 @@ class Coordinator:
     # -- evaluation ----------------------------------------------------------
     def evaluate(self, now: float) -> None:
         try:
-            self._tg_down = False  # a transport failure ends all Telegram sends of this evaluation
+            # a transport failure ends all Telegram sends of this evaluation and of the next
+            # TG_BACKOFF_S (whatever is not sent stays due and goes out once the back-off is over)
+            self._now = now
+            self._tg_down = now < self._tg_retry_at
             self._warn_missing_veto_hooks(now)
         except Exception:
             log.exception("kanban-empowered: veto-hooks check failed")

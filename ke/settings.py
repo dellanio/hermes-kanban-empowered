@@ -276,6 +276,9 @@ class Settings:
     infra_patterns: tuple[str, ...] = DEFAULT_INFRA_PATTERNS
     reply_ttl_s: int = 604800
     language: str | None = None  # plugin messages' language ("pt", "en"...); None follows Hermes
+    # Hermes Desktop "Empowered" dashboard: the sidebar entry and the button in the Kanban header
+    show_sidebar_menu: bool = True
+    show_kanban_button: bool = True
     # Settings-form values that shadow or lose against config.yaml (see Conflict); shown by doctor.
     conflicts: tuple[Conflict, ...] = field(default=(), compare=False)
 
@@ -371,6 +374,8 @@ class Settings:
             infra_patterns=_strs(patterns) if patterns is not None else defaults.infra_patterns,
             reply_ttl_s=dur("telegram.reply_ttl", "reply_ttl_s"),
             language=str(language).strip().lower() or None if language else None,
+            show_sidebar_menu=flag("show_sidebar_menu", "show_sidebar_menu"),
+            show_kanban_button=flag("show_kanban_button", "show_kanban_button"),
             conflicts=tuple(conflicts),
         )
 
@@ -380,6 +385,8 @@ class Settings:
         keys = (
             "mode",
             "language",
+            "show_sidebar_menu",
+            "show_kanban_button",
             "coordinator_profile",
             "shared_state_dir",
             "telegram.owner_ids",

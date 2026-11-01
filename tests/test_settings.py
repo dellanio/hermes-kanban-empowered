@@ -95,6 +95,8 @@ def test_settings_from_ctx_reads_dotted_keys():
 SECTION_8 = {
     "mode": "cooperative-only",
     "language": "PT",
+    "show_sidebar_menu": False,
+    "show_kanban_button": False,
     "coordinator_profile": "builder",
     "shared_state_dir": "/srv/ke-state",
     "telegram": {"owner_ids": {"ana": 111, "bob": 222}, "pin_live_panel": False,
@@ -128,6 +130,7 @@ def _assert_section8(s):
     assert s.infra_alert_count == 7 and s.infra_alert_window_s == 7200
     assert s.infra_patterns == ("boom", "kaput")
     assert s.language == "pt"
+    assert s.show_sidebar_menu is False and s.show_kanban_button is False
 
 
 def test_section8_fixture_is_all_non_default():

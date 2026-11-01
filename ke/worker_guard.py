@@ -6,11 +6,26 @@ this never raises: unexpected input is read as "missing" and only a
 """
 from __future__ import annotations
 
-from .asks import ASK_TEMPLATE, parse_ask
+from .asks import ask_template, parse_ask
 
-_BLOCK_MESSAGE = (
-    "kanban-empowered: bloqueio esperando pessoa precisa do pedido estruturado.\n" + ASK_TEMPLATE
+# Used only if the i18n layer itself fails: the guard must always explain what it wants.
+_FALLBACK_MESSAGE = (
+    "kanban-empowered: a block that waits on a person needs a structured ask.\n"
+    "Use exactly these three lines in the block reason:\n"
+    "Need: <what you need the person to do or tell you>\n"
+    "Why: <why the work cannot move without it>\n"
+    "How to reply: <how the person should answer, e.g. reply \"done\">"
 )
+
+
+def _block_message() -> str:
+    """The veto text for the agent, in the user's language (English by default)."""
+    try:
+        from .messages import t
+
+        return t("guard.block", template=ask_template())
+    except Exception:
+        return _FALLBACK_MESSAGE
 
 
 def pre_tool_call(tool_name, args=None, settings=None, **kw):
@@ -33,4 +48,4 @@ def pre_tool_call(tool_name, args=None, settings=None, **kw):
         return None
     if parse_ask(args.get("reason")) is not None:
         return None
-    return {"action": "block", "message": _BLOCK_MESSAGE}
+    return {"action": "block", "message": _block_message()}

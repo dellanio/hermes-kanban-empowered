@@ -1,15 +1,16 @@
-"""Structured human ask: ``Preciso:`` / ``Por quê:`` / ``Como responder:``."""
+"""Structured human ask: ``Need:`` / ``Why:`` / ``How to reply:`` (also ``Preciso:`` / ``Por quê:`` /
+``Como responder:``; ``Reply:`` is accepted as a short label)."""
 from __future__ import annotations
 
 import re
 from dataclasses import dataclass
 
-ASK_TEMPLATE = (
-    "Use exatamente estas três linhas no motivo do bloqueio:\n"
-    "Preciso: <o que você precisa que a pessoa faça ou informe>\n"
-    "Por quê: <por que o trabalho não avança sem isso>\n"
-    "Como responder: <como a pessoa deve responder, ex.: responda 'feito'>"
-)
+
+def ask_template() -> str:
+    """The three-line template shown to an agent, in the user's language (``messages.t``)."""
+    from .messages import t
+
+    return t("guard.template")
 
 
 @dataclass(frozen=True)
@@ -22,7 +23,7 @@ class Ask:
 _LABELS = {
     "need": ("preciso", "need"),
     "why": ("por quê", "por que", "porque", "why"),
-    "reply": ("como responder", "reply"),
+    "reply": ("como responder", "how to reply", "reply"),
 }
 _LINE_RE = re.compile(
     r"^\s*(?P<label>"

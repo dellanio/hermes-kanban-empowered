@@ -197,3 +197,19 @@ def test_empty_string_boolean_rejected():
         Settings.from_mapping({"telegram": {"pin_live_panel": ""}})
     with pytest.raises(ValueError, match="require_structured_ask"):
         Settings.from_mapping({"waits": {"require_structured_ask": "  "}})
+
+
+# -- shared_state_dir defaults to the COORDINATOR profile's plugin-data (final review I-3) ------
+def test_default_shared_state_dir_is_the_coordinator_profiles_even_from_a_worker_profile(kanban_home, monkeypatch):
+    from ke.settings import Settings
+
+    worker = kanban_home / "profiles" / "worker"
+    worker.mkdir(parents=True)
+    monkeypatch.setenv("HERMES_HOME", str(worker))  # this process runs as the "worker" profile
+    s = Settings.from_mapping({})
+    assert s.shared_state_dir.resolve() == (kanban_home / "plugin-data" / "kanban-empowered").resolve()
+    named = Settings.from_mapping({"coordinator_profile": "boss"})
+    expected = kanban_home / "profiles" / "boss" / "plugin-data" / "kanban-empowered"
+    assert named.shared_state_dir.resolve() == expected.resolve()
+    explicit = Settings.from_mapping({"coordinator_profile": "boss", "shared_state_dir": str(kanban_home / "x")})
+    assert explicit.shared_state_dir == kanban_home / "x"

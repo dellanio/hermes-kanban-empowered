@@ -11,7 +11,7 @@ import os
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Mapping, Optional
 
 DEFAULT_INFRA_PATTERNS: tuple[str, ...] = (
     "Kanban execution unknown",
@@ -38,18 +38,34 @@ def parse_duration(text: Any) -> int:
     return int(m.group(1)) * _UNITS[m.group(2) or "s"]
 
 
-def _hermes_home() -> Path:
+def _hermes_root() -> Path:
+    """The Hermes root (fallback when the Hermes adapter cannot be imported): ``HERMES_HOME`` minus a
+    ``profiles/<name>`` tail, or ``~/.hermes``."""
+    env = os.environ.get("HERMES_HOME")
+    if not env:
+        return Path.home() / ".hermes"
+    home = Path(env)
+    return home.parent.parent if home.parent.name == "profiles" else home
+
+
+def _profile_home(profile: str) -> Path:
     try:
         from . import hermes_api
 
-        return hermes_api.hermes_home()
+        return hermes_api.profile_home(profile)
     except Exception:
-        env = os.environ.get("HERMES_HOME")
-        return Path(env) if env else Path.home() / ".hermes"
+        root = _hermes_root()
+        return root if profile == "default" else root / "profiles" / profile
 
 
-def default_shared_state_dir() -> Path:
-    return _hermes_home() / "plugin-data" / "kanban-empowered"
+def default_shared_state_dir(coordinator_profile: str = "default") -> Path:
+    """``plugin-data/kanban-empowered`` under the COORDINATOR profile's home, whatever profile runs.
+
+    Every profile (coordinator, workers, the CLI) must agree on one state directory, so the default is
+    derived from ``coordinator_profile`` and never from the active profile: ``<hermes root>`` for
+    ``default``, ``<hermes root>/profiles/<name>`` otherwise.
+    """
+    return _profile_home(coordinator_profile or "default") / "plugin-data" / "kanban-empowered"
 
 
 def _get(m: Mapping[str, Any], dotted: str, default: Any = None) -> Any:
@@ -114,7 +130,8 @@ def _strs(value: Any) -> tuple[str, ...]:
 class Settings:
     mode: str = "enforce"
     coordinator_profile: str = "default"
-    shared_state_dir: Path = field(default_factory=default_shared_state_dir)
+    # None resolves to default_shared_state_dir(coordinator_profile) (see __post_init__)
+    shared_state_dir: Optional[Path] = None
     owner_ids: dict[str, int] = field(default_factory=dict)
     pin_live_panel: bool = True
     default_owner: str = "sponsor"
@@ -132,6 +149,10 @@ class Settings:
     infra_alert_window_s: int = 3600
     infra_patterns: tuple[str, ...] = DEFAULT_INFRA_PATTERNS
     reply_ttl_s: int = 604800
+
+    def __post_init__(self) -> None:
+        if self.shared_state_dir is None:
+            object.__setattr__(self, "shared_state_dir", default_shared_state_dir(self.coordinator_profile))
 
     def owner_for(self, board: str) -> str:
         return self.board_owner.get(board) or self.default_owner
@@ -177,10 +198,11 @@ class Settings:
         owner_ids = _get(m, "telegram.owner_ids") or {}
         escalate_to = _get(m, "waits.escalate_to")
 
+        coordinator_profile = str(_get(m, "coordinator_profile", defaults.coordinator_profile))
         return cls(
             mode=mode,
-            coordinator_profile=str(_get(m, "coordinator_profile", defaults.coordinator_profile)),
-            shared_state_dir=Path(state_dir) if state_dir else default_shared_state_dir(),
+            coordinator_profile=coordinator_profile,
+            shared_state_dir=Path(state_dir) if state_dir else default_shared_state_dir(coordinator_profile),
             owner_ids={str(k): int(v) for k, v in dict(owner_ids).items()},
             pin_live_panel=flag("telegram.pin_live_panel", "pin_live_panel"),
             default_owner=str(_get(m, "waits.default_owner", defaults.default_owner)),

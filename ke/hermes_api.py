@@ -144,6 +144,17 @@ def hermes_home() -> Path:
     return Path(get_hermes_home())
 
 
+def profile_home(name: str) -> Path:
+    """The Hermes home of profile ``name``: the root for ``default``, ``<root>/profiles/<name>`` otherwise.
+
+    Hermes' own resolver (``hermes_cli.profiles.get_profile_dir``), anchored to the Hermes root and not
+    to the active profile, so every profile process computes the same path for the same name.
+    """
+    from hermes_cli.profiles import get_profile_dir
+
+    return Path(get_profile_dir(name))
+
+
 def profiles() -> list[str]:
     """Profile names: sub-directories of ``<hermes root>/profiles`` plus ``default``."""
     from hermes_constants import get_default_hermes_root

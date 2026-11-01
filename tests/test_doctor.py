@@ -1,6 +1,7 @@
 import subprocess
 
 from conftest import settings_for_test
+from test_waits import pt_br  # noqa: F401 (pt_br is a fixture)
 
 
 def _out(capsys) -> dict:
@@ -35,8 +36,12 @@ def test_doctor_all_keys(kanban_home, capsys, tmp_path):
         "hermes_head",
         "veto_hooks",
         "coordinator",
+        "active_profile",
+        "coordinator_profile",
         "shared_state_dir",
         "profiles_with_plugin",
+        "telegram_token",
+        "owner_chats",
     ]
     assert out["hermes_compat"] == "bf0203a794"
     assert out["coordinator"] == "none"
@@ -215,3 +220,82 @@ def test_doctor_never_says_leader(kanban_home, capsys, tmp_path):
     rows = _out(capsys)
     rows.pop("shared_state_dir")  # a path; may contain anything
     assert "leader" not in " ".join([*rows, *rows.values()]).lower()
+
+
+# -- final review I-3 / M-7: profile and Telegram rows -----------------------------------------
+def test_doctor_reports_profiles_token_and_owner_chats(kanban_home, capsys, tmp_path, monkeypatch):
+    from ke import cli
+
+    monkeypatch.delenv("TELEGRAM_BOT_TOKEN", raising=False)
+    cli.run_doctor(settings_for_test(tmp_path, coordinator_profile="boss"))
+    out = _out(capsys)
+    assert out["active_profile"] == "default" and out["coordinator_profile"] == "boss"
+    assert out["telegram_token"] == "missing" and out["owner_chats"] == "0 configured"
+
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "123:abc")
+    cli.run_doctor(settings_for_test(tmp_path, owner_ids={"sponsor": 1, "boss": 2}))
+    out = _out(capsys)
+    assert out["telegram_token"] == "present" and out["owner_chats"] == "2 configured"
+    assert "123:abc" not in " ".join(out.values())  # never print the token itself
+
+
+def test_doctor_rows_in_pt_br(kanban_home, capsys, tmp_path, monkeypatch, pt_br):  # noqa: F811
+    from ke import cli
+
+    monkeypatch.delenv("TELEGRAM_BOT_TOKEN", raising=False)
+    cli.run_doctor(settings_for_test(tmp_path, owner_ids={"sponsor": 1}))
+    out = _out(capsys)
+    assert out["telegram_token"] == "ausente" and out["owner_chats"] == "1 configurado(s)"
+
+
+def test_doctor_survives_an_unreadable_active_profile(kanban_home, capsys, tmp_path, monkeypatch):
+    from ke import cli, hermes_api as h
+
+    def boom():
+        raise RuntimeError("moved")
+
+    monkeypatch.setattr(h, "active_profile", boom)
+    cli.run_doctor(settings_for_test(tmp_path))
+    assert _out(capsys)["active_profile"] == "unknown"
+
+
+# -- final review I-3: no Store outside the coordinator profile --------------------------------
+def test_worker_profile_register_creates_no_state_db(kanban_home, tmp_path, load_plugin):
+    mod = load_plugin()
+    state = tmp_path / "state"
+    ctx = _Ctx(state, config={"coordinator_profile": "other"})  # this process is not the coordinator
+    mod.register(ctx)
+    assert "pre_tool_call" in ctx.hooks and "kanban-empowered" in ctx.cmds
+    assert "on_kanban_dispatch_tick" not in ctx.hooks
+    assert not (state / "state.db").exists()
+    setup_fn, handler_fn = ctx.cmds["kanban-empowered"]
+    import argparse
+
+    parser = argparse.ArgumentParser()
+    setup_fn(parser)
+    handler_fn(parser.parse_args(["doctor"]))  # doctor needs no Store either
+    assert not (state / "state.db").exists()
+
+
+def test_coordinator_profile_register_opens_the_store(kanban_home, tmp_path, load_plugin):
+    mod = load_plugin()
+    state = tmp_path / "state"
+    ctx = _Ctx(state)
+    mod.register(ctx)
+    assert "on_kanban_dispatch_tick" in ctx.hooks and (state / "state.db").exists()
+
+
+# -- final review M-1: the worker guard survives a broken CLI import ---------------------------
+def test_worker_guard_survives_a_hermes_module_move(kanban_home, tmp_path, load_plugin, monkeypatch):
+    import sys
+
+    import hermes_cli
+
+    monkeypatch.delattr(hermes_cli, "kanban_db_boards", raising=False)
+    monkeypatch.setitem(sys.modules, "hermes_cli.kanban_db_boards", None)  # "moved": import fails
+    mod = load_plugin()
+    ctx = _Ctx(tmp_path / "state")
+    mod.register(ctx)  # must not raise
+    guard = ctx.hooks["pre_tool_call"]
+    r = guard(tool_name="kanban_block", args={"reason": "x", "kind": "needs_input"})
+    assert r["action"] == "block" and "How to reply:" in r["message"]

@@ -1,5 +1,6 @@
 import pytest
 from conftest import settings_for_test
+from test_waits import pt_br  # noqa: F401 (pt_br is a fixture)
 
 from ke.worker_guard import pre_tool_call
 
@@ -13,8 +14,18 @@ def S(tmp_path):
 
 def test_guard_blocks_unstructured_needs_input(S):
     r = pre_tool_call("kanban_block", {"reason": "aguardando o sponsor", "kind": "needs_input"}, settings=S())
-    assert r["action"] == "block" and "Preciso:" in r["message"]
+    assert r["action"] == "block"
+    # agent-facing text goes through messages.t(): English by default
+    assert r["message"].startswith("kanban-empowered: a block that waits on a person needs a structured ask")
+    for label in ("Need:", "Why:", "How to reply:"):
+        assert label in r["message"]
+
+
+def test_guard_message_follows_the_language(S, pt_br):  # noqa: F811
+    r = pre_tool_call("kanban_block", {"reason": "aguardando", "kind": "needs_input"}, settings=S())
     assert r["message"].startswith("kanban-empowered: bloqueio esperando pessoa")
+    for label in ("Preciso:", "Por quê:", "Como responder:"):
+        assert label in r["message"]
 
 
 def test_guard_blocks_when_kind_omitted(S):

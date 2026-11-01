@@ -242,17 +242,29 @@ def run_status_watch(
         store.close()
 
 
+def _active_profile() -> str:
+    try:
+        return hermes_api.active_profile()
+    except Exception:
+        return t("doctor.unknown")
+
+
 def run_doctor(settings: Settings, config_error: Optional[str] = None) -> None:
-    """Print ``key: value`` diagnostics, one per line."""
+    """Print ``key: value`` diagnostics, one per line. Opens no Store (safe in a worker profile)."""
     pid = LeaderLock(settings.shared_state_dir / "leader.lock").holder_pid(time.time())
     profiles = hermes_api.profiles_with_plugin()
+    token = (os.environ.get("TELEGRAM_BOT_TOKEN") or "").strip()  # this process only; never printed
     rows = [
         ("hermes_compat", hermes_api.HERMES_COMPAT),
         ("hermes_head", hermes_api.hermes_head() or t("doctor.unknown")),
         ("veto_hooks", t("doctor.present") if hermes_api.veto_hooks_available() else t("doctor.missing")),
         ("coordinator", str(pid) if pid is not None else t("doctor.none")),
+        ("active_profile", _active_profile()),
+        ("coordinator_profile", settings.coordinator_profile),
         ("shared_state_dir", str(settings.shared_state_dir)),
         ("profiles_with_plugin", ", ".join(profiles) if profiles else t("doctor.none")),
+        ("telegram_token", t("doctor.token.present") if token else t("doctor.token.missing")),
+        ("owner_chats", t("doctor.owner_chats", n=len(settings.owner_ids))),
     ]
     if config_error:
         rows.append(("config", t("doctor.config_invalid", error=config_error)))

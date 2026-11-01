@@ -1,4 +1,6 @@
-from ke.asks import ASK_TEMPLATE, Ask, parse_ask
+from test_waits import pt_br  # noqa: F401 (pt_br is a fixture)
+
+from ke.asks import Ask, ask_template, parse_ask
 
 
 def test_parse_ask_pt():
@@ -35,5 +37,19 @@ def test_parse_ask_non_string_is_none():
 
 
 def test_template_shows_three_labeled_lines():
-    for label in ("Preciso:", "Por quê:", "Como responder:"):
-        assert label in ASK_TEMPLATE
+    template = ask_template()
+    for label in ("Need:", "Why:", "How to reply:"):
+        assert label in template
+
+
+def test_parse_ask_accepts_the_english_how_to_reply_label():
+    assert parse_ask("Need: a\nWhy: b\nHow to reply: c") == Ask("a", "b", "c")
+    assert parse_ask("Need: a\nWhy: b\nReply: c") == Ask("a", "b", "c")  # the short label still works
+
+
+def test_the_template_in_every_language_is_parseable(pt_br):  # noqa: F811
+    from ke import messages
+
+    for template in (messages.EN["guard.template"], ask_template()):
+        filled = "\n".join(line.split("<")[0] + "x" for line in template.splitlines()[1:])
+        assert parse_ask(filled) == Ask("x", "x", "x"), template

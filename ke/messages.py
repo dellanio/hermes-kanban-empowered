@@ -13,8 +13,6 @@ from __future__ import annotations
 
 import time
 
-from . import hermes_api
-
 PREFIX = "kanban_empowered."
 
 EN: dict[str, str] = {
@@ -29,6 +27,9 @@ EN: dict[str, str] = {
     "doctor.none": "none",
     "doctor.unknown": "unknown",
     "doctor.config_invalid": "invalid ({error})",
+    "doctor.token.present": "present",
+    "doctor.token.missing": "missing",
+    "doctor.owner_chats": "{n} configured",
     # explain: header and lookup
     "explain.header": "{id}  {title}  {status} {age} ago",
     "explain.not_found": "card {card} not found {where}",
@@ -141,9 +142,22 @@ EN: dict[str, str] = {
     "inbound.panel_changed": "The panel changed; reply again.",
     "status.watch.hint": "Refreshing every {n} s. Press Ctrl+C to exit.",
     "status.watch.error": "Could not read the state: {error}",
+    # agent-facing: the worker guard's veto of an unstructured human block
+    "guard.block": "kanban-empowered: a block that waits on a person needs a structured ask.\n{template}",
+    "guard.template": "Use exactly these three lines in the block reason:\nNeed: <what you need the person to do or tell you>\nWhy: <why the work cannot move without it>\nHow to reply: <how the person should answer, e.g. reply \"done\">",
     # setup warnings
     "veto.warning": "kanban-empowered: this Hermes build lacks the kanban veto hooks (kanban_pre_claim / kanban_pre_complete). Guards run in cooperative-only mode. Run: hermes kanban-empowered doctor",
 }
+
+
+def _translate(full_key: str, **kw):
+    """Hermes' translation, or ``None``. The adapter is imported here, not at module load, so the
+    built-in English text (the worker guard's veto above all) survives a Hermes module that moved."""
+    try:
+        from . import hermes_api
+    except Exception:
+        return None
+    return hermes_api.translate(full_key, **kw)
 
 
 def t(key: str, **kw) -> str:
@@ -152,7 +166,7 @@ def t(key: str, **kw) -> str:
     ``kw`` are format arguments; they must not be named ``lang`` or ``key`` (``agent.i18n.t``
     takes ``lang`` itself, and ``key`` is this function's own parameter).
     """
-    out = hermes_api.translate(PREFIX + key, **kw)
+    out = _translate(PREFIX + key, **kw)
     if out is not None:
         return out
     text = EN.get(key)

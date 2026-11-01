@@ -97,7 +97,7 @@ def _enrich_one(api: Any, conn: Any, w: dict) -> dict:
         "version": block.version if block is not None else 0,
         "need": _clip_to(short_action(ask, reason) if (ask is not None or reason.strip()) else "", NEED_MAX),
         "held": len(held_behind(api, conn, w["task_id"])),
-        "hint": "/".join(k for k, _ in ask.options) if ask is not None and ask.options else reply_hint(ask),
+        "hint": reply_hint(ask),  # an option item shows its first letter ("1 — A")
         "display": board_title(w["board"], display_name(api, w["board"]), ask.subject if ask is not None else ""),
     }
 

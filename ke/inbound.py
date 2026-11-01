@@ -65,6 +65,8 @@ SKIP = {"action": "skip", "reason": "kanban-empowered"}
 # ("." and ")" need a space after them, so "1.5 GB" is not item 1)
 ITEM_RE = re.compile(r"^\s*([0-9]{1,4})(?:\s*[—–\-:]\s*|[.)]\s+|[.)]?\s*$|\s+)(.*)$", re.DOTALL)
 _LETTER_RE = re.compile(r"^([A-Za-z])\s*[.!)]*$")
+# several letters at once ("A/B", "A ou B", "A, B", "A or B"): not a choice
+_LETTERS_RE = re.compile(r"^[A-Za-z](?:\s*(?:/|,|;|\bou\b|\bor\b|\be\b|\band\b)\s*[A-Za-z])+\s*[.!?]*$", re.IGNORECASE)
 # An explicit "not done": the card stays blocked. In Portuguese a bare "no" counts only when it
 # stands alone ("no celular..." means "on the phone..."); in any other language "no ..." counts.
 _NEGATION_COMMON = r"ainda\s+n[ãa]o|n[ãa]o|negativo|not\s+yet|not|nope|never"
@@ -186,6 +188,8 @@ def classify(text: str, ask: Any) -> tuple[str, Any]:
         letter = m.group(1).upper()
         label = ask.option(letter) if ask is not None else None
         return ("option", (letter, label)) if label is not None else ("unknown_option", letter)
+    if ask is not None and ask.options and _LETTERS_RE.match(text):
+        return "need_option", None  # "A/B" names no single option: nothing changes
     word = _TRAILING_RE.sub("", text).strip().lower()
     if word and (word in CONFIRM_WORDS or word in reply_words(ask)):
         if ask is not None and ask.options:

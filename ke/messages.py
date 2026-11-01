@@ -337,15 +337,42 @@ def strip_ids(text) -> str:
     return text.strip(" ,;")
 
 
+# Portuguese article/contraction in front of a role name -> what stays in front of "você"
+_PT_BEFORE_YOU = {
+    "do": "de", "da": "de", "dos": "de", "das": "de",
+    "no": "em", "na": "em", "nos": "em", "nas": "em",
+    "pelo": "por", "pela": "por", "pelos": "por", "pelas": "por",
+    "ao": "a", "aos": "a", "à": "a", "às": "a",
+    "o": "", "os": "",
+}
+
+
 def replace_roles(text) -> str:
     """Configured role names in agent-written text become the reader ("você"/"you", whole word, any
-    case); a leading article ("o sponsor", "the sponsor") goes with the name."""
+    case). In Portuguese the article or contraction in front is adapted ("do sponsor" -> "de você",
+    "pelo sponsor" -> "por você", "o sponsor" -> "você"; "a sponsor" keeps its "a"); in other
+    languages a leading "the" goes with the name."""
     text = str(text or "")
     if not _ROLES:
         return text
     names = "|".join(re.escape(r) for r in sorted(_ROLES, key=len, reverse=True))
     you = t("waits.you")
-    return re.sub(rf"(?:\b(?:o|a|os|as|the)\s+)?\b(?:{names})\b", you, text, flags=re.IGNORECASE)
+    if active_language().lower().startswith("pt"):
+        before = "|".join(sorted(_PT_BEFORE_YOU, key=len, reverse=True))
+
+        def pt(m):
+            word = m.group(1)
+            if not word:
+                return you
+            lead = _PT_BEFORE_YOU[word.lower()]
+            if not lead:
+                return you
+            if word[:1].isupper():
+                lead = lead[:1].upper() + lead[1:]
+            return f"{lead} {you}"
+
+        return re.sub(rf"(?:\b({before})\s+)?\b(?:{names})\b", pt, text, flags=re.IGNORECASE)
+    return re.sub(rf"(?:\bthe\s+)?\b(?:{names})\b", you, text, flags=re.IGNORECASE)
 
 
 def agent_text(text) -> str:
@@ -503,7 +530,8 @@ def render_answer(title: str, action: str, held: int, choice=None) -> str:
     """Telegram confirmation of a resolved item: the board and the short action, no ids."""
     lines = [t("reply.resolved", board=title, action=action)]
     if choice is not None:
-        lines.append(t("reply.choice", letter=choice[0], label=_clip_to(strip_ids(choice[1]), _OPTION_MAX)))
+        label = _clip_to(strip_ids(replace_roles(choice[1])), _OPTION_MAX)
+        lines.append(t("reply.choice", letter=choice[0], label=label))
     lines.append(plural("reply.held", held) if held else t("reply.held.none"))
     return "\n".join(lines)
 
@@ -600,7 +628,7 @@ def _clip_to(text: str, limit: int) -> str:
 
 def _card_line(n: int, alert: dict) -> str:
     title = board_title(alert["board"], alert.get("board_name", ""))
-    card = _clip_to(strip_ids(alert.get("title") or ""), _TITLE_MAX)
+    card = _clip_to(strip_ids(replace_roles(alert.get("title") or "")), _TITLE_MAX)
     head = f"{title} · {card}" if card else title
     return f"{circled(n)} {head}" if n else head
 

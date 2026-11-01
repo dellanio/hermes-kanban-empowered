@@ -121,7 +121,7 @@ def test_render_title_counts_items_and_guards():
     assert lines[-3:] == ["↩️ When replying, name the item:", "“1 — done”", "“2 — done”"]
 
 
-def test_option_items_hint_lists_the_declared_letters(kanban_home):
+def test_option_items_hint_shows_the_first_declared_letter(kanban_home):
     from ke import hermes_api
     from ke.panel import _enrich_one
 
@@ -129,7 +129,7 @@ def test_option_items_hint_lists_the_declared_letters(kanban_home):
     with hermes_api.connect("default") as conn:
         tid, _ = make_human_block(conn, reason=reason, title="choice")
         w = _enrich_one(hermes_api, conn, {"board": "default", "task_id": tid, "age_s": 60})
-    assert w["hint"] == "A/B/C"
+    assert w["hint"] == "A"  # fix round 2: "A/B/C" read as a reply would be ambiguous
 
 
 def test_title_fallback_strips_ids():

@@ -750,3 +750,66 @@ def test_unsupported_language_setting_follows_hermes(kanban_home, caplog):
         assert messages._LANG in ("pt", "pt-br")
     finally:
         messages.set_language(None)
+
+
+# -- fix round 2 ----------------------------------------------------------------------------
+@pytest.mark.parametrize("text", ["3 — A/B", "3 — A ou B", "3 — a, b", "3 — A or C", "3 — B e C"])
+def test_several_letters_are_ambiguous_and_change_nothing(rig3, text):
+    assert rig3.reply(text)["action"] == "skip"
+    assert _status(rig3.tids[2]) == "blocked"
+    assert "A, B, C" in rig3.tg.last_text
+
+
+def test_letters_on_an_item_without_options_are_an_answer(rig3):
+    rig3.reply("2 — A ou B")
+    assert _status(rig3.tids[1]) != "blocked"
+
+
+@pytest.mark.parametrize("raw,expected", [
+    ("Aguardando resposta do sponsor.", "Aguardando resposta de você."),
+    ("Depende da sponsor.", "Depende de você."),
+    ("Está no sponsor agora.", "Está em você agora."),
+    ("Validado pelo sponsor.", "Validado por você."),
+    ("Mande ao sponsor.", "Mande a você."),
+    ("Mostre às sponsor.", "Mostre a você."),
+    ("O sponsor precisa ligar.", "você precisa ligar."),
+    ("Responda a sponsor.", "Responda a você."),
+    ("Do sponsor depende tudo.", "De você depende tudo."),
+])
+def test_pt_contractions_before_a_role_name(pt_br, raw, expected):  # noqa: F811
+    from ke import messages
+
+    messages.set_roles(["sponsor"])
+    try:
+        assert messages.replace_roles(raw) == expected
+    finally:
+        messages.set_roles(())
+
+
+def test_en_role_names_drop_the_but_not_pt_contractions(kanban_home):
+    from ke import messages
+
+    messages.set_roles(["sponsor"])
+    try:
+        assert messages.replace_roles("Waiting for the sponsor.") == "Waiting for you."
+        assert messages.replace_roles("ask do sponsor") == "ask do you"  # pt contractions only in pt
+    finally:
+        messages.set_roles(())
+
+
+def test_role_names_never_leak_through_the_choice_or_infra_titles(kanban_home):
+    from ke import messages
+
+    messages.set_roles(["sponsor"])
+    try:
+        answer = messages.render_answer("B", "x", 0, choice=("A", "Esperar o sponsor"))
+        assert "sponsor" not in answer.lower()
+        alert = messages.render_infra_alert(
+            {"kind": "budget", "board": "b", "task_id": "t_1", "title": "Deploy for sponsor", "count": 2,
+             "window_s": 3600})
+        assert "sponsor" not in alert.lower()
+        guards = messages.render_guards([{"board": "b", "task_id": "t_1", "reason": "active_pr", "age_s": 60,
+                                          "title": "Ask the sponsor", "assignee": "dev"}])
+        assert "sponsor" not in guards.lower()
+    finally:
+        messages.set_roles(())

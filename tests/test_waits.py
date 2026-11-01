@@ -363,7 +363,7 @@ def test_render_raw_reason_without_ask():
     from ke.messages import render_waits
 
     txt = render_waits("sponsor", [_due(ask=False, reason="aguardando a placa")])
-    assert "👉 aguardando a placa" in txt and "Then reply: “done”." in txt and "t_1" not in txt
+    assert "👉 aguardando a placa" in txt and "Reply to this message when it's done, or say what's missing." in txt and "t_1" not in txt
 
 
 def test_render_has_no_stage_marker():

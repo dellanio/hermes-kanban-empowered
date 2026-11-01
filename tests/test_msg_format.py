@@ -224,7 +224,7 @@ def test_status_line_omits_blocks_when_nothing_is_held_and_singular_forms():
 
     due = _due("t_0000000a", "voz", 40 * 60, _ask("Do it.", "w", "reply done"))
     lines = render_waits("s", [due]).splitlines()
-    assert lines[1] == "1 pending · 0 blocked cards"
+    assert lines[1] == "1 pending"  # no "· 0 blocked cards" when nothing is held
     assert lines[4] == "⏳ Stalled for 40 min"
     one_hour = render_waits("s", [_due("t_0000000a", "voz", H + 59, _ask("Do it.", "w", "reply done"))])
     assert "⏳ Stalled for 1 hour" in one_hour
@@ -300,7 +300,7 @@ def test_old_format_ask_and_raw_reason_still_render():
     assert "👉 ligue a placa" in txt and "Then reply: “feito”." in txt
     raw = _due("t_0000000a", "b", H, None, reason="aguardando a placa t_0000beef")
     txt = render_waits("s", [raw])
-    assert "👉 aguardando a placa" in txt and "t_0000beef" not in txt and "Then reply: “done”." in txt
+    assert "👉 aguardando a placa" in txt and "t_0000beef" not in txt and "Reply to this message when it's done, or say what's missing." in txt
 
 
 def test_chunks_repeat_the_header_and_number_from_one():

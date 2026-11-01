@@ -348,7 +348,7 @@ def _act(
     board, task_id, version = str(selected["board"]), str(selected["task_id"]), int(selected["version"])
     body = (event.text or "").strip() if body is None else body
     try:
-        live, ask, reason = _item_ask(api, board, task_id, version)
+        live, ask, reason, title = _item_ask(api, board, task_id, version)
     except Exception:
         log.exception("kanban-empowered: reading %s/%s for a Telegram reply failed", board, task_id)
         _reply(telegram, int(chat), int(message), t("inbound.error"))
@@ -399,21 +399,21 @@ def _act(
         _reply(telegram, int(chat), int(message), t("inbound.changed"))
         return
     title = board_title(board, display_name(api, board), ask.subject if ask is not None else "")
-    action = _clip_to(short_action(ask, reason), _ACTION_SHOWN)
+    action = _clip_to(short_action(ask, reason, title), _ACTION_SHOWN)
     _reply(telegram, int(chat), int(message),
            render_answer(title, action, len(held), choice=value if kind == "option" else None))
 
 
-def _item_ask(api: Any, board: str, task_id: str, version: int) -> tuple[bool, Any, str]:
-    """``(still blocked on version, its ask or None, the raw block reason)`` of a selected item."""
+def _item_ask(api: Any, board: str, task_id: str, version: int) -> tuple[bool, Any, str, str]:
+    """``(still blocked on version, its ask or None, the raw block reason, the card title)`` of a selected item."""
     with api.connect(board) as conn:
         task = api.task(conn, task_id)
         if task is None or task.status != "blocked":
-            return False, None, ""
+            return False, None, "", ""
         block = current_block(task, api.events(conn, task_id))
         if block is None or block.version != int(version):
-            return False, None, ""
-        return True, parse_ask(block.reason), block.reason
+            return False, None, "", ""
+        return True, parse_ask(block.reason), block.reason, str(getattr(task, "title", "") or "")
 
 
 def note_wait(

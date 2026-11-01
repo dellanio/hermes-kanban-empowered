@@ -48,6 +48,8 @@ class Due:
     held_behind: list = field(default_factory=list)
     reason: str = ""  # raw block reason; what the message shows when ``ask`` is None
     board_name: str = ""  # the board's display name ("" -> the slug is shown)
+    title: str = ""  # the card title: the action shown when there is no ask and no human reason
+    body: str = ""  # the card body: its first sentence is the context line of such an item
 
 
 def _payload(event: Any) -> dict:
@@ -257,6 +259,8 @@ class WaitTracker:
             if block is None or block.version != version:
                 return None  # re-blocked since the last sync: the new version is not tracked yet
             reason = block.reason
+            title = str(getattr(task, "title", "") or "")
+            body = str(getattr(task, "body", "") or "")
             held = held_behind(self.api, conn, tid)
         return Due(
             board=board,
@@ -269,6 +273,8 @@ class WaitTracker:
             held_behind=held,
             reason=reason,
             board_name=display_name(self.api, board),
+            title=title,
+            body=body,
         )
 
     # -- sent ----------------------------------------------------------------

@@ -99,6 +99,8 @@ EN: dict[str, str] = {
     "waits.action": "👉 {text}",
     "waits.option": "{letter} — {label}",
     "waits.reply.word": "Then reply: “{word}”.",
+    "waits.reply.neutral": "Reply to this message when it's done, or say what's missing.",
+    "waits.reply.example": "<your answer>",
     "waits.next_step": "Next step: {text}",
     "waits.footer": "↩️ When replying, name the item:",
     "waits.footer.example": "“{n} — {word}”",
@@ -428,18 +430,49 @@ def _sentence_end(text: str) -> str:
     return text if not text or text[-1] in ".!?…" else text + "."
 
 
-def short_action(ask, reason: str = "") -> str:
-    """The request in at most two sentences, without ids (the raw reason for an unstructured block)."""
-    raw = ask.need if ask is not None else reason
+# Hermes writes machine markers where a person would write a reason (``initial_status`` on a card created
+# already blocked, ``parent_not_done``, a bare block kind...): a lower-case snake_case token, or one of
+# these single words. They say nothing to the owner, so they count as "no reason".
+_MARKER_RE = re.compile(r"^[a-z][a-z0-9_]*$")
+_MARKER_WORDS = frozenset({
+    "initial_status", "dependency", "manual", "gave_up", "unblocked", "blocked", "transient", "needs_input",
+    "parent_not_done", "no_open_parent", "reassign", "scheduled", "triage",
+})
+
+
+def is_technical_reason(reason) -> bool:
+    """True when ``reason`` is a Hermes marker (``initial_status``) rather than text written for a person."""
+    text = str(reason or "").strip()
+    return bool(_MARKER_RE.match(text)) and ("_" in text or text in _MARKER_WORDS)
+
+
+def reason_text(reason) -> str:
+    """The block reason as human text, ``""`` when it is empty, a technical marker or only ids/symbols."""
+    text = str(reason or "").strip()
+    if not text or is_technical_reason(text):
+        return ""
+    return text if agent_text(text) else ""
+
+
+def short_action(ask, reason: str = "", title: str = "") -> str:
+    """The request in at most two sentences, without ids.
+
+    A structured ask gives its ``need``. Without one the action is the block reason when it is human
+    text, else the card title; with neither the "(no reason given)" line.
+    """
+    raw = ask.need if ask is not None else (reason_text(reason) or title)
     text = _clip_to(sentences(agent_text(raw)), _ACTION_MAX)
     return text or t("waits.no_reason")
 
 
 def reply_hint(ask) -> str:
-    """What a reply to this item looks like: ``A`` for an ask with options, else its primary word."""
+    """What a reply to this item looks like: ``A`` for an ask with options, its primary word, else a neutral
+    placeholder (an item without declared reply words has no word to suggest)."""
     from .asks import primary_word
 
-    if ask is not None and ask.options:
+    if ask is None:
+        return t("waits.reply.example")
+    if ask.options:
         return ask.options[0][0]
     return primary_word(ask) or t("waits.default_word")
 
@@ -447,7 +480,9 @@ def reply_hint(ask) -> str:
 def _reply_line(ask) -> str:
     from .asks import primary_word, reply_is_plain
 
-    if ask is None or (reply_is_plain(ask) and primary_word(ask)):
+    if ask is None:
+        return t("waits.reply.neutral")
+    if reply_is_plain(ask) and primary_word(ask):
         return t("waits.reply.word", word=reply_hint(ask))
     text = _clip_to(sentences(agent_text(ask.reply)), _ACTION_MAX)
     if not text:
@@ -455,9 +490,20 @@ def _reply_line(ask) -> str:
     return _sentence_end(text[:1].upper() + text[1:])
 
 
-def _context_line(ask) -> str:
+_MD_LEAD_RE = re.compile(r"^[\s#>*\-_=`]+")
+
+
+def body_context(body, action: str = "") -> str:
+    """The first sentence of a card body as a context line (ids stripped, at most ``_CONTEXT_MAX``), ``""``
+    when there is none or it only repeats ``action``."""
+    text = _MD_LEAD_RE.sub("", agent_text(body))
+    first = _clip_to(sentences(text, 1), _CONTEXT_MAX)
+    return "" if not first or first == action else first
+
+
+def _context_line(ask, body="", action: str = "") -> str:
     if ask is None:
-        return ""
+        return body_context(body, action)
     if ask.next_step and agent_text(ask.next_step):
         return _clip_to(t("waits.next_step", text=agent_text(ask.next_step)), _CONTEXT_MAX)
     return _clip_to(agent_text(ask.why), _CONTEXT_MAX)
@@ -473,7 +519,7 @@ def _wait_item(due, number: int, copy: bool = False) -> list[str]:
         t("waits.status.blocks", age=age, cards=plural("waits.cards", held)) if held else t("waits.status", age=age)
     )
     lines = [f"{circled(number)} {title}" if number else title, status, ""]
-    action = short_action(ask, due.reason)
+    action = short_action(ask, due.reason, getattr(due, "title", ""))
     if ask is not None and ask.options:
         if action[-1:] in ".;:!":
             action = action[:-1]
@@ -486,7 +532,7 @@ def _wait_item(due, number: int, copy: bool = False) -> list[str]:
         lines.append(t("waits.action", text=action))
         if not copy:
             lines.append(_reply_line(ask))
-    context = _context_line(ask)
+    context = _context_line(ask, getattr(due, "body", ""), action)
     if context:
         lines += ["", context]
     return lines
@@ -503,9 +549,10 @@ def render_waits(owner: str, dues: list, copy: bool = False) -> str:
         return ""
     held = {tid for d in dues for tid in d.held_behind}
     lines = [t("waits.copy.lead")] if copy else []
+    pending = plural("waits.pending", len(dues))
     lines += [
         t("waits.header"),
-        t("waits.counts", pending=plural("waits.pending", len(dues)), blocked=plural("waits.blocked", len(held))),
+        t("waits.counts", pending=pending, blocked=plural("waits.blocked", len(held))) if held else pending,
         "",
     ]
     many = len(dues) > 1

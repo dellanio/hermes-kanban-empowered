@@ -42,6 +42,15 @@ def connect(board: str) -> Iterator[sqlite3.Connection]:
         yield conn
 
 
+def board_name(board: str) -> str:
+    """The board's display name (``board.json`` ``name``; Hermes derives one from the slug)."""
+    try:
+        name = _kbb.read_board_metadata(board).get("name")
+    except Exception:
+        return board
+    return str(name).strip() if name else board
+
+
 # -- reads -------------------------------------------------------------------
 def task(conn: sqlite3.Connection, tid: str):
     return _kb.get_task(conn, tid)
@@ -121,16 +130,18 @@ def assign(conn: sqlite3.Connection, tid: str, profile: str) -> bool:
 
 
 # -- i18n --------------------------------------------------------------------
-def translate(full_key: str, **kw) -> str | None:
+def translate(full_key: str, lang: str | None = None, **kw) -> str | None:
     """Hermes' translation of ``full_key`` (``agent.i18n.t``), or ``None`` when it has none.
 
-    Hermes returns the bare key on a miss, so "the key came back" means untranslated; an
-    import or lookup failure also yields ``None`` and the caller falls back to its own text.
+    ``lang`` forces a language (the plugin's ``language`` setting); ``None`` follows the user's
+    Hermes language. Hermes returns the bare key on a miss, so "the key came back" means
+    untranslated; an import or lookup failure also yields ``None`` and the caller falls back to
+    its own text.
     """
     try:
         from agent.i18n import t as _t
 
-        out = _t(full_key, **kw)
+        out = _t(full_key, lang=lang, **kw) if lang else _t(full_key, **kw)
     except Exception:
         return None
     return None if not isinstance(out, str) or out == full_key else out

@@ -10,5 +10,7 @@ provides_hooks:
 provides_locales:
   - id: en
     endonym: English
+  - id: pt
+    endonym: Português
   - id: pt-br
     endonym: Português (Brasil)

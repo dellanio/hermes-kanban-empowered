@@ -149,6 +149,7 @@ class Settings:
     infra_alert_window_s: int = 3600
     infra_patterns: tuple[str, ...] = DEFAULT_INFRA_PATTERNS
     reply_ttl_s: int = 604800
+    language: str | None = None  # plugin messages' language ("pt", "en"...); None follows Hermes
 
     def __post_init__(self) -> None:
         if self.shared_state_dir is None:
@@ -197,6 +198,7 @@ class Settings:
         state_dir = _get(m, "shared_state_dir")
         owner_ids = _get(m, "telegram.owner_ids") or {}
         escalate_to = _get(m, "waits.escalate_to")
+        language = _get(m, "language")
 
         coordinator_profile = str(_get(m, "coordinator_profile", defaults.coordinator_profile))
         return cls(
@@ -220,6 +222,7 @@ class Settings:
             infra_alert_window_s=dur("infra_failures.alert_window", "infra_alert_window_s"),
             infra_patterns=_strs(patterns) if patterns is not None else defaults.infra_patterns,
             reply_ttl_s=dur("telegram.reply_ttl", "reply_ttl_s"),
+            language=str(language).strip().lower() or None if language else None,
         )
 
     @classmethod
@@ -227,6 +230,7 @@ class Settings:
         """Build from ``ctx.get_config(key, default)`` using dotted keys."""
         keys = (
             "mode",
+            "language",
             "coordinator_profile",
             "shared_state_dir",
             "telegram.owner_ids",

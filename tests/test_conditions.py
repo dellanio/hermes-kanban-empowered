@@ -432,7 +432,7 @@ def test_plugin_yaml_declares_locales():
 
     data = yaml.safe_load((pathlib.Path(__file__).resolve().parent.parent / "plugin.yaml").read_text(encoding="utf-8"))
     ids = [(e["id"] if isinstance(e, dict) else e) for e in data["provides_locales"]]
-    assert ids == ["en", "pt-br"]
+    assert ids == ["en", "pt", "pt-br"]
 
 
 def test_t_falls_back_to_builtin_english_when_hermes_has_no_translation(monkeypatch):

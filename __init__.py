@@ -8,6 +8,16 @@ import os
 log = logging.getLogger(__name__)
 
 
+def _apply_language(settings) -> None:
+    """``settings.language`` overrides the Hermes language for the plugin's messages."""
+    try:
+        from .ke import messages
+
+        messages.set_language(settings.language)
+    except Exception:
+        log.exception("kanban-empowered: could not apply the language setting")
+
+
 def _register_worker_guard(ctx, settings) -> None:
     """Register the ``pre_tool_call`` guard in every profile (workers included).
 
@@ -137,6 +147,7 @@ def register(ctx) -> None:
         log.exception("kanban-empowered: invalid config; falling back to defaults")
         settings = Settings.from_mapping({})
         config_error = str(exc) or type(exc).__name__
+    _apply_language(settings)
     _register_worker_guard(ctx, settings)
     _register_cli(ctx, settings, config_error)
     if config_error is None:  # never run the coordinator on guessed settings

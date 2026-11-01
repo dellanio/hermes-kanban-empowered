@@ -1,7 +1,18 @@
+manifest_version: 2
 name: kanban-empowered
+label: "Kanban Empowered"
 version: 0.1.0
-description: "Human-wait reminders over Telegram, stuck-card guards and infra-failure recovery for the Hermes kanban."
+description: "Makes the Hermes kanban work for a fleet of agent profiles and a human in the loop. A card blocked on a person gets a structured ask with an owner and a deadline, Telegram reminders, an escalation and a digest, and the owner answers by replying to an item (1 - done, 3 - A, or free text) to unblock it. Cards held by Hermes' respawn guards are reported with a one-line hand-off command. When the host (gateway, worker persistence) rather than the task fails, infrastructure-failure recovery undoes the park within a per-card budget and raises one systemic alert on a burst. A pinned live panel plus explain and status commands show why a card is not moving. Ships an optional core patch that adds kanban veto hooks."
 author: "dellanio"
+license: MIT
+homepage: https://github.com/dellanio/hermes-kanban-empowered
+requires_hermes: ">=0.22"
+tags:
+  - kanban
+  - telegram
+  - productivity
+  - agents
+  - automation
 provides_hooks:
   - on_kanban_dispatch_tick
   - on_kanban_worker_exited
@@ -14,3 +25,72 @@ provides_locales:
     endonym: Português
   - id: pt-br
     endonym: Português (Brasil)
+# Settings form (Hermes Desktop: Capabilities / Settings > Plugins). The form reads and writes these
+# keys as FLAT literals under plugins.entries.kanban-empowered.settings; the plugin maps them onto the
+# nested config (README, "Settings screen"). A non-blank value set here wins over the nested key.
+config_schema:
+  language:
+    type: str
+    label: "Message language"
+    default: ""
+    description: "Language of the plugin's messages, e.g. pt or en. Empty follows Hermes."
+  mode:
+    type: str
+    label: "Mode"
+    choices: [enforce, cooperative-only]
+    default: enforce
+    description: "enforce or cooperative-only. No effect in v0.1; reserved for the veto hooks."
+  telegram_owner_id:
+    type: int
+    label: "Owner Telegram id"
+    description: "Numeric Telegram id of the default owner. Ignored when telegram.owner_ids is set in config.yaml."
+  default_owner:
+    type: str
+    label: "Default owner"
+    default: sponsor
+    description: "Name of whoever a card blocked on a person waits on, unless its board sets another."
+  reminders:
+    type: str
+    label: "Reminders"
+    default: "30m,2h"
+    description: "Comma-separated delays after a card blocks on a person, e.g. 30m,2h."
+  escalate_after:
+    type: str
+    label: "Escalate after"
+    default: 8h
+    description: "How long a wait may stay unanswered before it is escalated (30m, 8h, 2d)."
+  digest:
+    type: str
+    label: "Digest every"
+    default: daily
+    description: "Summary of open waits after the escalation: daily, hourly, weekly or a duration like 12h."
+  escalate_to:
+    type: str
+    label: "Escalate to"
+    default: ""
+    description: "Optional contact that also receives escalations; needs an id in telegram.owner_ids."
+  require_structured_ask:
+    type: bool
+    label: "Require structured ask"
+    default: true
+    description: "A block that waits on a person must carry Need / Why / How to reply, or the agent redoes it."
+  pin_live_panel:
+    type: bool
+    label: "Pin live panel"
+    default: true
+    description: "Keep the fleet status panel pinned in the owner's Telegram chat."
+  guard_alert_after:
+    type: str
+    label: "Stuck-card alert after"
+    default: 30m
+    description: "How long a card may sit in Hermes' respawn guard before the owner is told."
+  undo_budget_count:
+    type: int
+    label: "Infra undo budget"
+    default: 2
+    description: "Parks caused by an infrastructure failure the plugin undoes per card, within the window below."
+  undo_budget_window:
+    type: str
+    label: "Infra undo window"
+    default: 24h
+    description: "Window the undo budget is counted over (24h, 2d)."

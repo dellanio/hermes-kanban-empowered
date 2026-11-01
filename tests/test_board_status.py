@@ -1420,6 +1420,7 @@ def test_docs_state_telegram_replies_and_the_reader_sidecars():
     root = Path(__file__).resolve().parent.parent
     readme = root / "README.md"
     section = readme.read_text(encoding="utf-8").split("### Project status")[1].split("## Commands")[0]
+    section = " ".join(section.split())  # line wrapping does not matter
     assert "reply to an older Telegram reminder" in section
     assert "`concluído`" in readme.read_text(encoding="utf-8")
     from ke import board_status

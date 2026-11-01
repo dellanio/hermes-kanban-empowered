@@ -100,9 +100,8 @@ class StatusReader:
 
     Never creates or writes the database: a missing file or a Store not migrated yet means every board is
     active. (SQLite may create the ``-shm`` / ``-wal`` sidecars of a WAL database on a read-only open when
-    they are missing; that is SQLite's shared-memory bookkeeping, not a write to the data.) A missing file
-    or a Store not migrated yet means every board is
-    active. Read failures raise (the caller decides; the hook fails open) and are never cached.
+    they are missing; that is SQLite's shared-memory bookkeeping, not a write to the data.) Read failures
+    raise (the caller decides; the hook fails open) and are never cached.
     """
 
     def __init__(

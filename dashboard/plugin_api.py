@@ -39,6 +39,7 @@ _PRIVATE_PKG = "kanban_empowered_dashboard_pkg"
 _lock = threading.Lock()  # the Store cache
 _load_lock = threading.Lock()  # the private package import (never taken while _lock is held by this module)
 _stores: dict[str, Any] = {}
+_locale_owners: list = []  # the hermes_api module(s) that registered the plugin catalogs for this router
 
 
 # -- the plugin's ke package ----------------------------------------------------------------------
@@ -79,7 +80,10 @@ def _context():
     """``(dashboard module, settings, store)`` for one request."""
     package = _ke_package()
     dashboard = _ke("dashboard")
-    _ke("hermes_api").ensure_locales(_ROOT / "locales")
+    adapter = _ke("hermes_api")
+    if adapter.ensure_locales(_ROOT / "locales"):
+        with _lock:
+            _locale_owners.append(adapter)
     # the agent half's message layer (language, role names) is left as the agent configured it
     settings = dashboard.load_settings(apply_messages=package.startswith(_PRIVATE_PKG + "."))
     path = str(Path(settings.shared_state_dir) / "state.db")
@@ -101,10 +105,13 @@ def close_stores() -> None:
             except Exception:
                 pass
         _stores.clear()
-    try:
-        _ke("hermes_api").release_locales()
-    except Exception:
-        pass
+        owners = list(_locale_owners)
+        _locale_owners.clear()
+    for adapter in owners:  # the copy that registered them, even if another copy is loaded now
+        try:
+            adapter.release_locales()
+        except Exception:
+            pass
 
 
 # -- models -----------------------------------------------------------------------------------

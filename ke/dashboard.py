@@ -402,7 +402,7 @@ def _infra(store: Store, settings: Settings, now: float, exhausted: list) -> dic
     systemic = settings.infra_alert_count > 0 and in_window >= settings.infra_alert_count
     path = telegram.read_path_file(settings.shared_state_dir / "telegram_path")
     kind = telegram.classify_path(path) if path else None
-    token = bool((os.environ.get("TELEGRAM_BOT_TOKEN") or "").strip())  # this process only; never returned
+    token = bool(hermes_api.telegram_token())  # via Hermes' secret scope; never returned
     return {
         "recent_infra_exits_1h": int(recent),
         "systemic_alert_active": bool(systemic),

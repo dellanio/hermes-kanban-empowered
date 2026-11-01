@@ -762,12 +762,12 @@ def test_veto_warning_not_sent_when_hooks_present(tmp_path, fake_tg, clock):
 def test_register_builds_the_client_only_with_a_token(load_plugin, monkeypatch):
     mod = load_plugin("ke_plugin_tg")
     monkeypatch.delenv("TELEGRAM_BOT_TOKEN", raising=False)
-    assert mod._telegram_from_env() is None
+    assert mod._telegram_client() is None
     monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "123:abc")
-    client = mod._telegram_from_env()
+    client = mod._telegram_client()
     assert type(client).__name__ == "TelegramClient"
     monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "   ")
-    assert mod._telegram_from_env() is None
+    assert mod._telegram_client() is None
 
 
 # -- store ----------------------------------------------------------------------

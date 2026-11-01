@@ -7,6 +7,7 @@ Hermes upgrade only ever needs fixes here.
 from __future__ import annotations
 
 import contextlib
+import logging
 import sqlite3
 from pathlib import Path
 from typing import Iterator
@@ -22,6 +23,8 @@ COMMENT_AUTHOR = "kanban-empowered"
 _COMMENT_PREFIX = COMMENT_AUTHOR + ": "
 
 _VETO_HOOKS = frozenset({"kanban_pre_claim", "kanban_pre_complete"})
+
+log = logging.getLogger(__name__)
 
 
 # -- boards / connections ----------------------------------------------------
@@ -356,6 +359,76 @@ def telegram_net() -> TelegramNet:
     from plugins.platforms.telegram import telegram_network as module
 
     return TelegramNet(module)
+
+
+# -- credentials (catalog rule 11: only through Hermes' secret scope) ------------
+TELEGRAM_TOKEN_NAME = "TELEGRAM_BOT_TOKEN"
+_NO_LAUNCH_SCOPE = object()
+_warned_unscoped: set[str] = set()
+
+
+def secret(name: str) -> str | None:
+    """A credential (or profile-scoped setting) read through Hermes' secret scope; ``None`` when unset.
+
+    ``agent.secret_scope.get_secret`` honours the active profile: the scope bound for a gateway turn, a cron
+    fire or a dashboard request, or ``os.environ`` in a single-profile process. Under multiplexing with no scope
+    bound it fails closed (``UnscopedSecretError``); the gateway's kanban dispatch tick runs like that (a fresh
+    context with nothing bound). In that case, when this context is the launch profile's own (no home override
+    naming another profile), the value comes from Hermes' launch-profile body scope
+    (``tui_gateway.launch_profile_policy.launch_body``: the launch env frozen when multiplexing was activated
+    plus the launch home's ``.env``), the same mapping Hermes binds for launch-profile bodies. Otherwise the
+    answer is ``None``, with one warning per name. Never a bare ``os.environ`` read under multiplexing.
+    """
+    from agent.secret_scope import UnscopedSecretError, get_secret
+
+    try:
+        return get_secret(name)
+    except UnscopedSecretError:
+        pass
+    value = _launch_profile_secret(name)
+    if value is not _NO_LAUNCH_SCOPE:
+        return value
+    if name not in _warned_unscoped:
+        _warned_unscoped.add(name)
+        log.warning(
+            "kanban-empowered: Hermes has no profile secret scope for %s in this context (multi-profile "
+            "hosting, no profile bound); treating it as unset rather than reading the process environment",
+            name,
+        )
+    return None
+
+
+def _launch_profile_secret(name: str):
+    """``name`` from Hermes' launch-profile body scope, or ``_NO_LAUNCH_SCOPE`` when this context serves
+    another profile or this Hermes build has no such scope."""
+    try:
+        from agent.secret_scope import get_secret
+        from hermes_constants import get_hermes_home_override, get_routing_process_hermes_home, hermes_home_key
+        from tui_gateway.launch_profile_policy import launch_body
+
+        override = get_hermes_home_override()
+        if override is not None and hermes_home_key(override) != hermes_home_key(get_routing_process_hermes_home()):
+            return _NO_LAUNCH_SCOPE  # serving another profile: never the launch profile's credential
+        with launch_body():
+            return get_secret(name)
+    except Exception:
+        return _NO_LAUNCH_SCOPE
+
+
+def telegram_token() -> str | None:
+    """The Telegram bot token (``TELEGRAM_BOT_TOKEN``) through :func:`secret`; ``None`` when unset or blank.
+
+    The single place the plugin reads it; the token itself is never logged or returned to a UI."""
+    return (secret(TELEGRAM_TOKEN_NAME) or "").strip() or None
+
+
+class ScopedEnv:
+    """A read-only ``get(name, default)`` view whose every lookup goes through :func:`secret` (the default
+    ``env`` of ``ke.telegram.TelegramTransport``: ``TELEGRAM_FALLBACK_IPS`` is a profile setting)."""
+
+    def get(self, name: str, default=None):
+        value = secret(name)
+        return default if value is None else value
 
 
 # -- environment -------------------------------------------------------------

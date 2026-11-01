@@ -58,6 +58,14 @@ def _load_net():
     return hermes_api.telegram_net()
 
 
+def _scoped_env():
+    """The default ``env`` of :class:`TelegramTransport`: lookups through Hermes' secret scope
+    (``hermes_api.ScopedEnv``; ``TELEGRAM_FALLBACK_IPS`` is a per-profile setting)."""
+    from . import hermes_api
+
+    return hermes_api.ScopedEnv()
+
+
 _SEED_IPS = ("149.154.166.110", "149.154.167.220")  # last resort when Hermes' helper bundle has no seed list
 _LOCAL_KEEPALIVE = [(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)]
 
@@ -159,7 +167,7 @@ class TelegramTransport:
         self.timeout_s = float(timeout_s)
         self.budget_s = float(budget_s)
         self._clock = clock
-        self._env = os.environ if env is None else env
+        self._env = _scoped_env() if env is None else env  # Hermes' secret scope, never os.environ
         self._factory = transport_factory or self._default_factory
         self.on_path = on_path
         self._resolver = resolver

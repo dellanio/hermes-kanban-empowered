@@ -502,15 +502,15 @@ def test_doctor_telegram_path_in_pt_br(kanban_home, capsys, tmp_path, pt_br):  #
     assert _out(capsys)["telegram_path"] == f"{IP1} (IPv4 de contingência)"
 
 
-def test_telegram_from_env_wires_the_state_file(load_plugin, monkeypatch, tmp_path):
+def test_telegram_client_wires_the_state_file(load_plugin, monkeypatch, tmp_path):
     from conftest import settings_for_test
 
     mod = load_plugin("ke_plugin_tg_path")
     monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "123:abc")
     s = settings_for_test(tmp_path)
-    client = mod._telegram_from_env(s)
+    client = mod._telegram_client(s)
     assert client._path_file == s.shared_state_dir / "telegram_path"
-    assert mod._telegram_from_env()._path_file is None
+    assert mod._telegram_client()._path_file is None
 
 
 # -- real httpx, local server (no Telegram) ---------------------------------------------------

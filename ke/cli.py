@@ -347,7 +347,7 @@ def run_doctor(settings: Settings, config_error: Optional[str] = None) -> None:
     """Print ``key: value`` diagnostics, one per line. Opens no Store (safe in a worker profile)."""
     pid = LeaderLock(settings.shared_state_dir / "leader.lock").holder_pid(time.time())
     profiles = hermes_api.profiles_with_plugin()
-    token = (os.environ.get("TELEGRAM_BOT_TOKEN") or "").strip()  # this process only; never printed
+    token = hermes_api.telegram_token()  # via Hermes' secret scope; never printed
     rows = [
         ("hermes_compat", hermes_api.HERMES_COMPAT),
         ("hermes_head", hermes_api.hermes_head() or t("doctor.unknown")),

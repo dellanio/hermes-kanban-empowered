@@ -431,7 +431,7 @@ class Coordinator:
         if self.telegram is None:
             self._warn_once(
                 "no_telegram",
-                "kanban-empowered: TELEGRAM_BOT_TOKEN is not set in the coordinator process; "
+                "kanban-empowered: Hermes resolved no TELEGRAM_BOT_TOKEN for the coordinator profile; "
                 "Telegram messages are disabled",
             )
             return False

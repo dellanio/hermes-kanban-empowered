@@ -226,7 +226,7 @@ def classify(text: str, ask: Any) -> tuple[str, Any]:
 
 def _reply(telegram: Any, chat_id: int, message_id: int, text: str) -> None:
     if telegram is None:
-        log.warning("kanban-empowered: TELEGRAM_BOT_TOKEN is not set; cannot answer a reply")
+        log.warning("kanban-empowered: Hermes resolved no TELEGRAM_BOT_TOKEN; cannot answer a reply")
         return
     try:
         telegram.send(chat_id, branded(text), reply_to=message_id)

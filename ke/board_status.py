@@ -98,7 +98,10 @@ def refuse_reason(status: str) -> Optional[str]:
 class StatusReader:
     """Read-only, cached view of the ``board_status`` table of the shared Store (any profile's process).
 
-    Never creates or writes the file: a missing file or a Store not migrated yet means every board is
+    Never creates or writes the database: a missing file or a Store not migrated yet means every board is
+    active. (SQLite may create the ``-shm`` / ``-wal`` sidecars of a WAL database on a read-only open when
+    they are missing; that is SQLite's shared-memory bookkeeping, not a write to the data.) A missing file
+    or a Store not migrated yet means every board is
     active. Read failures raise (the caller decides; the hook fails open) and are never cached.
     """
 

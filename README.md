@@ -239,7 +239,8 @@ the **Projects** button of the dashboard or with `hermes kanban-empowered board-
 A **Suspended** or **Done** board:
 
 - leaves **Needs you** and the four counters; its items go to the collapsed **Suspended projects (N)**
-  section, tagged with the status, and can still be opened and answered;
+  section, tagged with the status, and can still be opened and answered. A reply to an older Telegram
+  reminder of a now-suspended board still resolves it too (same version checks as any reply);
 - gets no Telegram reminders, escalations or digests for its waits, and the pinned panel leaves it out
   (one line "N suspended projects" at the end). Infrastructure alerts are unaffected;
 - has its new claims held through the core veto hook `kanban_pre_claim` (the card stays *ready*, with a
@@ -263,7 +264,7 @@ Back to **Active**, claims flow again and the open waits restart their reminder 
 | `hermes kanban-empowered status [--watch]` | Running cards, human waits, guarded cards, resolved today. `--watch` redraws the live panel every 5 s until Ctrl+C. |
 | `hermes kanban-empowered done <card> [--board B]` | Resolve a card's open human wait, exactly like a `done` reply on Telegram (same version checks). |
 | `hermes kanban-empowered release <card> --to <profile> [--board B]` | Hand a card held by a respawn guard (`active_pr`, `blocker_auth`) to another profile. |
-| `hermes kanban-empowered board-status [<board> [active\|suspended\|done]]` | Without arguments, every board with its project status; with a board, its status; with a status (also `ativo`, `suspenso`, `concluido`), set it. |
+| `hermes kanban-empowered board-status [<board> [active\|suspended\|done]]` | Without arguments, every board with its project status; with a board, its status; with a status (also `ativo`, `suspenso`, `concluído`, accents optional), set it. |
 
 ### Telegram replies
 

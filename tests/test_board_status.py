@@ -1411,3 +1411,17 @@ def test_cli_wording_in_pt_br(kanban_home, tmp_path, capsys, pt_br):  # noqa: F8
     out = capsys.readouterr().out
     assert "status desconhecido: pausado." in out
     assert "concluído" in out and "concluido" not in out  # teach the accented spelling
+
+
+# -- review Minor 11 + fix round item 3: documented behaviours ---------------------------------------
+def test_docs_state_telegram_replies_and_the_reader_sidecars():
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parent.parent
+    readme = root / "README.md"
+    section = readme.read_text(encoding="utf-8").split("### Project status")[1].split("## Commands")[0]
+    assert "reply to an older Telegram reminder" in section
+    assert "`concluído`" in readme.read_text(encoding="utf-8")
+    from ke import board_status
+
+    assert "-shm" in board_status.StatusReader.__doc__ and "-wal" in board_status.StatusReader.__doc__

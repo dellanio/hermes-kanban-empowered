@@ -9,7 +9,7 @@ is repeated for each profile that runs kanban workers and for the coordinator pr
 - Hermes Agent at revision `bf0203a794` (`plugin.yaml`: `requires_hermes: ">=0.22"`), kanban enabled.
 - `shared_state_dir` on a local NTFS (or other local) disk. The leader lock uses hard links and
   atomic renames; network shares and sync folders do not provide them.
-- Python standard library only; nothing to install into the Hermes venv.
+- Python standard library plus modules already shipped with Hermes (`httpx`, `hermes_yaml`); nothing to install into the Hermes venv.
 
 ## 1. Apply the core patch (optional, inert in v0.1)
 
@@ -21,8 +21,11 @@ git -C <hermes-agent> apply --check <repo>/patches/0001-kanban-veto-hooks.patch
 git -C <hermes-agent> apply <repo>/patches/0001-kanban-veto-hooks.patch
 ```
 
-`hermes update` replaces the checkout and drops the patch: re-run both commands after every update
-(see [`patches/README.md`](../patches/README.md) if `--check` fails).
+`git apply --check` fails when the patch is already applied. To tell "already applied" from "drifted",
+run `git -C <hermes-agent> apply -R --check <repo>/patches/0001-kanban-veto-hooks.patch`: success means
+it is already in place. `hermes update` replaces the checkout and drops the patch: re-run the apply
+commands after every update (see [`patches/README.md`](../patches/README.md) if `--check` fails on a
+checkout without the patch).
 
 ## 2. Install the plugin, per profile, pinned to a commit
 

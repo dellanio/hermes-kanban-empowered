@@ -429,3 +429,13 @@ def test_doctor_lists_owner_id_difference_conflict(kanban_home, capsys, tmp_path
     cli.run_doctor(s)
     assert ("config_conflict: telegram_owner_id 5 is ignored: config.yaml telegram.owner_ids.sponsor is 3"
             in capsys.readouterr().out.splitlines())
+
+
+def test_profiles_with_plugin_fails_soft_without_hermes_yaml(kanban_home, monkeypatch):
+    import sys
+
+    from ke import hermes_api as h
+
+    _profile(kanban_home, "a", "plugins:\n  enabled: [kanban-empowered]\n")
+    monkeypatch.setitem(sys.modules, "hermes_yaml", None)  # import fails
+    assert h.profiles_with_plugin() == []

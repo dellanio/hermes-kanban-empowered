@@ -366,21 +366,18 @@ def profiles_with_plugin(plugin: str = "kanban-empowered") -> list[str]:
     the plugin in ``plugins.enabled`` (and not in ``plugins.disabled``; this is how Hermes records
     enablement) or has a ``plugins.entries.<plugin>`` section.
     """
-    from hermes_constants import get_default_hermes_root
-
     try:
-        import yaml
+        from hermes_yaml import safe_load  # Hermes' own loader (PyYAML is not a declared dependency)
     except ImportError:
         return []
 
-    root = Path(get_default_hermes_root())
     found: list[str] = []
     for name in profiles():
-        home = root if name == "default" else root / "profiles" / name
-        if not (home / "plugins" / plugin).is_dir():
-            continue
         try:
-            data = yaml.safe_load((home / "config.yaml").read_text(encoding="utf-8"))
+            home = profile_home(name)
+            if not (home / "plugins" / plugin).is_dir():
+                continue
+            data = safe_load((home / "config.yaml").read_text(encoding="utf-8"))
         except Exception:
             continue
         section = data.get("plugins") if isinstance(data, dict) else None

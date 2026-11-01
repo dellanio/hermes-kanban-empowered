@@ -7,9 +7,13 @@ human wait), the reminder renderer (``messages.render_wait_item``, ``short_actio
 (cards whose infrastructure-undo budget is used up) and, for answers, ``inbound.apply_answer``: the
 classification and resolution a Telegram reply goes through (same live version check, same lock).
 
+Board status (``ke.board_status``): the items of a suspended or done board leave "needs you" and the
+metrics for a separate ``suspended`` list (same shape, still openable and answerable); every item and
+running row carries ``board_status``.
+
 Reads only, except :func:`answer`, which writes through the Hermes domain functions wrapped in
-``hermes_api`` (unblock, comment) and the plugin Store (audit action). No Hermes module is imported
-here; ``hermes_api`` is the adapter.
+``hermes_api`` (unblock, comment) and the plugin Store (audit action), and :func:`set_board_status`
+(plugin Store only). No Hermes module is imported here; ``hermes_api`` is the adapter.
 """
 from __future__ import annotations
 
@@ -36,7 +40,7 @@ from .messages import (
 )
 from .settings import Settings
 from .store import Store
-from .waits import Due, display_name, held_behind, human_block
+from .waits import Due, board_active, display_name, held_behind, human_block, ladder_anchor
 
 log = logging.getLogger(__name__)
 
@@ -48,7 +52,7 @@ WHY_MAX = 200
 COMMENT_BODY_MAX = 600
 ACTIVITY_MAX = 120
 INFRA_WINDOW_S = 3600
-_ACTION_KINDS = ("human_done", "guard_release", "infra_undo")
+_ACTION_KINDS = ("human_done", "guard_release", "infra_undo", "board_status")
 _SENT_KINDS = ("waits", "panel")
 
 
@@ -136,6 +140,11 @@ def _boards(api: Any) -> list[str]:
     return list(api.boards())
 
 
+def _status_of(board: str, statuses: dict) -> str:
+    row = statuses.get(board)
+    return str(row["status"]) if row is not None else "active"
+
+
 def _check_board(api: Any, board: Optional[str]) -> tuple[list[str], Optional[str]]:
     """``(every board, the filter or None for all)``; LookupError for an unknown board."""
     boards = _boards(api)
@@ -148,8 +157,14 @@ def _check_board(api: Any, board: Optional[str]) -> tuple[list[str], Optional[st
 
 # -- items ------------------------------------------------------------------------------------
 def _wait_entry(api: Any, conn: Any, store: Store, settings: Settings, now: float, board: str, task: Any,
-                block: Any) -> tuple[dict, Due]:
-    """The "needs you" entry of a human wait, and the reminder ``Due`` it renders as on Telegram."""
+                block: Any, statuses: Optional[dict] = None) -> tuple[dict, Due]:
+    """The "needs you" entry of a human wait, and the reminder ``Due`` it renders as on Telegram.
+
+    On a suspended/done board the reminders are paused (``next_reminder_in_s`` 0, ``reminders_paused``);
+    on an active one the next reminder counts from the ladder anchor (the reactivation, if later).
+    """
+    statuses = store.board_statuses() if statuses is None else statuses
+    status = _status_of(board, statuses)
     ask = parse_ask(block.reason)
     row = store.latest_wait(board, task.id)
     if row is not None and int(row["version"]) != block.version:
@@ -159,13 +174,19 @@ def _wait_entry(api: Any, conn: Any, store: Store, settings: Settings, now: floa
     title = str(getattr(task, "title", "") or "")
     body = str(getattr(task, "body", "") or "")
     name = display_name(api, board)
-    digest = conditions._digest_period(conn, task, settings)
-    next_in = conditions._next_reminder_in(age, settings, row, now, digest)
+    paused = status != "active"
+    if paused:
+        next_in = 0
+    else:
+        digest = conditions._digest_period(conn, task, settings)
+        anchor = ladder_anchor(row, statuses) if row is not None else block.started_at
+        next_in = conditions._next_reminder_in(_age(now, anchor), settings, row, now, digest)
     stage = (row or {}).get("stage")
     action = short_action(ask, block.reason, title)
     entry = {
         "kind": "human_wait",
         "board": board,
+        "board_status": status,
         "board_name": name or board,
         "board_title": board_title(board, name, ask.subject if ask is not None else ""),
         "task_id": task.id,
@@ -186,6 +207,7 @@ def _wait_entry(api: Any, conn: Any, store: Store, settings: Settings, now: floa
         "reminder_sent": bool(stage),
         "next_reminder_in_s": int(next_in),
         "next_reminder_text": natural_age(next_in) if next_in > 0 else "",
+        "reminders_paused": paused,
         "_held": list(held),  # internal: the impacted-cards metric (dropped before the JSON goes out)
     }
     due = Due(
@@ -196,7 +218,7 @@ def _wait_entry(api: Any, conn: Any, store: Store, settings: Settings, now: floa
     return entry, due
 
 
-def _infra_entry(api: Any, conn: Any, now: float, row: dict) -> dict:
+def _infra_entry(api: Any, conn: Any, now: float, row: dict, statuses: Optional[dict] = None) -> dict:
     board = row["board"]
     name = display_name(api, board)
     age = _age(now, row.get("since"))
@@ -207,6 +229,7 @@ def _infra_entry(api: Any, conn: Any, now: float, row: dict) -> dict:
     return {
         "kind": "infra_exhausted",
         "board": board,
+        "board_status": _status_of(board, statuses or {}),
         "board_name": name or board,
         "board_title": board_title(board, name),
         "task_id": row["task_id"],
@@ -228,7 +251,9 @@ def _sort_key(entry: dict) -> tuple:
     return (-int(entry.get("held_behind_count", 0)), -int(entry.get("age_s", 0)), entry["board"], entry["task_id"])
 
 
-def _needs_you(api: Any, store: Store, settings: Settings, now: float, waits: list, exhausted: list) -> list:
+def _needs_you(api: Any, store: Store, settings: Settings, now: float, waits: list, exhausted: list,
+               statuses: Optional[dict] = None) -> list:
+    statuses = store.board_statuses() if statuses is None else statuses
     by_board: dict[str, list] = {}
     for w in waits:
         by_board.setdefault(w["board"], []).append(("wait", w))
@@ -241,12 +266,12 @@ def _needs_you(api: Any, store: Store, settings: Settings, now: float, waits: li
                 for kind, data in group:
                     try:
                         if kind == "infra":
-                            out.append(_infra_entry(api, conn, now, data))
+                            out.append(_infra_entry(api, conn, now, data, statuses))
                             continue
                         task = api.task(conn, data["task_id"])
                         block = human_block(task, api.events(conn, data["task_id"]), settings)
                         if block is not None:
-                            out.append(_wait_entry(api, conn, store, settings, now, board, task, block)[0])
+                            out.append(_wait_entry(api, conn, store, settings, now, board, task, block, statuses)[0])
                     except Exception:
                         log.exception("kanban-empowered: dashboard could not read %s/%s", board, data["task_id"])
         except Exception:
@@ -270,7 +295,7 @@ def _last_activity(api: Any, conn: Any, task: Any, now: float) -> dict:
     return {"text": text, "age_s": _age(now, ts), "heartbeat_age_s": _age(now, hb) if hb else None}
 
 
-def _running(api: Any, now: float, rows: list) -> list:
+def _running(api: Any, now: float, rows: list, statuses: Optional[dict] = None) -> list:
     by_board: dict[str, list] = {}
     for r in rows:
         by_board.setdefault(r["board"], []).append(r)
@@ -286,6 +311,7 @@ def _running(api: Any, now: float, rows: list) -> list:
                     out.append({
                         "board": board,
                         "board_name": name or board,
+                        "board_status": _status_of(board, statuses or {}),
                         "task_id": r["task_id"],
                         "title": _clean(r.get("title"), TITLE_MAX),
                         "profile": r.get("assignee") or "",
@@ -330,6 +356,11 @@ def _timeline(api: Any, store: Store, boards: list, only: Optional[str]) -> list
         if kind == "human_done":
             source = _source(a["detail"])
             detail, text = source, t("ui.timeline.human_done", source=t(f"ui.timeline.source.{source}"))
+        elif kind == "board_status":
+            detail = str(a["detail"] or "").rsplit("->", 1)[-1].strip()
+            if detail not in ("active", "suspended", "done"):
+                continue
+            text = t(f"ui.timeline.board_status.{detail}", board=display_name(api, a["board"]) or a["board"])
         elif kind == "guard_release":
             detail = str(a["detail"] or "").rsplit("->", 1)[-1].strip() if "->" in str(a["detail"] or "") else ""
             text = t("ui.timeline.guard_release")
@@ -397,40 +428,54 @@ def overview(settings: Settings, store: Store, now: float, board: Optional[str] 
     """
     boards, only = _check_board(api, board)
     scope = [only] if only is not None else boards
+    statuses = store.board_statuses()
     fs = conditions.fleet_status(store, now, settings=settings, api=api)
     waits = [w for w in fs["human_waits"] if w["board"] in scope]
     running_rows = [r for r in fs["running"] if r["board"] in scope]
     exhausted = InfraRecovery(settings, store, api).exhausted(now, scope)
-    needs = _needs_you(api, store, settings, now, waits, exhausted)
+    items = _needs_you(api, store, settings, now, waits, exhausted, statuses)
+    needs = [e for e in items if board_active(e["board"], statuses)]
+    suspended = [{**e, "status": e["board_status"]} for e in items if not board_active(e["board"], statuses)]
     infra = _infra(store, settings, now, exhausted)
     impacted = {(e["board"], tid) for e in needs for tid in e.pop("_held", ())}
-    running = _running(api, now, running_rows)
+    for e in suspended:
+        e.pop("_held", None)
+    running = _running(api, now, running_rows, statuses)
+    active_exhausted = [r for r in exhausted if board_active(r["board"], statuses)]
     return {
         "generated_at": int(now),
         "board": only or "all",
-        "metrics": {
+        "metrics": {  # active boards only
             "needs_you": sum(1 for e in needs if e["kind"] == "human_wait"),
             "impacted_cards": len(impacted),
-            "workers_running": len(running),
-            "incidents": len(exhausted) + (1 if infra["systemic_alert_active"] else 0),
+            "workers_running": sum(1 for r in running if r["board_status"] == "active"),
+            "incidents": len(active_exhausted) + (1 if infra["systemic_alert_active"] else 0),
         },
         "needs_you": needs,
+        "suspended": suspended,
         "running": running,
         "timeline": _timeline(api, store, boards, only),
         "infra": infra,
         "boards": boards,
         "board_names": {b: display_name(api, b) or b for b in boards},
+        "boards_status": [
+            {"board": b, "board_title": display_name(api, b) or b, "status": _status_of(b, statuses)} for b in boards
+        ],
     }
 
 
-def count(settings: Settings, now: float, api: Any = hermes_api) -> dict:
+def count(settings: Settings, now: float, api: Any = hermes_api, store: Optional[Store] = None) -> dict:
     """``GET /count``: how many human waits need you (the Kanban header button's badge).
 
     Only the blocked cards of each board are read (no held-behind walk, no infra assessment, no
-    comments); an unreadable board is skipped, as in ``fleet_status``.
+    comments); an unreadable board is skipped, as in ``fleet_status``. With ``store`` the suspended and
+    done boards are left out, like the ``needs_you`` metric.
     """
+    statuses = store.board_statuses() if store is not None else {}
     n = 0
     for board in _boards(api):
+        if not board_active(board, statuses):
+            continue
         try:
             with api.connect(board) as conn:
                 for task in api.list_tasks(conn, status="blocked"):
@@ -461,15 +506,16 @@ def item(settings: Settings, store: Store, now: float, board: str, task_id: str,
         if task is None:
             raise LookupError(task_id)
         block = human_block(task, api.events(conn, task_id), settings)
+        statuses = store.board_statuses()
         if block is not None:
-            entry, due = _wait_entry(api, conn, store, settings, now, board, task, block)
+            entry, due = _wait_entry(api, conn, store, settings, now, board, task, block, statuses)
             entry.pop("_held", None)
             entry["reminder_text"] = messages.render_wait_item(due)
         else:
             rows = [r for r in InfraRecovery(settings, store, api).exhausted(now, [board]) if r["task_id"] == task_id]
             if not rows:
                 raise LookupError(task_id)
-            entry = _infra_entry(api, conn, now, rows[0])
+            entry = _infra_entry(api, conn, now, rows[0], statuses)
             alert = {"kind": "budget", "board": board, "board_name": display_name(api, board), "task_id": task_id,
                      "title": task.title, "count": rows[0]["attempts"], "window_s": settings.infra_undo_window_s}
             entry["reminder_text"] = messages.render_infra_alert(alert).split("\n", 1)[-1]
@@ -527,3 +573,17 @@ def answer(
         "overview_item_removed": outcome.result == "resolved",
         "held_behind_count": len(outcome.held),
     }
+
+
+def set_board_status(
+    settings: Settings, store: Store, now: float, board: str, status: str, api: Any = hermes_api
+) -> dict:
+    """``POST /board-status``: set a board's status from the Desktop (actor ``desktop``).
+
+    ``status`` is already one of ``active`` / ``suspended`` / ``done`` (validated by the route); LookupError
+    when ``board`` is not a live board. ``changed`` is False when the board already had that status.
+    """
+    if not api.board_exists(board):
+        raise LookupError(board)
+    previous = store.set_board_status(board, status, int(now), "desktop")
+    return {"ok": True, "status": status, "previous": previous or status, "changed": previous is not None}

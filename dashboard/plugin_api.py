@@ -13,6 +13,7 @@ Routes:
     GET  /overview?board=<slug|all>    -> metrics, needs_you, running, timeline, infra, boards
     GET  /count                        -> {needs_you, generated_at} (the Kanban header button's badge)
     GET  /item?board=&task_id=         -> one needs-you entry + reminder text, conditions, comments
+    POST /board-status {board, status} -> {ok, status, previous, changed}; 422 bad status, 404 unknown board
     POST /answer                       -> {result, message, overview_item_removed, held_behind_count};
                                           result: resolved | noted | ambiguous | changed | not_found | error
 """
@@ -25,7 +26,7 @@ import sys
 import threading
 import time
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Literal, Optional
 
 from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -137,6 +138,15 @@ class AnswerBody(BaseModel):
         return self
 
 
+class BoardStatusBody(BaseModel):
+    """A board's new status from the Desktop "Projects" control (internal names only)."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    board: str = Field(..., pattern=_SLUG)
+    status: Literal["active", "suspended", "done"]
+
+
 # -- routes -----------------------------------------------------------------------------------
 @router.get("/settings")
 def get_settings() -> dict:
@@ -161,8 +171,8 @@ def get_overview(board: Optional[str] = Query(None, max_length=64)) -> dict:
 
 @router.get("/count")
 def get_count() -> dict:
-    dashboard, settings, _store = _context()
-    return dashboard.count(settings, time.time())
+    dashboard, settings, store = _context()
+    return dashboard.count(settings, time.time(), store=store)
 
 
 @router.get("/item")
@@ -180,3 +190,12 @@ def post_answer(body: AnswerBody) -> dict:
     return dashboard.answer(
         settings, store, time.time(), body.board, body.task_id, body.version, text=body.text, option=body.option
     )
+
+
+@router.post("/board-status")
+def post_board_status(body: BoardStatusBody) -> dict:
+    dashboard, settings, store = _context()
+    try:
+        return dashboard.set_board_status(settings, store, time.time(), body.board, body.status)
+    except LookupError:
+        raise HTTPException(status_code=404, detail="board not found")

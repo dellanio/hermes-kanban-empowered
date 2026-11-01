@@ -611,3 +611,147 @@ def test_panel_suspended_line_in_pt_br(pt_br):  # noqa: F811
 
     assert "⏸ 2 projetos suspensos" in render_telegram(snapshot_fixture(suspended_boards=2))
     assert "⏸ 1 projeto suspenso" in render_telegram(snapshot_fixture(suspended_boards=1))
+
+
+# -- dashboard backend --------------------------------------------------------------------------------
+from test_dashboard_api import (  # noqa: E402,F401 (fixtures)
+    ASK_OPTIONS, ASK_WORD, PREFIX, _status, _waiting, api_mod, client, store,
+)
+
+
+def _two_boards():
+    from hermes_cli import kanban_db_boards as kbb
+
+    kbb.create_board("voz-hermes", name="Canal de Voz do Hermes")
+    kbb.create_board("portal", name="Portal Investidor Imobiliário")
+
+
+def test_overview_moves_suspended_items_out_of_needs_you_and_metrics(client, store):
+    from hermes_cli import kanban_db as kb
+    from ke import hermes_api
+
+    _two_boards()
+    live, _ = _waiting(ASK_WORD, title="live")
+    frozen, _ = _waiting(ASK_WORD, board="voz-hermes", held=2, title="frozen")
+    finished, _ = _waiting(ASK_OPTIONS, board="portal", title="finished")
+    with hermes_api.connect("voz-hermes") as conn:
+        run_t = __import__("conftest").create_task(conn, title="still running", assignee="dev")
+        assert kb.claim_task(conn, run_t) is not None
+    store.set_board_status("voz-hermes", "suspended", int(time.time()), "cli")
+    store.set_board_status("portal", "done", int(time.time()), "cli")
+    body = client.get(PREFIX + "/overview").json()
+    assert [i["task_id"] for i in body["needs_you"]] == [live]
+    assert body["needs_you"][0]["board_status"] == "active"
+    suspended = {i["task_id"]: i for i in body["suspended"]}
+    assert set(suspended) == {frozen, finished}
+    assert suspended[frozen]["board_status"] == "suspended" and suspended[frozen]["status"] == "suspended"
+    assert suspended[finished]["board_status"] == "done"
+    assert suspended[frozen]["kind"] == "human_wait" and suspended[frozen]["held_behind_count"] == 2
+    assert suspended[frozen]["reminders_paused"] is True and suspended[frozen]["next_reminder_in_s"] == 0
+    assert suspended[finished]["options"]  # same shape as a needs_you item
+    m = body["metrics"]
+    assert (m["needs_you"], m["impacted_cards"], m["workers_running"]) == (1, 0, 0)
+    assert [r["task_id"] for r in body["running"]] == [run_t]  # running workers are not interrupted
+    assert body["running"][0]["board_status"] == "suspended"
+    assert body["boards_status"] == [
+        {"board": "default", "board_title": "Default", "status": "active"},
+        {"board": "portal", "board_title": "Portal Investidor Imobiliário", "status": "done"},
+        {"board": "voz-hermes", "board_title": "Canal de Voz do Hermes", "status": "suspended"},
+    ]
+
+
+def test_overview_board_filter_on_a_suspended_board(client, store):
+    _two_boards()
+    frozen, _ = _waiting(ASK_WORD, board="voz-hermes")
+    store.set_board_status("voz-hermes", "suspended", 1, "cli")
+    only = client.get(PREFIX + "/overview", params={"board": "voz-hermes"}).json()
+    assert only["needs_you"] == [] and [i["task_id"] for i in only["suspended"]] == [frozen]
+    assert only["metrics"]["needs_you"] == 0
+
+
+def test_count_badge_leaves_suspended_boards_out(client, store):
+    _two_boards()
+    _waiting(ASK_WORD)
+    _waiting(ASK_WORD, board="voz-hermes")
+    assert client.get(PREFIX + "/count").json()["needs_you"] == 2
+    store.set_board_status("voz-hermes", "suspended", 1, "cli")
+    assert client.get(PREFIX + "/count").json()["needs_you"] == 1
+
+
+def test_item_of_a_suspended_board_still_opens(client, store):
+    _two_boards()
+    frozen, version = _waiting(ASK_WORD, board="voz-hermes")
+    store.set_board_status("voz-hermes", "suspended", 1, "cli")
+    res = client.get(PREFIX + "/item", params={"board": "voz-hermes", "task_id": frozen})
+    assert res.status_code == 200
+    item = res.json()
+    assert item["board_status"] == "suspended" and item["version"] == version and item["reminder_text"]
+
+
+def test_answer_on_a_suspended_item_still_resolves(client, store):
+    _two_boards()
+    frozen, version = _waiting(ASK_WORD, board="voz-hermes")
+    store.set_board_status("voz-hermes", "suspended", 1, "cli")
+    res = client.post(PREFIX + "/answer", json={
+        "board": "voz-hermes", "task_id": frozen, "version": version, "text": "connected",
+    }).json()
+    assert res["result"] == "resolved"
+    assert _status(frozen, board="voz-hermes") != "blocked"
+
+
+def test_post_board_status_sets_audits_and_refreshes(client, store):
+    _two_boards()
+    res = client.post(PREFIX + "/board-status", json={"board": "voz-hermes", "status": "suspended"})
+    assert res.status_code == 200
+    assert res.json() == {"ok": True, "status": "suspended", "previous": "active", "changed": True}
+    assert store.board_status("voz-hermes") == "suspended"
+    (act,) = store.recent_actions(["board_status"])
+    assert act["board"] == "voz-hermes" and act["detail"] == "desktop: active->suspended"
+    again = client.post(PREFIX + "/board-status", json={"board": "voz-hermes", "status": "suspended"}).json()
+    assert again == {"ok": True, "status": "suspended", "previous": "suspended", "changed": False}
+    body = client.get(PREFIX + "/overview").json()
+    assert {"board": "voz-hermes", "board_title": "Canal de Voz do Hermes", "status": "suspended"} in body["boards_status"]
+    tl = [e for e in body["timeline"] if e["kind"] == "board_status"]
+    assert tl and tl[0]["text"] == "Project Canal de Voz do Hermes suspended" and tl[0]["detail"] == "suspended"
+    client.post(PREFIX + "/board-status", json={"board": "voz-hermes", "status": "active"})
+    texts = [e["text"] for e in client.get(PREFIX + "/overview").json()["timeline"] if e["kind"] == "board_status"]
+    assert texts[0] == "Project Canal de Voz do Hermes reactivated"
+    client.post(PREFIX + "/board-status", json={"board": "portal", "status": "done"})
+    texts = [e["text"] for e in client.get(PREFIX + "/overview").json()["timeline"] if e["kind"] == "board_status"]
+    assert texts[0] == "Project Portal Investidor Imobiliário marked done"
+
+
+def test_post_board_status_timeline_in_pt_br(client, store, pt_br):  # noqa: F811
+    _two_boards()
+    for status in ("suspended", "active", "done"):
+        client.post(PREFIX + "/board-status", json={"board": "voz-hermes", "status": status})
+    texts = [e["text"] for e in client.get(PREFIX + "/overview").json()["timeline"] if e["kind"] == "board_status"]
+    assert texts == [
+        "Projeto Canal de Voz do Hermes concluído",
+        "Projeto Canal de Voz do Hermes reativado",
+        "Projeto Canal de Voz do Hermes suspenso",
+    ]
+
+
+@pytest.mark.parametrize("body", [
+    {"board": "default", "status": "paused"},
+    {"board": "default", "status": "suspenso"},  # the API takes the internal names only
+    {"board": "default"},
+    {"status": "active"},
+    {"board": "../etc", "status": "active"},
+])
+def test_post_board_status_validation_422(client, body):
+    assert client.post(PREFIX + "/board-status", json=body).status_code == 422
+
+
+def test_post_board_status_unknown_board_404(client, store):
+    res = client.post(PREFIX + "/board-status", json={"board": "nope", "status": "suspended"})
+    assert res.status_code == 404
+    assert store.board_statuses() == {}
+
+
+def test_i18n_has_the_status_strings(client):
+    strings = client.get(PREFIX + "/i18n").json()["strings"]
+    for key in ("ui.status.active", "ui.status.suspended", "ui.status.done", "ui.section.suspended",
+                "ui.projects", "ui.projects.note", "ui.needs.reminders_paused", "ui.projects.failed"):
+        assert strings[key], key

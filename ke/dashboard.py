@@ -476,6 +476,13 @@ def answer(
     ``option`` wins over ``text``. The comment says "via Kanban-Empowered (desktop)" and the audit action
     is ``human_done`` (or ``human_note``) with detail ``desktop``: Desktop sends no identity, and no
     body field is trusted as one.
+
+    Only a human wait (``waits.human_block``) can be answered, as on Telegram, whose items are always
+    human waits: a breaker park, a non-human block kind, a card resolved elsewhere or an unknown card is
+    ``not_found``. The version check stays in ``apply_answer`` (``changed`` for a re-blocked card).
+
+    ``result``: ``resolved`` | ``noted`` | ``ambiguous`` | ``changed`` | ``not_found`` | ``error`` (an
+    exception while resolving; the message is the translated "something went wrong" text).
     """
     def not_found() -> dict:
         return {"result": "not_found", "message": t("ui.answer.not_found"), "overview_item_removed": False,
@@ -484,7 +491,8 @@ def answer(
     if board not in _boards(api):
         return not_found()
     with api.connect(board) as conn:
-        if api.task(conn, task_id) is None:
+        task = api.task(conn, task_id)
+        if task is None or human_block(task, api.events(conn, task_id), settings) is None:
             return not_found()
     body = (option if option else text or "").strip()
     outcome = apply_answer(

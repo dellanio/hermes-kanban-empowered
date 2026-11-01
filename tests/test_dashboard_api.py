@@ -422,6 +422,39 @@ def test_answer_version_mismatch_is_changed(client):
     assert _status(tid) == "blocked"
 
 
+def _block_event_id(tid, board="default"):
+    from ke import hermes_api
+    from ke.waits import block_version
+
+    with _conn(board) as conn:
+        return block_version(hermes_api.events(conn, tid))
+
+
+def test_answer_never_resolves_a_breaker_park(client, store):
+    """Telegram only lists human waits; /answer enforces the same rule (review finding 1)."""
+    tid = gave_up_with_runs(["infra", "infra"])
+    before = _comments(tid)
+    body = _answer(client, tid, _block_event_id(tid), text="feito").json()
+    assert body["result"] == "not_found" and body["overview_item_removed"] is False
+    assert _status(tid) == "blocked" and _comments(tid) == before
+    assert not [a for a in store.actions_since(0) if a["kind"] in ("human_done", "human_note")]
+
+
+def test_answer_never_resolves_a_non_human_block_kind(client):
+    tid, version = _waiting(ASK_WORD, kind="capability")
+    assert _answer(client, tid, version, text="connected").json()["result"] == "not_found"
+    assert _status(tid) == "blocked"
+
+
+def test_answer_on_a_card_already_resolved_elsewhere_is_not_found(client):
+    from ke import hermes_api
+
+    tid, version = _waiting(ASK_WORD)
+    with _conn() as conn:
+        assert hermes_api.unblock(conn, tid)
+    assert _answer(client, tid, version, text="connected").json()["result"] == "not_found"
+
+
 def test_answer_unknown_card_is_not_found(client):
     body = _answer(client, "t_00000000", 1, text="done").json()
     assert body["result"] == "not_found"

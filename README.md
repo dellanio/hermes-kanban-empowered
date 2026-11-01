@@ -1,19 +1,186 @@
 # kanban-empowered
 
-Plugin for [Hermes Agent](https://github.com/NousResearch/hermes-agent) that
-extends the native kanban: reminders and escalation for cards waiting on a
-human (via Telegram), guards for stuck cards, and recovery from
-infrastructure failures.
+A plugin for [Hermes Agent](https://github.com/NousResearch/hermes-agent) that extends the native
+kanban for a fleet of agent profiles:
 
-**Status:** v0.1 em desenvolvimento.
+- **Human waits (Telegram).** A card blocked on a person gets a reminder after 30 min and 2 h, an
+  escalation after 8 h and a daily digest after that. The owner answers `done` to the reminder on
+  Telegram (or runs `hermes kanban-empowered done <card>`) and the card is unblocked.
+- **Stuck cards.** Cards held by Hermes' respawn guard (`active_pr`, `blocker_auth`) for more than
+  30 min are reported to the owner, with a one-line command to hand them to another profile.
+- **Infrastructure failures.** When Hermes' failure breaker parks a card only because the host
+  failed (gateway, worker persistence), the plugin undoes the park, within a budget of 2 undos per
+  card per 24 h. A burst of 3 infrastructure exits within 1 h raises one systemic alert.
+- **Visibility.** `explain` says why a card is (not) moving, `status` lists the fleet, and a pinned
+  Telegram message (the live panel) is kept up to date. `status --watch` shows the same panel in
+  the terminal.
+
+The plugin coexists with Hermes' own notifier: it never repeats the native completed, blocked,
+gave_up, crashed, review or block_loop_detected messages.
+
+**Status:** v0.1.
 
 ## Requirements
 
-- Hermes Agent with the kanban enabled.
-- The Hermes veto-hooks patch in `patches/` (adds the `pre_gateway_dispatch`
-  and kanban hooks the plugin relies on). Without it the plugin degrades to
-  the current Hermes behaviour (fail-open) and `doctor` reports
-  `veto_hooks: ausentes`.
+- Hermes Agent at revision `bf0203a794` (the revision this version was written and tested
+  against; `doctor` prints both `hermes_compat` and the installed `hermes_head`), with the kanban
+  enabled.
+- Optional: the core patch [`patches/0001-kanban-veto-hooks.patch`](patches/README.md). It adds the
+  `kanban_pre_claim` and `kanban_pre_complete` veto hooks. **v0.1 does not use them yet**: the
+  patch is inert and the plugin behaves the same with or without it. Without the patch, `doctor`
+  reports `veto_hooks: missing` and the coordinator warns once (log and Telegram).
+- Python standard library only (no extra dependencies).
+
+## Install
+
+Plugins, their state and their settings are per Hermes profile. Install and enable the plugin in
+**every profile that runs kanban workers** (builder, devops, reviewer, ...) and in the profile of
+the gateway that acts as the coordinator (by default `default`).
+
+For each profile:
+
+1. Put this repository in the profile's plugin directory, `<profile home>/plugins/kanban-empowered/`
+   (`~/.hermes/plugins/kanban-empowered/` for `default`,
+   `~/.hermes/profiles/<name>/plugins/kanban-empowered/` for a named profile).
+   `hermes plugins install <git url>` does the same.
+2. Enable it: `hermes plugins enable kanban-empowered` (it goes into `plugins.enabled`).
+3. Add the settings below to that profile's `config.yaml`. Every profile must agree on
+   `coordinator_profile` and `shared_state_dir` (the default `shared_state_dir` is derived from
+   `coordinator_profile`, so leaving both at their defaults everywhere is consistent).
+4. Run `hermes kanban-empowered doctor` in that profile.
+
+What runs where:
+
+- **Every profile** registers the worker guard (`pre_tool_call`): a `kanban_block` that waits on a
+  person must carry a structured ask (`Need:` / `Why:` / `How to reply:`, or the pt-BR labels
+  `Preciso:` / `Por quê:` / `Como responder:`), otherwise the agent is asked to redo the block.
+  Worker profiles open no plugin state.
+- **The coordinator profile** (only) opens the shared state, evaluates the boards on Hermes'
+  dispatch tick (at most every 30 s), sends Telegram messages, reads the Telegram replies and
+  records worker exits. A leader lock in `shared_state_dir` makes sure only one coordinator
+  process acts at a time; a second one stays passive.
+
+## Configuration
+
+Settings live under `plugins.entries.kanban-empowered.settings`:
+
+```yaml
+plugins:
+  entries:
+    kanban-empowered:
+      settings:
+        mode: enforce                 # enforce | cooperative-only
+        coordinator_profile: default  # the profile whose gateway is the coordinator
+        # shared_state_dir: C:/Users/me/AppData/Local/hermes/plugin-data/kanban-empowered
+        telegram:
+          owner_ids: { sponsor: 6802889854, ops: 5550001 }
+          pin_live_panel: true
+          reply_ttl: 7d
+        waits:
+          default_owner: sponsor
+          reminders: [30m, 2h]
+          escalate_after: 8h
+          escalate_to: ops
+          digest: daily
+          human_kinds: [needs_input]
+          require_structured_ask: true
+        boards:
+          side-project:
+            waits: { default_owner: ops }
+        guards:
+          alert_after: 30m
+        infra_failures:
+          undo_budget: { count: 2, window: 24h }
+          alert_count: 3
+          alert_window: 1h
+          # patterns: ["Kanban execution unknown", "retained by owner",
+          #            "Gateway connection failed", "WorkerPersistenceError"]
+```
+
+| Key | Default | Meaning |
+|---|---|---|
+| `mode` | `enforce` | `enforce` or `cooperative-only`. Validated, but without effect in v0.1 (it is for the veto hooks). |
+| `coordinator_profile` | `default` | The profile whose process acts as the coordinator. |
+| `shared_state_dir` | the coordinator profile's `plugin-data/kanban-empowered` | The plugin's SQLite state and leader lock, shared by all profiles. Default: `<hermes root>/plugin-data/kanban-empowered` when `coordinator_profile` is `default`, else `<hermes root>/profiles/<coordinator_profile>/plugin-data/kanban-empowered`. **Must be on a local NTFS (or other local) disk**: the leader lock relies on hard links and atomic renames, which network shares and some sync folders do not provide. |
+| `telegram.owner_ids` | `{}` | Owner name to Telegram id. **Each value is BOTH the person's Telegram user id and the id of their private chat with the bot** (in a Telegram DM they are the same number): messages go to that chat, and a reply is accepted only from that user. |
+| `telegram.pin_live_panel` | `true` | Keep a pinned live panel in the default owner's chat. |
+| `telegram.reply_ttl` | `7d` | How long a reminder can still be answered. |
+| `waits.default_owner` | `sponsor` | Owner of the waits on any board without an override. |
+| `boards.<board>.waits.default_owner` | | Per-board owner. |
+| `waits.reminders` | `[30m, 2h]` | Reminder times, counted from the start of the block. |
+| `waits.escalate_after` | `8h` | When the escalation goes out (to the owner, plus a copy to `escalate_to`). |
+| `waits.escalate_to` | none | Owner name that receives a read-only copy of escalations. It cannot resolve them. |
+| `waits.digest` | `daily` | Repeat interval after the escalation (`hourly`, `daily`, `weekly` or a duration). |
+| `waits.human_kinds` | `[needs_input]` | Block kinds that wait on a person (an untyped block counts too). |
+| `waits.require_structured_ask` | `true` | The worker guard requires the three-line ask. |
+| `guards.alert_after` | `30m` | How long a respawn guard may hold a card before the owner is told. |
+| `infra_failures.undo_budget` | `{count: 2, window: 24h}` | Breaker parks undone per card per window. |
+| `infra_failures.alert_count` / `alert_window` | `3` / `1h` | Systemic alert threshold. |
+| `infra_failures.patterns` | see above | Error substrings that mark a worker failure as the host's. |
+
+Durations accept `s`, `m`, `h`, `d` (`30m`, `2h`, `7d`) or plain seconds.
+
+The Telegram bot token is read from the `TELEGRAM_BOT_TOKEN` environment variable of the
+coordinator process (the same bot the gateway already uses). The plugin only calls `sendMessage`,
+`editMessageText` and `pinChatMessage`; it never polls the bot.
+
+## Commands
+
+| Command | What it does |
+|---|---|
+| `hermes kanban-empowered doctor` | Compatibility and setup diagnostics (see below). |
+| `hermes kanban-empowered explain <card> [--board B]` | Why a card is (not) moving: dependencies, guard, live run, freshness, human wait. |
+| `hermes kanban-empowered status [--watch]` | Running cards, human waits, guarded cards, resolved today. `--watch` redraws the live panel every 5 s until Ctrl+C. |
+| `hermes kanban-empowered done <card> [--board B]` | Resolve a card's open human wait, exactly like a `done` reply on Telegram (same version checks). |
+| `hermes kanban-empowered release <card> --to <profile> [--board B]` | Hand a card held by a respawn guard (`active_pr`, `blocker_auth`) to another profile. |
+
+### Telegram replies
+
+Reply (with Telegram's "reply" function) to a reminder or to the pinned panel. The whole message
+must be the confirmation, optionally numbered and with trailing punctuation:
+
+- words: `done`, `ok`, `approved`, `feito`, `liguei`, `aprovado` (any case);
+- one item: `done`; one of several items in a message: `2 done` (also `2. done`, `2) done`,
+  `2 - done`);
+- anything else (`ok, but not yet`, `done?`) is a normal message for the agent and passes through.
+
+A reply is acted on only when it comes from the configured owner of that item, in the owner's own
+chat, to a message the plugin sent, before `reply_ttl`, and while the card is still blocked on the
+same block it was reminded about. If the card was blocked again (a new block, including a park by
+Hermes' failure breaker), the reply changes nothing and the plugin says so. Replies from anybody
+else are ignored and continue to the normal gateway flow. Every resolution becomes a card comment
+with its author.
+
+### `doctor` output
+
+| Key | Value |
+|---|---|
+| `hermes_compat` | Hermes revision this plugin version targets. |
+| `hermes_head` | Installed Hermes revision (`unknown` if it cannot be read). |
+| `veto_hooks` | `present` / `missing` (the core patch; inert in v0.1). |
+| `coordinator` | PID of the process holding the leader lock, or `none`. |
+| `active_profile` | Profile of the process running `doctor`. |
+| `coordinator_profile` | Configured coordinator profile. |
+| `shared_state_dir` | Resolved state directory. |
+| `profiles_with_plugin` | Profiles whose `config.yaml` has `plugins.entries.kanban-empowered`. |
+| `telegram_token` | `present` / `missing`: `TELEGRAM_BOT_TOKEN` in **this** process (the token itself is never printed). |
+| `owner_chats` | Number of entries in `telegram.owner_ids`. |
+| `config` | Only when the settings are invalid: the error. The plugin then runs the worker guard on defaults and does not start the coordinator. |
+
+Human-facing text follows the Hermes language (English by default, pt-BR included).
+
+## What v0.1 does not do yet
+
+- It does not use the veto hooks: no refusal at claim or completion time, no resource locks or
+  quota groups (`quota`, `held` commands), no gate verdicts or four-eyes review.
+- No agent tools (`kanban_true_state`, `kanban_verdict`); the only agent-facing check is the
+  structured ask on `kanban_block`.
+- Breaker parks are not tracked as human waits (no reminders for them): the infrastructure
+  recovery and its alerts handle them, and Hermes' own notifier announces the `gave_up`.
+- No quiet hours. Reminders follow the wall clock; while the gateway is down they wait, then go
+  out condensed into one message per owner.
+- No dashboard tab or desktop side panel; the live panel is the pinned Telegram message and
+  `status --watch`.
 
 ## License
 

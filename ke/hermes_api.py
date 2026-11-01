@@ -45,6 +45,19 @@ def task_exists(board: str, tid: str, live=None) -> bool:
         return _kb.get_task(conn, tid) is not None
 
 
+def claimable_task(board: str, tid: str, assignee=None, live=None) -> bool:
+    """True when ``tid`` is a ``ready`` card of the live board ``board`` and, when ``assignee`` is given, is
+    assigned to it: the card a ``kanban_pre_claim`` call is about (ids are only unique per board, so a card
+    of another board with the same id does not match). Never opens an unknown or archived board."""
+    if not board or board not in (boards() if live is None else live):
+        return False
+    with connect(board) as conn:
+        task = _kb.get_task(conn, tid)
+    if task is None or task.status != "ready":
+        return False
+    return assignee is None or task.assignee == assignee
+
+
 @contextlib.contextmanager
 def connect(board: str) -> Iterator[sqlite3.Connection]:
     """Context manager yielding the kanban DB connection of ``board``.

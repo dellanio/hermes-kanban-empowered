@@ -1206,3 +1206,31 @@ def test_one_failing_board_does_not_stop_the_scan(tmp_path):
     n = len(calls)
     assert hook(task_id="t_x", board="default") is None
     assert len(calls) > n  # a miss with a failed board is not cached: board a may hold the card
+
+
+# -- review Minor 4: a hit must be the card being claimed (ready, same assignee) ----------------------
+def test_a_hit_must_be_the_ready_card_with_the_same_assignee(kanban_home, tmp_path):
+    from hermes_cli import kanban_db_boards as kbb
+    from ke import hermes_api
+    from ke.board_status import StatusReader, make_pre_claim_hook
+    from conftest import create_task
+
+    kbb.create_board("frozen")
+    with hermes_api.connect("frozen") as conn:
+        ready = create_task(conn, title="ready", assignee="dev")
+        parent = create_task(conn, title="parent", assignee="dev")
+        waiting = create_task(conn, title="todo", assignee="dev", parents=[parent])
+        assert hermes_api.task(conn, waiting).status == "todo"
+    s = _store(tmp_path)
+    s.set_board_status("frozen", "suspended", 1, "cli")
+    s.close()
+    hook = make_pre_claim_hook(StatusReader(tmp_path / "state" / "state.db"))
+    # an id that collides with a card of the suspended board, but another card: other assignee / not ready
+    assert hook(task_id=ready, board="default", assignee="writer") is None
+    assert hook(task_id=waiting, board="default", assignee="dev") is None
+    assert hook(task_id=ready, board="default", assignee="dev") == SUSPENDED_EN  # not shadowed by the miss above
+    assert hermes_api.claimable_task("frozen", ready, "dev")
+    assert not hermes_api.claimable_task("frozen", ready, "writer")
+    assert not hermes_api.claimable_task("frozen", waiting, "dev")
+    assert hermes_api.claimable_task("frozen", ready, None)  # no assignee given: status alone
+    assert not hermes_api.claimable_task("nope", ready, "dev")

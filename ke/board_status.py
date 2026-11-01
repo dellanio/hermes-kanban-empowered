@@ -23,7 +23,8 @@ gateway dispatcher claims every board's cards without pinning that board as curr
 is active the hook answers at once without touching any board; otherwise it looks the card up on each
 live suspended/done board (the named board first) through ``hermes_api.task_exists`` (a plain read; the
 board being claimed is in WAL mode, so the claim's open write transaction does not block it). Card ids are
-random per card, so a hit identifies the card's board.
+random per card but only unique per board, so a hit must also be a ``ready`` card with the claimed
+card's assignee (``hermes_api.claimable_task``) before it counts.
 
 Cost. The scan runs under the claimed board's write lock and a refused card stays ``ready``, so every
 dispatcher tick asks again. Therefore: the live boards are listed once per scan; the answer is cached per
@@ -203,29 +204,33 @@ def make_pre_claim_hook(
 
     Hermes calls it with ``task_id, board, assignee, workspace_path, claimer`` (+ ``telemetry_schema_version``).
     ``board`` is only a hint (see the module doc). ``boards()`` (default ``hermes_api.boards``) lists the live
-    boards once per scan; ``locate(board, task_id)`` (default ``hermes_api.task_exists`` against that list)
-    tells whether the card is on that board. Answers are cached (see the module doc) and the scan is bounded
+    boards once per scan; ``locate(board, task_id, assignee)`` (default ``hermes_api.claimable_task`` against
+    that list) tells whether the card being claimed is on that board. Answers are cached (see the module doc) and the scan is bounded
     by ``budget_s`` (default ``SCAN_BUDGET_S``). Any error returns ``None``: fail-open.
     """
     lister = boards if boards is not None else hermes_api.boards
     cache = _LookupCache()
 
-    def kanban_pre_claim(task_id: Any = None, board: Any = None, **_kw: Any) -> Optional[dict]:
+    def kanban_pre_claim(
+        task_id: Any = None, board: Any = None, assignee: Any = None, **_kw: Any
+    ) -> Optional[dict]:
         try:
             if not task_id:
                 return None
             tid = str(task_id)
+            who = None if assignee is None else str(assignee)
+            ckey = f"{tid}\x00{who or ''}"
             off = {b: s for b, s in reader.statuses().items() if s != "active"}
             if not off:
                 return None  # the common case: nothing to look up
             key = frozenset(off.items())
             now = clock()
-            known, where = cache.get(key, tid, now)
+            known, where = cache.get(key, ckey, now)
             if not known:
-                where = _scan(tid, board, off, now)
+                where = _scan(tid, who, board, off, now)
                 if where is _UNKNOWN:
                     return None  # out of budget, or a board could not be read: fail-open, not cached
-                cache.put(key, tid, where, None if where else now + NEGATIVE_TTL_S)
+                cache.put(key, ckey, where, None if where else now + NEGATIVE_TTL_S)
             if where is None:
                 return None
             reason = refuse_reason(off[where])
@@ -234,10 +239,12 @@ def make_pre_claim_hook(
             log.debug("kanban-empowered: board status check failed for %r (fail-open): %s", task_id, exc)
             return None
 
-    def _scan(tid: str, hint: Any, off: dict, started: float) -> Any:
+    def _scan(tid: str, who: Optional[str], hint: Any, off: dict, started: float) -> Any:
         live = list(lister())
         live_set = set(live)
-        find = locate if locate is not None else (lambda b, t: hermes_api.task_exists(b, t, live=live))
+        find = locate if locate is not None else (
+            lambda b, t, a: hermes_api.claimable_task(b, t, a, live=live_set)
+        )
         candidates = [b for b in sorted(off, key=lambda b: (b != hint, b)) if b in live_set]
         budget = SCAN_BUDGET_S if budget_s is None else budget_s
         failed = False
@@ -246,7 +253,7 @@ def make_pre_claim_hook(
                 _warn_budget(tid, n, len(candidates))
                 return _UNKNOWN
             try:
-                if find(candidate, tid):
+                if find(candidate, tid, who):
                     return candidate
             except Exception as exc:  # one unreadable board must not let the other boards' cards through
                 failed = True

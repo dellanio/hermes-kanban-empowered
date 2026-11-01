@@ -14,8 +14,16 @@ A non-active board (suspended or done):
 
 The hook runs inside Hermes' ``claim_task`` write transaction, on a helper thread bounded by
 ``kanban.veto_hook_timeout_seconds``. It therefore reads the shared Store through its own short-lived
-read-only connection with a small busy timeout (:class:`StatusReader`), caches the answer for at most
+read-only connection with a small busy timeout (:class:`StatusReader`), caches the statuses for at most
 ``CACHE_TTL_S`` and returns ``None`` (proceed) on any error: fail-open, like every core hook here.
+
+Which board is the card on? Not the hook's ``board`` argument: Hermes fills it with its *current* board
+(``get_current_board()``: the context override, ``HERMES_KANBAN_BOARD`` or the ``current`` file), and the
+gateway dispatcher claims every board's cards without pinning that board as current. So while every board
+is active the hook answers at once without touching any board; otherwise it looks the card up on each
+suspended/done board (the named board first) through ``hermes_api.task_exists`` (a plain read; the board
+being claimed is in WAL mode, so the claim's open write transaction does not block it). Card ids are
+random per card, so a hit identifies the card's board.
 """
 from __future__ import annotations
 
@@ -27,6 +35,7 @@ import unicodedata
 from pathlib import Path
 from typing import Any, Callable, Optional
 
+from . import hermes_api
 from .messages import t
 from .store import BOARD_STATUSES
 
@@ -121,21 +130,32 @@ class StatusReader:
         return self.statuses().get(board, "active")
 
 
-def make_pre_claim_hook(reader: Any) -> Callable[..., Optional[dict]]:
-    """The ``kanban_pre_claim`` callback: ``{"refuse": reason}`` for a suspended/done board, else ``None``.
+def make_pre_claim_hook(
+    reader: Any, locate: Optional[Callable[[str, str], bool]] = None
+) -> Callable[..., Optional[dict]]:
+    """The ``kanban_pre_claim`` callback: ``{"refuse": reason}`` for a card of a suspended/done board, else ``None``.
 
-    Hermes calls it with ``task_id, board, assignee, workspace_path, claimer`` (+ ``telemetry_schema_version``);
-    only ``board`` matters. Any error (unreadable Store, timeout, translation) returns ``None``: fail-open.
+    Hermes calls it with ``task_id, board, assignee, workspace_path, claimer`` (+ ``telemetry_schema_version``).
+    ``board`` is only a hint (see the module doc): ``locate(board, task_id)`` (default
+    ``hermes_api.task_exists``) tells whether the card is on one of the non-active boards. Any error
+    (unreadable Store, board lookup, timeout, translation) returns ``None``: fail-open.
     """
+    find = locate if locate is not None else hermes_api.task_exists
 
     def kanban_pre_claim(task_id: Any = None, board: Any = None, **_kw: Any) -> Optional[dict]:
         try:
-            if not board:
+            if not task_id:
                 return None
-            reason = refuse_reason(reader.status(str(board)))
-            return {"refuse": reason} if reason else None
+            off = {b: s for b, s in reader.statuses().items() if s != "active"}
+            if not off:
+                return None  # the common case: nothing to look up
+            for candidate in sorted(off, key=lambda b: (b != board, b)):
+                if find(candidate, str(task_id)):
+                    reason = refuse_reason(off[candidate])
+                    return {"refuse": reason} if reason else None
+            return None
         except Exception as exc:
-            log.debug("kanban-empowered: board status check failed for %r (fail-open): %s", board, exc)
+            log.debug("kanban-empowered: board status check failed for %r (fail-open): %s", task_id, exc)
             return None
 
     return kanban_pre_claim

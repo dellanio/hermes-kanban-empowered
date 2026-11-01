@@ -35,6 +35,15 @@ def board_exists(board: str) -> bool:
     return bool(board) and board in boards()
 
 
+def task_exists(board: str, tid: str) -> bool:
+    """True when card ``tid`` is on the live board ``board`` (False for an unknown or archived board, which
+    is never opened, so a lookup can never create a board)."""
+    if not board_exists(board):
+        return False
+    with connect(board) as conn:
+        return _kb.get_task(conn, tid) is not None
+
+
 @contextlib.contextmanager
 def connect(board: str) -> Iterator[sqlite3.Connection]:
     """Context manager yielding the kanban DB connection of ``board``.

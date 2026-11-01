@@ -179,42 +179,81 @@ def test_reader_never_writes(tmp_path):
         r._connect().execute("INSERT INTO kv VALUES ('x', 'y')")
 
 
-def test_hook_refuses_suspended_and_done_boards_and_passes_active_or_unknown(tmp_path):
+class Where:
+    """A stand-in board locator: ``{task_id: board}``; records every lookup."""
+
+    def __init__(self, cards=None):
+        self.cards = dict(cards or {})
+        self.calls = []
+
+    def __call__(self, board, task_id):
+        self.calls.append((board, task_id))
+        return self.cards.get(task_id) == board
+
+
+KW = {"assignee": "dev", "workspace_path": None, "claimer": "host:1", "telemetry_schema_version": 1}
+SUSPENDED_EN = {"refuse": "Project suspended in Kanban Empowered — reactivate it to continue."}
+DONE_EN = {"refuse": "Project marked done in Kanban Empowered — reactivate it to continue."}
+
+
+def _statuses(tmp_path, **by_board):
+    s = _store(tmp_path)
+    for board, statuses in by_board.items():
+        for i, st in enumerate(statuses.split(",")):
+            s.set_board_status(board, st, i + 1, "cli")
+    s.close()
+
+
+def test_hook_refuses_cards_of_suspended_and_done_boards(tmp_path):
+    """The card's own board decides, whatever ``board`` Hermes passes (it is the *current* board)."""
     from ke.board_status import make_pre_claim_hook
 
-    s = _store(tmp_path)
-    s.set_board_status("frozen", "suspended", 1, "cli")
-    s.set_board_status("finished", "done", 1, "cli")
-    s.set_board_status("back", "suspended", 1, "cli")
-    s.set_board_status("back", "active", 2, "cli")
-    hook = make_pre_claim_hook(_reader(tmp_path))
-    kw = {"assignee": "dev", "workspace_path": None, "claimer": "host:1", "telemetry_schema_version": 1}
-    assert hook(task_id="t_1", board="frozen", **kw) == {
-        "refuse": "Project suspended in Kanban Empowered — reactivate it to continue."
-    }
-    assert hook(task_id="t_1", board="finished", **kw) == {
-        "refuse": "Project marked done in Kanban Empowered — reactivate it to continue."
-    }
-    assert hook(task_id="t_1", board="back", **kw) is None
-    assert hook(task_id="t_1", board="never-seen", **kw) is None
-    assert hook(task_id="t_1", board=None, **kw) is None
-    s.close()
+    _statuses(tmp_path, frozen="suspended", finished="done", back="suspended,active")
+    where = Where({"t_f": "frozen", "t_d": "finished", "t_b": "back", "t_a": "default"})
+    hook = make_pre_claim_hook(_reader(tmp_path), locate=where)
+    assert hook(task_id="t_f", board="default", **KW) == SUSPENDED_EN
+    assert hook(task_id="t_d", board="frozen", **KW) == DONE_EN
+    assert hook(task_id="t_b", board="back", **KW) is None  # reactivated
+    assert hook(task_id="t_a", board="frozen", **KW) is None  # the current board is suspended, the card's is not
+    assert hook(task_id="t_unknown", board="default", **KW) is None
+    assert hook(task_id=None, board="frozen", **KW) is None
+
+
+def test_hook_looks_only_at_non_active_boards_and_the_hint_first(tmp_path):
+    from ke.board_status import make_pre_claim_hook
+
+    _statuses(tmp_path, a="suspended", b="done", c="suspended,active")
+    where = Where({"t_1": "b"})
+    hook = make_pre_claim_hook(_reader(tmp_path), locate=where)
+    assert hook(task_id="t_1", board="b") == DONE_EN
+    assert where.calls == [("b", "t_1")]  # the board Hermes named is tried first
+    where.calls.clear()
+    assert hook(task_id="t_9", board="default") is None
+    assert sorted(where.calls) == [("a", "t_9"), ("b", "t_9")]  # never the active ones
+
+
+def test_hook_touches_no_board_while_every_board_is_active(tmp_path):
+    from ke.board_status import make_pre_claim_hook
+
+    def locate(board, task_id):
+        raise AssertionError("no board lookup expected")
+
+    assert make_pre_claim_hook(_reader(tmp_path), locate=locate)(task_id="t", board="default") is None
+    _statuses(tmp_path, x="suspended,active")
+    assert make_pre_claim_hook(_reader(tmp_path), locate=locate)(task_id="t", board="default") is None
 
 
 def test_hook_reason_in_pt_br(tmp_path, pt_br):  # noqa: F811
     from ke.board_status import make_pre_claim_hook
 
-    s = _store(tmp_path)
-    s.set_board_status("frozen", "suspended", 1, "cli")
-    s.set_board_status("finished", "done", 1, "cli")
-    hook = make_pre_claim_hook(_reader(tmp_path))
-    assert hook(task_id="t", board="frozen") == {
+    _statuses(tmp_path, frozen="suspended", finished="done")
+    hook = make_pre_claim_hook(_reader(tmp_path), locate=Where({"t_f": "frozen", "t_d": "finished"}))
+    assert hook(task_id="t_f", board="default") == {
         "refuse": "Projeto suspenso no Kanban Empowered — reative para continuar."
     }
-    assert hook(task_id="t", board="finished") == {
+    assert hook(task_id="t_d", board="default") == {
         "refuse": "Projeto concluído no Kanban Empowered — reative para continuar."
     }
-    s.close()
 
 
 def test_hook_fails_open_on_store_error(tmp_path):
@@ -223,13 +262,24 @@ def test_hook_fails_open_on_store_error(tmp_path):
     path = tmp_path / "state" / "state.db"
     path.parent.mkdir(parents=True)
     path.write_bytes(b"this is not a sqlite database" * 100)
-    assert make_pre_claim_hook(_reader(tmp_path))(task_id="t", board="b") is None
+    assert make_pre_claim_hook(_reader(tmp_path), locate=Where({"t": "b"}))(task_id="t", board="b") is None
 
     class Broken:
-        def status(self, board):
+        def statuses(self):
             raise RuntimeError("boom")
 
-    assert make_pre_claim_hook(Broken())(task_id="t", board="b") is None
+    assert make_pre_claim_hook(Broken(), locate=Where({"t": "b"}))(task_id="t", board="b") is None
+
+
+def test_hook_fails_open_when_the_board_lookup_fails(tmp_path):
+    from ke.board_status import make_pre_claim_hook
+
+    _statuses(tmp_path, frozen="suspended")
+
+    def locate(board, task_id):
+        raise TimeoutError("database is locked")
+
+    assert make_pre_claim_hook(_reader(tmp_path), locate=locate)(task_id="t", board="frozen") is None
 
 
 def test_hook_fails_open_when_the_store_is_locked(tmp_path):
@@ -243,7 +293,7 @@ def test_hook_fails_open_when_the_store_is_locked(tmp_path):
     try:
         reader = StatusReader(tmp_path / "state" / "state.db", busy_ms=50, clock=Tick())
         started = time.monotonic()
-        assert make_pre_claim_hook(reader)(task_id="t", board="frozen") is None
+        assert make_pre_claim_hook(reader, locate=Where({"t": "frozen"}))(task_id="t", board="frozen") is None
         assert time.monotonic() - started < 2.0
     finally:
         s.conn.execute("ROLLBACK")
@@ -292,6 +342,22 @@ def test_board_exists_wrapper(kanban_home):
     assert not hermes_api.board_exists("")
 
 
+def test_task_exists_wrapper(kanban_home):
+    from hermes_cli import kanban_db_boards as kbb
+    from ke import hermes_api
+    from conftest import create_task
+
+    kbb.create_board("voz-hermes")
+    with hermes_api.connect("voz-hermes") as conn:
+        tid = create_task(conn, title="x")
+    assert hermes_api.task_exists("voz-hermes", tid)
+    assert not hermes_api.task_exists("default", tid)
+    assert not hermes_api.task_exists("voz-hermes", "t_00000000")
+    root = kanban_home / "kanban" / "boards"
+    assert not hermes_api.task_exists("never-created", tid)
+    assert not (root / "never-created").exists()  # an unknown board is never created by a lookup
+
+
 # -- register(ctx) wiring ---------------------------------------------------------------------------
 class _Ctx:
     def __init__(self, settings=None):
@@ -308,17 +374,18 @@ class _Ctx:
         return self._settings.get(key, default)
 
 
-@pytest.fixture
-def worker_profile(monkeypatch):
-    """A worker process: not the coordinator profile, so only the profile-wide hooks are registered."""
-    from ke import hermes_api
-
-    monkeypatch.setattr(hermes_api, "active_profile", lambda: "worker-x")
-
-
 def test_register_subscribes_pre_claim_in_any_profile_when_the_hooks_exist(
     load_plugin, kanban_home, tmp_path, monkeypatch
 ):
+    from hermes_cli import kanban_db_boards as kbb
+    from ke import hermes_api
+    from conftest import create_task
+
+    kbb.create_board("frozen")
+    with hermes_api.connect("frozen") as conn:
+        frozen = create_task(conn, title="frozen work", assignee="dev")
+    with hermes_api.connect("default") as conn:
+        live = create_task(conn, title="live work", assignee="dev")
     mod = load_plugin()
     api = __import__(mod.__name__ + ".ke.hermes_api", fromlist=["x"])
     monkeypatch.setattr(api, "active_profile", lambda: "worker-x")
@@ -331,9 +398,9 @@ def test_register_subscribes_pre_claim_in_any_profile_when_the_hooks_exist(
     s.set_board_status("frozen", "suspended", 1, "cli")
     s.close()
     (cb,) = ctx.hooks["kanban_pre_claim"]
-    out = cb(task_id="t_1", board="frozen", assignee="dev", workspace_path=None, claimer="h", telemetry_schema_version=1)
-    assert isinstance(out, dict) and out["refuse"]
-    assert cb(task_id="t_1", board="default", assignee="dev", workspace_path=None, claimer="h") is None
+    out = cb(task_id=frozen, board="default", assignee="dev", workspace_path=None, claimer="h", telemetry_schema_version=1)
+    assert isinstance(out, dict) and "suspended" in out["refuse"]
+    assert cb(task_id=live, board="default", assignee="dev", workspace_path=None, claimer="h") is None
 
 
 def test_register_skips_pre_claim_without_the_veto_hooks(load_plugin, kanban_home, tmp_path, monkeypatch):
@@ -347,32 +414,66 @@ def test_register_skips_pre_claim_without_the_veto_hooks(load_plugin, kanban_hom
     assert "pre_tool_call" in ctx.hooks
 
 
-def test_hook_refusal_keeps_a_real_card_ready(kanban_home, tmp_path):
-    """End to end against the installed Hermes: a subscribed hook refusing keeps the card 'ready'."""
-    from hermes_cli import kanban_db as kb
+@pytest.fixture
+def subscribed(kanban_home, tmp_path):
+    """The plugin's kanban_pre_claim callback subscribed to the installed Hermes' plugin manager."""
     from hermes_cli import plugins as hp
     from ke import hermes_api
     from ke.board_status import StatusReader, make_pre_claim_hook
 
     if not hermes_api.veto_hooks_available():
         pytest.skip("this Hermes build has no veto hooks")
-    from conftest import create_task
-
-    s = _store(tmp_path)
-    s.set_board_status("default", "suspended", 1, "cli")
-    s.close()
     hook = make_pre_claim_hook(StatusReader(tmp_path / "state" / "state.db"))
     manager = hp.get_plugin_manager()
     manager._hooks.setdefault("kanban_pre_claim", []).append(hook)
-    try:
-        with hermes_api.connect("default") as conn:
-            tid = create_task(conn, title="frozen work", assignee="dev")
-            assert kb.claim_task(conn, tid) is None
-            assert hermes_api.task(conn, tid).status == "ready"
-            refused = [e for e in hermes_api.events(conn, tid) if e.kind == "claim_refused"]
-            assert refused and "Kanban Empowered" in str(refused[-1].payload)
-    finally:
-        manager._hooks["kanban_pre_claim"].remove(hook)
+    yield
+    manager._hooks["kanban_pre_claim"].remove(hook)
+
+
+def test_real_claim_on_a_suspended_board_is_held_like_the_gateway_dispatcher_does_it(subscribed, tmp_path):
+    """End to end against the installed Hermes. The gateway dispatcher claims board X with a connection to X
+    but without pinning X as the current board, so the hook's ``board`` is the *current* board (``default``):
+    the card's own board must still decide."""
+    from hermes_cli import kanban_db as kb
+    from hermes_cli import kanban_db_boards as kbb
+    from ke import hermes_api
+    from conftest import create_task
+
+    kbb.create_board("frozen")
+    with hermes_api.connect("frozen") as conn:
+        frozen = create_task(conn, title="frozen work", assignee="dev")
+    with hermes_api.connect("default") as conn:
+        live = create_task(conn, title="live work", assignee="dev")
+    s = _store(tmp_path)
+    s.set_board_status("frozen", "suspended", 1, "cli")
+    with hermes_api.connect("frozen") as conn:
+        assert kb.get_current_board() == "default"
+        assert kb.claim_task(conn, frozen) is None
+        assert hermes_api.task(conn, frozen).status == "ready"
+        refused = [e for e in hermes_api.events(conn, frozen) if e.kind == "claim_refused"]
+        assert refused and "Project suspended in Kanban Empowered" in str(refused[-1].payload)
+    with hermes_api.connect("default") as conn:
+        assert kb.claim_task(conn, live) is not None  # other boards claim normally
+    s.close()
+
+
+def test_real_claim_when_the_current_board_is_the_suspended_one(subscribed, tmp_path, monkeypatch):
+    """The reverse mistake: the current board is suspended, the claimed card lives on an active board."""
+    from hermes_cli import kanban_db as kb
+    from hermes_cli import kanban_db_boards as kbb
+    from ke import hermes_api
+    from conftest import create_task
+
+    kbb.create_board("frozen")
+    with hermes_api.connect("default") as conn:
+        live = create_task(conn, title="live work", assignee="dev")
+    s = _store(tmp_path)
+    s.set_board_status("frozen", "suspended", 1, "cli")
+    s.close()
+    monkeypatch.setenv("HERMES_KANBAN_BOARD", "frozen")
+    assert kb.get_current_board() == "frozen"
+    with hermes_api.connect("default") as conn:
+        assert kb.claim_task(conn, live) is not None
 
 
 # -- reminders: no ladder on a non-active board, restart on reactivation ----------------------------

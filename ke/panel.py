@@ -220,8 +220,8 @@ def load_history(store: Store, chat_id: int, message_id: int) -> dict:
 
 
 def _trim(entries: list, hist: dict) -> list:
-    """Keep the last ``HISTORY_LEN`` lists AND the last certain one (the only list known to have been
-    on screen, however many unknown-outcome edits came since).
+    """Keep the last ``HISTORY_LEN`` lists plus, for every kept uncertain list, the nearest certain list
+    before it (the only list known to have been on screen, however many unknown-outcome edits came since).
 
     ``hist["truncated"]`` is set when something before the first kept list was dropped; a kept list
     whose predecessor in time was dropped is flagged ``gap`` (unknown lists may have been on screen
@@ -229,9 +229,11 @@ def _trim(entries: list, hist: dict) -> list:
     """
     n = len(entries)
     keep = set(range(max(0, n - HISTORY_LEN), n))
-    last_certain = max((i for i, e in enumerate(entries) if not e.get("uncertain")), default=None)
-    if last_certain is not None:
-        keep.add(last_certain)
+    for i in sorted(keep):
+        if entries[i].get("uncertain"):
+            certain = max((k for k in range(i) if not entries[k].get("uncertain")), default=None)
+            if certain is not None:
+                keep.add(certain)
     if len(keep) == n:
         return entries
     out: list = []
@@ -256,7 +258,8 @@ def record_items(
     current list, with ``created_at`` = now (the TTL of a live panel runs from its last update).
     ``certain=False`` records an edit whose outcome is unknown (timeout, 5xx: Telegram may have applied
     it): the list joins the history flagged ``uncertain`` (replies stay checked against the list before
-    it) and ``sent_messages`` is left alone; a later certain record of the same list clears the flag.
+    it) and ``sent_messages`` is left alone; a later certain record of the same list is a new, certain
+    entry stamped with that later time (the uncertain attempt is kept as it was).
     """
     with store.lock:
         hist = load_history(store, chat_id, message_id)
@@ -268,7 +271,11 @@ def record_items(
             entries.append(entry)
             hist["entries"] = entries = _trim(entries, hist)
             store.kv_set(_hist_key(chat_id, message_id), json.dumps(hist))
-        elif certain and entries[-1].pop("uncertain", None):
+        elif certain and entries[-1].get("uncertain"):
+            # the attempt is confirmed only now: it stays as it was (a reply dated before this moment
+            # may have been written against the list before it) and a certain entry starts at this time
+            entries.append({"ts": int(now), "items": items})
+            hist["entries"] = entries = _trim(entries, hist)
             store.kv_set(_hist_key(chat_id, message_id), json.dumps(hist))
         if certain:
             store.add_sent_message(message_id, chat_id, "panel", items, int(now))
@@ -333,6 +340,9 @@ def view_for_reply(
         others.append(entries[k - 1]["items"])
         need = bool(entries[k - 1].get("uncertain"))
         k -= 1
+    # (Edits are at least EVAL_INTERVAL_S = 30 s apart because the coordinator's evaluation is throttled
+    # to that, so within one grace window at most one list besides the chosen one is normally in play;
+    # the loops below do not rely on it.)
     # lists after it: the next ones (soon after the reply) may already have been on screen
     m = j + 1
     if m < len(entries) and entries[m].get("gap"):

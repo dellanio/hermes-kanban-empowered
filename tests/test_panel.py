@@ -833,8 +833,9 @@ def test_unknown_outcome_edit_keeps_both_lists_in_play(rig, fake_tg, clock, erro
     # the retry lands: the list is certain now and replies resolve against it alone
     rig.c._tg_down = False
     rig.c.update_panel(clock.now)
-    assert "uncertain" not in load_history(rig.c.store, OWNER, msg)["entries"][1]
-    assert rig.handle(str(OWNER), "1 done", t0 + 210)["action"] == "skip"
+    assert not load_history(rig.c.store, OWNER, msg)["entries"][-1].get("uncertain")
+    clock.now = t0 + 260
+    assert rig.handle(str(OWNER), "1 done", t0 + 250)["action"] == "skip"
     assert rig.status(c) != "blocked" and rig.status(a) == "blocked"
 
 
@@ -983,3 +984,32 @@ def test_history_without_any_certain_list_is_ambiguous(coord, fake_tg, clock):
                                                 "truncated": False}))
     view = view_for_reply(store, 1, 2, items, 5000, 1)
     assert view.ambiguous is True
+
+
+# -- fix round 3 ---------------------------------------------------------------------------
+def test_retry_confirming_an_attempt_does_not_backdate_it(rig, fake_tg, clock):
+    from ke.panel import load_history
+    from ke.telegram import TelegramError
+
+    a = _add(rig, clock, "aaa", 600)
+    t0 = clock.now
+    rig.c.update_panel(t0)  # [A] certain at 0
+    msg = rig.msg
+    c = _add(rig, clock, "ccc", 7200)
+    fake_tg.fail_next_edit = TelegramError(None, "timeout")
+    clock.now = t0 + 60
+    rig.c.update_panel(clock.now)  # [C, A] uncertain at 60: maybe never applied
+    rig.c._tg_down = False
+    clock.now = t0 + 200
+    rig.c.update_panel(clock.now)  # the retry lands at 200
+    entries = load_history(rig.c.store, OWNER, msg)["entries"]
+    assert [bool(e.get("uncertain")) for e in entries] == [False, True, False]
+    assert [e["ts"] for e in entries] == [int(t0), int(t0) + 60, int(t0) + 200]
+    clock.now = t0 + 250
+    # dated before the retry landed: the screen may still have shown [A]
+    assert rig.handle(str(OWNER), "1 done", t0 + 120)["action"] == "skip"
+    assert rig.status(a) == "blocked" and rig.status(c) == "blocked"
+    assert "panel changed" in fake_tg.last_text.lower()
+    # long after the retry: only the new list counts
+    assert rig.handle(str(OWNER), "1 done", t0 + 240)["action"] == "skip"
+    assert rig.status(c) != "blocked" and rig.status(a) == "blocked"

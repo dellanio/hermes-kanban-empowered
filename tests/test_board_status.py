@@ -1300,3 +1300,37 @@ def test_hook_skips_boards_this_process_never_opened(kanban_home, tmp_path, monk
     assert hook(task_id=live, board="default", assignee="dev") is None
     assert opened == []  # the never-opened board was not touched
     assert not hermes_api.claimable_task("frozen", frozen, "dev")
+
+
+# -- review Minor 7: explain says why a ready card of a non-active board does not start --------------
+def test_explain_says_a_ready_card_of_a_suspended_board_is_held(kanban_home, tmp_path):
+    from ke import conditions, hermes_api
+    from conftest import create_task
+
+    with hermes_api.connect("default") as conn:
+        tid = create_task(conn, title="waiting to start", assignee="dev")
+    store = _store(tmp_path)
+    settings = settings_for_test(tmp_path)
+    with hermes_api.connect("default") as conn:
+        names = [c.name for c in conditions.explain(conn, "default", tid, store, time.time(), settings).conditions]
+        assert "project" not in names  # an active board adds nothing
+        store.set_board_status("default", "done", 1, "cli")
+        cc = conditions.explain(conn, "default", tid, store, time.time(), settings)
+    hold = next(c for c in cc.conditions if c.name == "project")
+    assert (hold.ok, hold.warn, hold.text) == (False, True, "start held: project done")
+    assert "start held: project done" in conditions.format_explain(cc)
+    store.close()
+
+
+def test_explain_hold_in_pt_br(kanban_home, tmp_path, pt_br):  # noqa: F811
+    from ke import conditions, hermes_api
+    from conftest import create_task
+
+    with hermes_api.connect("default") as conn:
+        tid = create_task(conn, title="x", assignee="dev")
+    store = _store(tmp_path)
+    store.set_board_status("default", "suspended", 1, "cli")
+    with hermes_api.connect("default") as conn:
+        cc = conditions.explain(conn, "default", tid, store, time.time(), settings_for_test(tmp_path))
+    assert next(c for c in cc.conditions if c.name == "project").text == "início bloqueado: projeto suspenso"
+    store.close()

@@ -261,6 +261,17 @@ def _wait(conn, board, task, store, now, settings) -> Condition:
 _CONDITIONS = (_dependencies, _guard, _live, _fresh, _wait)
 
 
+def _project_hold(conn, board, task, store, now, settings) -> Optional[Condition]:
+    """A ``ready`` card of a suspended/done board: its start is held by the ``kanban_pre_claim`` veto (the
+    card would otherwise look stuck). ``None`` (no line) for any other card or an active board."""
+    if getattr(task, "status", None) != "ready":
+        return None
+    row = store.board_statuses().get(board)
+    if row is None or row["status"] == "active":
+        return None
+    return Condition("project", False, t("explain.project.held", status=status_label(row["status"]).lower()), warn=True)
+
+
 # -- public API -----------------------------------------------------------------
 def explain(
     conn: Any,
@@ -281,7 +292,8 @@ def explain(
         task_id=task.id,
         status=task.status,
         age_s=_age(now, since),
-        conditions=[fn(conn, board, task, store, now, settings) for fn in _CONDITIONS],
+        conditions=[fn(conn, board, task, store, now, settings) for fn in _CONDITIONS]
+        + [c for c in (_project_hold(conn, board, task, store, now, settings),) if c is not None],
         title=task.title,
     )
 

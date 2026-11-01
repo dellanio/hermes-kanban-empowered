@@ -323,6 +323,7 @@ EN: dict[str, str] = {
     "ui.timeline.board_status.active": "Project {board} reactivated",
     "ui.timeline.board_status.suspended": "Project {board} suspended",
     "ui.timeline.board_status.done": "Project {board} marked done",
+    "explain.project.held": "start held: project {status}",
 }
 
 

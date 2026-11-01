@@ -266,3 +266,4 @@ kanban_empowered.ui.projects.failed: "Não foi possível mudar o status: {error}
 kanban_empowered.ui.timeline.board_status.active: "Projeto {board} reativado"
 kanban_empowered.ui.timeline.board_status.suspended: "Projeto {board} suspenso"
 kanban_empowered.ui.timeline.board_status.done: "Projeto {board} concluído"
+kanban_empowered.explain.project.held: "início bloqueado: projeto {status}"

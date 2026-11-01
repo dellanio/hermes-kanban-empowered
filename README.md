@@ -247,6 +247,10 @@ A **Suspended** or **Done** board:
   already running finish normally. Without the veto hooks patch (`doctor`: `veto_hooks: missing`) claims
   are not held; the rest still applies.
 
+`hermes kanban-empowered explain <card>` shows "start held: project suspended" for a ready card of such a
+board. While the only ready cards are on suspended/done boards, the gateway may log its "kanban dispatcher
+stuck" warning every few minutes (nothing was spawned although cards are ready); it is expected and harmless.
+
 Back to **Active**, claims flow again and the open waits restart their reminder ladder from that moment
 (first reminder one first stage later, no burst of the stages missed meanwhile).
 

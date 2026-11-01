@@ -235,3 +235,59 @@ def test_short_action_prefers_human_reason_then_title():
     assert short_action(None, "Aprove o deploy", TITLE) == "Aprove o deploy"
     assert short_action(None, "", "") == "(no reason given)"
     assert short_action(None, "initial_status") == "(no reason given)"
+
+
+# -- fix round 1: the footer placeholder / neutral instruction typed back must not resolve -----------
+from test_msg_format import rig3, rig1  # noqa: E402,F401 (fixtures)
+from test_inbound import _comments, _status  # noqa: E402
+from test_waits import pt_br  # noqa: E402,F401 (fixture)
+
+NEUTRAL_PT = "Responda a esta mensagem quando concluir, ou diga o que falta."
+NEUTRAL_EN = "Reply to this message when it's done, or say what's missing."
+
+
+@pytest.mark.parametrize("text", [
+    "<sua resposta>", "<your answer>", "<qualquer coisa>", "<>", " <x> ", "<your answer>.", "<resposta>!",
+    NEUTRAL_PT, NEUTRAL_EN, NEUTRAL_EN.lower(), NEUTRAL_PT.rstrip("."), NEUTRAL_EN + " ✅",
+])
+def test_classify_marks_placeholders_and_the_neutral_instruction_as_placeholder(text):
+    from ke.inbound import classify
+
+    assert classify(text, None)[0] == "placeholder"
+    assert classify(text, _ask("x.", "y", "responda feito"))[0] == "placeholder"
+
+
+@pytest.mark.parametrize("text", [
+    "a < b e c > d", "<b>negrito</b>", "use <b> e <i>", "ok <sua resposta>", "feito", "responda quando concluir",
+])
+def test_classify_leaves_real_text_alone(text):
+    from ke.inbound import classify
+
+    assert classify(text, None)[0] != "placeholder"
+
+
+def test_typed_placeholder_does_not_resolve_pt(rig3, pt_br):  # noqa: F811
+    for n, text in enumerate(["1 — <sua resposta>", "2 — <your answer>", f"3 — {NEUTRAL_PT}"], start=1):
+        assert rig3.reply(text, message_id=str(80 + n))["action"] == "skip"
+        assert unbranded_text(rig3).startswith("Escreva a resposta depois do número do item")
+    assert [_status(t) for t in rig3.tids] == ["blocked"] * 3
+    assert all("sua resposta" not in c and "your answer" not in c for t in rig3.tids for c in [_comments(t)[-1] if _comments(t) else ""])
+
+
+def test_typed_placeholder_does_not_resolve_en(rig3):
+    for n, text in enumerate(["1 — <your answer>", "2 — <sua resposta>", f"3 — {NEUTRAL_EN}"], start=1):
+        assert rig3.reply(text, message_id=str(90 + n))["action"] == "skip"
+        assert unbranded_text(rig3).startswith("Write your answer after the item number")
+    assert [_status(t) for t in rig3.tids] == ["blocked"] * 3
+
+
+def test_single_item_bare_placeholder_does_not_resolve(rig1):
+    assert rig1.reply("<your answer>")["action"] == "skip"
+    assert _status(rig1.tids[0]) == "blocked"
+    assert unbranded_text(rig1).startswith("Write your answer")
+
+
+def unbranded_text(rig):
+    from conftest import unbranded
+
+    return unbranded(rig.tg.last_text)

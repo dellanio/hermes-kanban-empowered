@@ -55,7 +55,7 @@ from typing import Any, Callable, Optional
 
 from . import panel
 from .asks import CONFIRM_WORDS, parse_ask, reply_words
-from .messages import _clip_to, active_language, board_title, branded, render_answer, short_action, t
+from .messages import EN, _clip_to, active_language, board_title, branded, render_answer, short_action, t
 from .waits import block_version, current_block, display_name, held_behind
 
 log = logging.getLogger(__name__)
@@ -76,6 +76,7 @@ NEGATION_RE_EN = re.compile(rf"^(?:{_NEGATION_COMMON}|no)(?!\w)", re.IGNORECASE)
 
 def _negation_re():
     return NEGATION_RE_PT if active_language().lower().startswith("pt") else NEGATION_RE_EN
+_PLACEHOLDER_RE = re.compile(r"^<[^<>]*>[\W_]*$")  # "<your answer>": the footer example typed back
 _TRAILING_RE = re.compile(r"[^\w?]+$")  # trailing punctuation and emoji (a "?" makes it a question)
 _ID_RE = re.compile(r"-?[1-9][0-9]{0,19}")
 _COMMENT_TEXT_MAX = 500
@@ -173,16 +174,35 @@ def split_reply(text: str) -> tuple[Optional[int], str]:
     return int(m.group(1)), m.group(2).strip()
 
 
+_NEUTRAL_PT = "Responda a esta mensagem quando concluir, ou diga o que falta."  # recognised whatever the language
+
+
+def _squash(text: str) -> str:
+    return " ".join(_TRAILING_RE.sub("", " ".join(str(text).split())).split()).casefold()
+
+
+def is_placeholder(text: str) -> bool:
+    """True for a reply that is the footer's example typed back (``<your answer>``, any ``<…>`` body) or the
+    neutral reply instruction itself: it carries no answer."""
+    text = (text or "").strip()
+    if _PLACEHOLDER_RE.match(text):
+        return True
+    return _squash(text) in {_squash(t("waits.reply.neutral")), _squash(EN["waits.reply.neutral"]), _squash(_NEUTRAL_PT)}
+
+
 def classify(text: str, ask: Any) -> tuple[str, Any]:
     """What a reply means for an item with ``ask`` (``None`` for an unstructured block).
 
-    ``("empty", None)``, ``("option", (letter, label))``, ``("unknown_option", letter)``,
+    ``("empty", None)``, ``("placeholder", None)`` (the footer example or the neutral instruction typed back:
+    nothing changes, the owner is asked to reply again), ``("option", (letter, label))``, ``("unknown_option", letter)``,
     ``("need_option", None)`` (a bare confirmation for an item that asks for a choice),
     ``("confirm", None)``, ``("negation", None)`` or ``("answer", None)`` (see the module doc).
     """
     text = (text or "").strip()
     if not text:
         return "empty", None
+    if is_placeholder(text):
+        return "placeholder", None
     m = _LETTER_RE.match(text)
     if m:
         letter = m.group(1).upper()
@@ -357,7 +377,7 @@ def _act(
         _reply(telegram, int(chat), int(message), t("inbound.changed"))
         return
     kind, value = classify(body, ask)
-    if kind == "empty":
+    if kind in ("empty", "placeholder"):
         _reply(telegram, int(chat), int(message), t("reply.empty", word=t("waits.default_word")))
         return
     if kind == "unknown_option":

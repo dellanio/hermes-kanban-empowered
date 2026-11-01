@@ -87,10 +87,17 @@ def test_identifiers_used_in_jsx_calls_are_imported():
 
 
 def test_validate_plugin_dir_passes():
+    """``hermes plugins validate`` passes. On a Hermes carrying the optional veto-hooks patch the plugin
+    registers ``kanban_pre_claim``, which is not in ``provides_hooks`` (a stock build does not know it), so
+    there, and only there, ``declared hooks`` fails for exactly that hook, by design (README, Disclosures)."""
     from hermes_cli.plugin_validate import validate_plugin_dir
+    from ke import hermes_api
 
     report = validate_plugin_dir(REPO)
     failed = [c for c in report.checks if not c[1]]
+    if hermes_api.veto_hooks_available():
+        expected = ("declared hooks", False, "undeclared hooks registered (not in provides_hooks): kanban_pre_claim")
+        failed = [c for c in failed if tuple(c) != expected]
     assert not failed, failed
     assert any(c[0] == "desktop surface" for c in report.checks)
 

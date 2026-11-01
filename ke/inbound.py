@@ -1,13 +1,14 @@
-"""Authenticated two-way Telegram replies: "done" answered to a reminder unblocks the card.
+"""Authenticated two-way Telegram replies: the owner's answer to a reminder, linked to an item.
 
 Replies reach the plugin through Hermes' ``pre_gateway_dispatch`` hook, which runs BEFORE
 the gateway's own authorization, so every sender must be treated as untrusted. The checks
 run in this fixed order and nothing about a card is read before all of them pass:
 
 1. the event is a direct Telegram message (not relayed, not from a bot, not synthetic, not
-   an interactive-prompt answer, allowed to drive gateway control) replying to a message
-   this plugin sent to that same chat (``sent_messages``), and its whole text is an explicit
-   confirmation (``[n] done|feito|liguei|ok|approved|aprovado`` plus optional punctuation);
+   an interactive-prompt answer, allowed to drive gateway control) with some text, replying to
+   a message this plugin sent to that same chat (``sent_messages``) and authored by our bot.
+   The text names its item (``"<n> — <text>"``, ``"<n> – …"``, ``"<n> - …"``, ``"<n>: …"``,
+   ``"<n>) …"``, ``"<n>. …"``, ``"<n> …"``); a message with a single item also takes bare text;
 2. the sender's Telegram user id is the configured owner of the selected item
    (``settings.owner_ids[settings.owner_for(board)]``). Anybody else, a configured identity
    such as the ``escalate_to`` contact included, gets ``None``: no answer, nothing consumed,
@@ -19,7 +20,17 @@ From step 3 on the message is consumed: any later failure still returns skip.
 
 Only then is the card read: it must still be ``blocked`` with the same block version as
 the item in the message (the live newest ``blocked``/``gave_up`` event id, and the tracked wait row
-when there is one), so a "done" answered to an old reminder can never resolve a newer block.
+when there is one), so an answer to an old reminder can never resolve a newer block. The text
+after the item number is then classified against that item's ask (:func:`classify`):
+
+a. one option letter the ask declares -> resolved, commented "choice: A — <label>";
+b. one letter it does not declare -> answered "use a listed option", nothing changes;
+c. a confirmation (one of the ask's reply words or a default one, trailing punctuation/emoji) -> resolved;
+d. an explicit not-done ("não", "ainda não", "negativo", "no", "not yet", "nope"...) -> only a
+   comment, the card stays blocked;
+e. any other text -> it is the owner's answer: resolved, the text posted as a comment (1000 chars)
+   so the agent continues with the feedback;
+f. several items and no number -> "which item?" (nothing changes).
 
 The same rules apply to replies to the live panel (``sent_messages`` kind "panel"), a message the
 coordinator edits in place. Its numbering changes over time, so the reply is resolved against the
@@ -38,25 +49,31 @@ import time
 from typing import Any, Callable, Optional
 
 from . import panel
-from .messages import render_done, t
-from .waits import block_version, held_behind
+from .asks import parse_ask, reply_words
+from .messages import _clip_to, board_title, render_answer, short_action, t
+from .waits import block_version, current_block, display_name, held_behind
 
 log = logging.getLogger(__name__)
 
 SKIP = {"action": "skip", "reason": "kanban-empowered"}
-# The whole message must be the confirmation: an optional item number ("2", "2.", "2)", "2 -"),
-# the word, optional trailing punctuation/emoji. "ok, but not yet" or "done?" is a conversation.
-CHECK_MARK = "\N{WHITE HEAVY CHECK MARK}"
-THUMBS_UP = "\N{THUMBS UP SIGN}"
-VS16 = "\N{VARIATION SELECTOR-16}"
-_TRAILING_MARKS = ".!" + CHECK_MARK + THUMBS_UP + VS16
-REPLY_RE = re.compile(
-    r"^\s*(?:([0-9]{1,4})\s*[.):\-]?\s*)?(feito|done|liguei|ok|aprovado|approved)"
-    r"\s*[" + re.escape(_TRAILING_MARKS) + r"]*\s*$",
-    re.IGNORECASE,
+# "<n> — text", "<n> – text", "<n> - text", "<n>: text", "<n>) text", "<n>. text", "<n> text", "<n>"
+ITEM_RE = re.compile(r"^\s*([0-9]{1,4})(?:\s*[—–\-:).]\s*|\s+|\s*$)(.*)$", re.DOTALL)
+_LETTER_RE = re.compile(r"^([A-Za-z])\s*[.!)]*$")
+# Confirmation words accepted for every item (pt and en), besides the item's own reply words.
+CONFIRM_WORDS = frozenset({
+    "feito", "conectei", "validado", "liguei", "ok", "aprovado", "pronto",
+    "done", "connected", "validated", "approved",
+})
+# An explicit "not done": the card stays blocked. A bare "no" counts only when it stands alone
+# ("no celular..." is Portuguese for "on the phone...").
+NEGATION_RE = re.compile(
+    r"^(?:ainda\s+n[ãa]o|n[ãa]o|negativo|not\s+yet|nope|no(?=\s*(?:$|[,.;:!])))(?!\w)", re.IGNORECASE
 )
+_TRAILING_RE = re.compile(r"[^\w?]+$")  # trailing punctuation and emoji (a "?" makes it a question)
 _ID_RE = re.compile(r"-?[1-9][0-9]{0,19}")
 _COMMENT_TEXT_MAX = 500
+_ANSWER_TEXT_MAX = 1000
+_ACTION_SHOWN = 160
 
 # Serializes "validate then unblock" across gateway threads (two replies for the same card).
 _resolve_lock = threading.Lock()
@@ -136,9 +153,39 @@ def _reply_ts(event: Any, now: float) -> float:
     return min(value, float(now))
 
 
-def _clip(text: str) -> str:
+def _clip(text: str, limit: int = _COMMENT_TEXT_MAX) -> str:
     text = " ".join(str(text or "").split())
-    return text if len(text) <= _COMMENT_TEXT_MAX else text[: _COMMENT_TEXT_MAX - 1] + "…"
+    return text if len(text) <= limit else text[: limit - 1] + "…"
+
+
+def split_reply(text: str) -> tuple[Optional[int], str]:
+    """``(item number or None, the rest)`` of a reply text (pure)."""
+    m = ITEM_RE.match(text or "")
+    if m is None:
+        return None, (text or "").strip()
+    return int(m.group(1)), m.group(2).strip()
+
+
+def classify(text: str, ask: Any) -> tuple[str, Any]:
+    """What a reply means for an item with ``ask`` (``None`` for an unstructured block).
+
+    ``("empty", None)``, ``("option", (letter, label))``, ``("unknown_option", letter)``,
+    ``("confirm", None)``, ``("negation", None)`` or ``("answer", None)`` (see the module doc).
+    """
+    text = (text or "").strip()
+    if not text:
+        return "empty", None
+    m = _LETTER_RE.match(text)
+    if m:
+        letter = m.group(1).upper()
+        label = ask.option(letter) if ask is not None else None
+        return ("option", (letter, label)) if label is not None else ("unknown_option", letter)
+    word = _TRAILING_RE.sub("", text).strip().lower()
+    if word and (word in CONFIRM_WORDS or word in reply_words(ask)):
+        return "confirm", None
+    if NEGATION_RE.match(text):
+        return "negation", None
+    return "answer", None
 
 
 def _reply(telegram: Any, chat_id: int, message_id: int, text: str) -> None:
@@ -207,9 +254,10 @@ def handle_inbound(event: Any, settings: Any, store: Any, api: Any, telegram: An
     message = _canonical_id(getattr(event, "message_id", None))
     if chat is None or sender is None or reply_to is None or message is None:
         return None
-    match = REPLY_RE.match(getattr(event, "text", None) or "")
-    if match is None:
-        return None  # not an explicit confirmation: a normal message for the agent
+    text = getattr(event, "text", None)
+    if not isinstance(text, str) or not text.strip():
+        return None  # nothing to read (a sticker, a photo without caption): a normal message
+    number, _rest = split_reply(text)
     sent = store.get_sent_message(int(chat), int(reply_to))
     if sent is None or sent.get("kind") not in ("waits", "panel"):
         return None
@@ -218,7 +266,6 @@ def handle_inbound(event: Any, settings: Any, store: Any, api: Any, telegram: An
     items = sent.get("items")
     if not isinstance(items, list) or (not items and sent["kind"] != "panel"):
         return None
-    number = int(match.group(1)) if match.group(1) else None
     is_panel = sent["kind"] == "panel"
     ambiguous = False
     scope_items = None
@@ -273,21 +320,95 @@ def _act(
         _reply(telegram, int(chat), int(message), t("inbound.panel_changed"))
         return
     if selected is None:
-        _reply(telegram, int(chat), int(message), t("inbound.which_item", n=len(items)))
+        _reply(telegram, int(chat), int(message), t("inbound.which_item", n=len(items), word=t("waits.default_word")))
         return
     board, task_id, version = str(selected["board"]), str(selected["task_id"]), int(selected["version"])
-    name = getattr(source, "user_name", None) or getattr(event, "user_name", None) or sender
-    comment = t("inbound.comment.telegram", name=_clip(name), user_id=sender, text=_clip(event.text))
+    number, rest = split_reply(event.text)
+    try:
+        live, ask, reason = _item_ask(api, board, task_id, version)
+    except Exception:
+        log.exception("kanban-empowered: reading %s/%s for a Telegram reply failed", board, task_id)
+        _reply(telegram, int(chat), int(message), t("inbound.error"))
+        return
+    if not live:
+        _reply(telegram, int(chat), int(message), t("inbound.changed"))
+        return
+    kind, value = classify(rest if number is not None else event.text, ask)
+    if kind == "empty":
+        _reply(telegram, int(chat), int(message), t("reply.empty", word=t("waits.default_word")))
+        return
+    if kind == "unknown_option":
+        if ask is not None and ask.options:
+            text = t("reply.option_unknown", letter=value, options=", ".join(k for k, _ in ask.options))
+        else:
+            text = t("reply.option_none")
+        _reply(telegram, int(chat), int(message), text)
+        return
+    name = _clip(getattr(source, "user_name", None) or getattr(event, "user_name", None) or sender)
+    if kind == "negation":
+        note = t("inbound.comment.note", name=name, user_id=sender, text=_clip(event.text, _ANSWER_TEXT_MAX))
+        try:
+            noted = note_wait(api, store, board, task_id, version, note, now, f"telegram:{sender}")
+        except Exception:
+            log.exception("kanban-empowered: noting a reply on %s/%s failed", board, task_id)
+            _reply(telegram, int(chat), int(message), t("inbound.error"))
+            return
+        _reply(telegram, int(chat), int(message), t("reply.noted") if noted else t("inbound.changed"))
+        return
+    if kind == "option":
+        said = t("inbound.comment.choice", letter=value[0], label=_clip(value[1]))
+    elif kind == "answer":
+        said = _clip(event.text, _ANSWER_TEXT_MAX)
+    else:
+        said = _clip(event.text)
+    comment = t("inbound.comment.telegram", name=name, user_id=sender, text=said)
     try:
         done, held = resolve_wait(api, store, board, task_id, version, comment, now, f"telegram:{sender}")
     except Exception:
         log.exception("kanban-empowered: resolving %s/%s from Telegram failed", board, task_id)
-        _reply(telegram, int(chat), int(message), t("inbound.error", id=task_id))
+        _reply(telegram, int(chat), int(message), t("inbound.error"))
         return
     if not done:
         _reply(telegram, int(chat), int(message), t("inbound.changed"))
         return
-    _reply(telegram, int(chat), int(message), render_done(board, task_id, held))
+    title = board_title(board, display_name(api, board), ask.subject if ask is not None else "")
+    action = _clip_to(short_action(ask, reason), _ACTION_SHOWN)
+    _reply(telegram, int(chat), int(message),
+           render_answer(title, action, len(held), choice=value if kind == "option" else None))
+
+
+def _item_ask(api: Any, board: str, task_id: str, version: int) -> tuple[bool, Any, str]:
+    """``(still blocked on version, its ask or None, the raw block reason)`` of a selected item."""
+    with api.connect(board) as conn:
+        task = api.task(conn, task_id)
+        if task is None or task.status != "blocked":
+            return False, None, ""
+        block = current_block(task, api.events(conn, task_id))
+        if block is None or block.version != int(version):
+            return False, None, ""
+        return True, parse_ask(block.reason), block.reason
+
+
+def note_wait(
+    api: Any, store: Any, board: str, task_id: str, version: int, comment: str, now: float, detail: str
+) -> bool:
+    """Comment on ``task_id`` if it is still blocked on block ``version``; the card stays blocked."""
+    with _resolve_lock:
+        with api.connect(board) as conn:
+            task = api.task(conn, task_id)
+            if task is None or task.status != "blocked":
+                return False
+            if block_version(api.events(conn, task_id)) != int(version):
+                return False
+            wait = store.latest_wait(board, task_id)
+            if wait is not None and int(wait["version"]) != int(version):
+                return False
+            api.comment(conn, task_id, comment)
+    try:
+        store.log_action(board, task_id, "human_note", detail, int(now))
+    except Exception:
+        log.exception("kanban-empowered: could not log human_note for %s/%s", board, task_id)
+    return True
 
 
 def make_dispatch_hook(

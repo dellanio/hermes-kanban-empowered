@@ -295,10 +295,14 @@ def test_reply_to_unknown_message_passes_through(env):
     assert _status(env.tids[0]) == "blocked"
 
 
-def test_owner_free_text_reply_passes_through_unconsumed(env):
+def test_owner_free_text_reply_is_the_answer(env):
+    # message format v2 (spec section 5e, supersedes Ruling 10): the owner's free text answering a
+    # single-item reminder is the answer: the card is unblocked and the text becomes a comment
     ev = reply_event(user_id=OWNER, reply_to=env.sent_id, text="what is this about?", message_id="6")
-    assert env.handle(ev) is None
-    assert env.store.mark_update(f"tg:{OWNER}:6", int(env.clock.now)) is True
+    assert env.handle(ev)["action"] == "skip"
+    assert _status(env.tids[0]) != "blocked"
+    assert "what is this about?" in _comments(env.tids[0])[-1]
+    assert env.store.mark_update(f"tg:{OWNER}:6", int(env.clock.now)) is False  # consumed
 
 
 # -- request validity ----------------------------------------------------------
@@ -343,16 +347,24 @@ def test_explicit_confirmations_unblock(env, text):
 
 @pytest.mark.parametrize(
     "text",
-    ["doneish", "okay", "não feito", "feitos", "1 2 done", "ok, mas ainda nao", "feito?",
+    ["doneish", "okay", "feitos", "1 2 done", "ok, mas ainda nao", "feito?",
      "liguei mas ninguem atendeu", "done yet?", "OK vou ver amanha", "aprovado so a parte A", "done-ish",
      "1 feito, pode seguir", "feito, liguei a placa"],
 )
-def test_anything_but_an_explicit_confirmation_goes_to_the_agent(env, text):
+def test_any_other_owner_text_is_the_answer(env, text):
+    # message format v2 (spec section 5e): free text from the owner resolves the item and is commented
     ev = reply_event(user_id=OWNER, reply_to=env.sent_id, text=text, message_id="61")
-    assert env.handle(ev) is None
+    assert env.handle(ev)["action"] == "skip"
+    assert _status(env.tids[0]) != "blocked"
+    assert " ".join(text.split()) in _comments(env.tids[0])[-1]
+
+
+@pytest.mark.parametrize("text", ["não feito", "ainda não", "1 — nao", "negativo", "not yet", "nope", "no."])
+def test_an_explicit_not_done_keeps_the_card_waiting(env, text):
+    ev = reply_event(user_id=OWNER, reply_to=env.sent_id, text=text, message_id="62")
+    assert env.handle(ev)["action"] == "skip"
     assert _status(env.tids[0]) == "blocked"
-    assert env.telegram.count("send") == 0
-    assert env.store.mark_update(f"tg:{OWNER}:61", int(env.clock.now)) is True  # not consumed
+    assert "still waiting" in _comments(env.tids[0])[-1]
 
 
 @pytest.mark.parametrize("text", ["2 done!", "2. feito", "2) feito"])
@@ -377,7 +389,7 @@ def test_failure_after_consuming_still_skips(env, monkeypatch):
     def boom(*a, **kw):
         raise RuntimeError("render broke")
 
-    monkeypatch.setattr(inbound, "render_done", boom)
+    monkeypatch.setattr(inbound, "render_answer", boom)
     r = env.handle(reply_event(user_id=OWNER, reply_to=env.sent_id, text="done"))
     assert r == {"action": "skip", "reason": "kanban-empowered"}
     assert _status(env.tids[0]) != "blocked"
@@ -407,7 +419,9 @@ def test_owner_done_unblocks_comments_logs_and_confirms(env):
     assert [(a["board"], a["task_id"]) for a in actions] == [("default", tid)]
     send = env.telegram.calls["send"][-1]
     assert send["chat_id"] == int(OWNER) and send.get("reply_to") == 31
-    assert tid in send["text"] and env.held in send["text"]
+    # the board and the action, no ids (message format v2)
+    assert send["text"].startswith("✅ DEFAULT: a") and "1 card" in send["text"]
+    assert tid not in send["text"] and env.held not in send["text"]
 
 
 def test_internal_error_after_consuming_answers_and_skips(env, monkeypatch):

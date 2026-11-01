@@ -171,13 +171,15 @@ class TelegramNet:
 
     Wraps ``plugins.platforms.telegram.telegram_network`` (the module Hermes' own Telegram adapter uses to
     survive a broken path to ``api.telegram.org``): fallback-IP parsing and discovery, the seed IPv4 list,
-    proxy resolution, TCP keepalive options and the "retryable connect error" test. Attributes of the Hermes
-    module are looked up at call time, so a Hermes upgrade that renames one degrades only that call.
+    proxy resolution, TCP keepalive options and the "retryable connect error" test. Each method looks its
+    Hermes function up at call time; ``keepalive``, ``discover`` and ``proxy_url`` are fail-soft here, and the
+    consumer (``ke.telegram.TelegramTransport``) also guards every call, so a helper renamed or moved by a
+    Hermes upgrade can disable at most that one feature, never the send.
     """
 
     def __init__(self, module) -> None:
         self._tn = module
-        self.seed_ips: list[str] = list(module.SEED_FALLBACK_IPS)
+        self.seed_ips: list[str] = list(getattr(module, "SEED_FALLBACK_IPS", None) or ("149.154.166.110", "149.154.167.220"))
 
     def parse_ips(self, value: str | None) -> list[str]:
         """Valid public IPv4 literals out of a comma-separated list (Hermes' ``TELEGRAM_FALLBACK_IPS`` rules)."""
@@ -214,7 +216,12 @@ class TelegramNet:
 
     def keepalive(self) -> list:
         """``socket_options`` for httpx: SO_KEEPALIVE plus the idle/interval/count knobs the OS exposes."""
-        return list(self._tn.tcp_keepalive_socket_options())
+        try:
+            return list(self._tn.tcp_keepalive_socket_options())
+        except Exception:
+            import socket
+
+            return [(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)]
 
     def retryable(self, exc: Exception) -> bool:
         """Hermes' test for a connect-phase failure worth retrying on another path."""

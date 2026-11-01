@@ -63,7 +63,8 @@ def _ok(request=None):
     return httpx.Response(200, json=OK_BODY)
 
 
-def _make(net=None, behaviour=None, clock=None, budget_s=20.0, on_path=None, env=None, timeout_s=10.0):
+def _make(net=None, behaviour=None, clock=None, budget_s=20.0, on_path=None, env=None, timeout_s=10.0,
+          resolver=None):
     from ke.telegram import TelegramTransport
 
     http = FakeHttp(behaviour or _ok)
@@ -76,6 +77,7 @@ def _make(net=None, behaviour=None, clock=None, budget_s=20.0, on_path=None, env
     tr = TelegramTransport(
         net or FakeNet(), timeout_s=timeout_s, budget_s=budget_s, clock=clock or (lambda: 0.0),
         env=env if env is not None else {}, transport_factory=factory, on_path=on_path,
+        resolver=resolver or (lambda host, timeout: True),
     )
     return tr, http, created
 
@@ -448,17 +450,22 @@ def test_hermes_api_discover_is_sync_bounded_and_fail_soft(monkeypatch):
     assert time.monotonic() - t0 < 2
 
 
-def test_hermes_api_discover_works_inside_a_running_loop():
+def test_hermes_api_discover_works_inside_a_running_loop(monkeypatch):
     import asyncio
 
     from ke import hermes_api
+    from plugins.platforms.telegram import telegram_network as tn
 
+    async def fake_discover():
+        return ["1.1.1.1"]
+
+    monkeypatch.setattr(tn, "discover_fallback_ips", fake_discover)
     net = hermes_api.telegram_net()
 
     async def main():
-        return net.discover(0.01)  # must not raise "asyncio.run() cannot be called from a running event loop"
+        return net.discover(2.0)  # asyncio.run() inside a running loop would raise; the helper thread must not
 
-    assert asyncio.run(main()) in (None, [], ["149.154.166.110"]) or isinstance(asyncio.run(main()), list)
+    assert asyncio.run(main()) == ["1.1.1.1"]
 
 
 # -- doctor / catalog -----------------------------------------------------------------------
@@ -543,3 +550,237 @@ def test_real_httpx_transport_posts_json_to_a_local_server_and_reports_closed_po
     with pytest.raises(TelegramError) as ei:  # the port is closed now: a plain connect error, status None
         c.send(5, "oi")
     assert ei.value.status is None
+
+
+# -- fix round 1 -------------------------------------------------------------------------------
+class BrokenNet(FakeNet):
+    """A Hermes upgrade renamed/moved every helper: each call raises."""
+
+    @property
+    def seed_ips(self):
+        raise AttributeError("SEED_FALLBACK_IPS")
+
+    @seed_ips.setter
+    def seed_ips(self, value):
+        pass
+
+    @property
+    def verify(self):
+        raise RuntimeError("no ssl helper")
+
+    @verify.setter
+    def verify(self, value):
+        pass
+
+    def parse_ips(self, value):
+        raise RuntimeError("renamed")
+
+    def discover(self, timeout_s):
+        raise RuntimeError("renamed")
+
+    def proxy_url(self, hosts):
+        raise RuntimeError("renamed")
+
+    def keepalive(self):
+        raise RuntimeError("renamed")
+
+    def retryable(self, exc):
+        raise RuntimeError("renamed")
+
+
+def test_broken_hermes_helpers_never_break_a_send_or_the_fallback_walk():
+    tr, http, _ = _make(net=BrokenNet(), behaviour=lambda r: httpx.ConnectError("x") if r.url.host == HOST else _ok())
+    status, _ = _post(tr)  # retryable() raises: httpx.ConnectError is still retryable locally
+    assert status == 200
+    assert [r.url.host for r in http.requests] == [IP1]  # the hard-coded seed list took over
+    # the default pool factory survives a broken keepalive helper and builds a real transport
+    from ke.telegram import TelegramTransport
+
+    real = TelegramTransport(BrokenNet(), env={})._default_factory(None, True)
+    assert isinstance(real, httpx.HTTPTransport)
+
+
+def test_hermes_api_keepalive_is_fail_soft(monkeypatch):
+    import socket
+
+    from ke import hermes_api
+    from plugins.platforms.telegram import telegram_network as tn
+
+    net = hermes_api.telegram_net()
+
+    def boom():
+        raise RuntimeError("gone")
+
+    monkeypatch.setattr(tn, "tcp_keepalive_socket_options", boom)
+    assert net.keepalive() == [(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)]
+
+
+def test_read_path_file_survives_garbage(tmp_path):
+    from ke.telegram import classify_path, read_path_file
+
+    p = tmp_path / "telegram_path"
+    p.write_bytes(bytes([255, 254, 0]) + b"garbage" + bytes([128]) + b"A" * 10_000)
+    value = read_path_file(p)
+    assert isinstance(value, str) and len(value) <= 256
+    assert classify_path(value) == "unknown"
+    assert read_path_file(tmp_path) is None  # a directory: OSError
+    assert read_path_file(tmp_path / "missing") is None
+
+
+def test_doctor_shows_unknown_for_a_corrupt_path_file(kanban_home, capsys, tmp_path):
+    from conftest import settings_for_test
+    from ke import cli
+    from test_doctor import _out
+
+    s = settings_for_test(tmp_path)
+    s.shared_state_dir.mkdir(parents=True, exist_ok=True)
+    (s.shared_state_dir / "telegram_path").write_bytes(bytes([255, 254, 0, 128]))
+    cli.run_doctor(s)
+    assert _out(capsys)["telegram_path"] == "unknown"
+
+
+def test_budget_holds_with_slow_tcp_tls_and_slow_dns():
+    """Everything stalls to its limit (time mocked): IP1, IP2, a DNS stall for the hostname, then discovery."""
+    now = [0.0]
+    seen = []
+
+    def behaviour(request):
+        t = request.extensions["timeout"]
+        seen.append(t)
+        now[0] += 2 * t["connect"]  # TCP then TLS, each burning its connect timeout
+        return httpx.ConnectTimeout("slow tcp+tls")
+
+    def slow_dns(host, timeout):
+        seen.append(("dns", timeout))
+        now[0] += timeout  # the lookup uses all it is given
+        return False
+
+    class SlowNet(FakeNet):
+        def discover(self, timeout_s):
+            seen.append(("doh", timeout_s))
+            now[0] += timeout_s
+            return None
+
+    from ke.telegram import TransportFailure
+
+    tr, http, _ = _make(net=SlowNet(), clock=lambda: now[0], behaviour=behaviour, resolver=slow_dns, budget_s=20.0)
+    with pytest.raises(TransportFailure):
+        _post(tr)
+    assert now[0] <= 20.0, now[0]
+    assert [r.url.host for r in http.requests] == [IP1, IP2]  # the hostname never got a connect: DNS stalled
+    assert ("dns", 4.0) in seen and any(x[0] == "doh" for x in seen if isinstance(x, tuple))
+    # TCP + TLS fit inside the per-attempt allowance
+    assert all(2 * t["connect"] <= t["read"] for t in seen if isinstance(t, dict))
+
+
+def test_budget_shrinks_every_phase_when_little_is_left():
+    now = [0.0]
+    seen = []
+
+    def behaviour(request):
+        t = request.extensions["timeout"]
+        seen.append(t)
+        now[0] += 15.0
+        return httpx.ConnectTimeout("t")
+
+    tr, _, _ = _make(clock=lambda: now[0], behaviour=behaviour, budget_s=20.0)
+    with pytest.raises(Exception):
+        _post(tr)
+    assert seen[1]["read"] == pytest.approx(5.0) and 2 * seen[1]["connect"] <= 5.0
+
+
+def test_a_hanging_attempt_is_cut_at_the_budget_with_real_time():
+    import threading
+    import time
+
+    from ke.telegram import TransportFailure
+
+    gate = threading.Event()
+
+    def behaviour(request):
+        gate.wait(5)  # a write/read that stalls past every httpx phase timeout
+        return _ok()
+
+    tr, http, _ = _make(clock=time.monotonic, behaviour=behaviour, budget_s=1.5, timeout_s=1.2)
+    t0 = time.monotonic()
+    try:
+        with pytest.raises(TransportFailure):
+            _post(tr)
+        assert time.monotonic() - t0 < 3.0
+        assert len(http.requests) == 1  # outcome unknown after the request went out: no walk to another path
+    finally:
+        gate.set()
+
+
+def test_unresolvable_hostname_is_a_retryable_path_failure():
+    seen = []
+
+    def resolver(host, timeout):
+        seen.append(host)
+        return host != HOST
+
+    tr, http, _ = _make(resolver=resolver, behaviour=lambda r: _ok())
+    tr._sticky = None  # the hostname is the sticky path, and its DNS stops answering
+    status, _ = _post(tr)
+    assert status == 200 and tr.sticky == IP1
+    assert seen == [HOST] and [r.url.host for r in http.requests] == [IP1]
+
+
+def test_pool_of_a_failed_path_is_closed_only_when_idle():
+    closed = []
+
+    class Closable(FakeHttp):
+        def close(self):
+            closed.append(1)
+
+    from ke.telegram import TelegramTransport
+
+    tr = TelegramTransport(FakeNet(), env={}, transport_factory=lambda p, v: Closable(_ok),
+                           resolver=lambda h, t: True)
+    busy = tr._acquire(IP1, None)  # another thread's request is in flight
+    tr._retire(IP1, busy)
+    assert closed == [] and IP1 not in tr._pools  # retired from the map, but not closed under the user
+    tr._release(busy)
+    assert closed == [1]
+    idle = tr._acquire(IP2, None)
+    tr._release(idle)
+    tr._retire(IP2, idle)
+    assert closed == [1, 1]
+
+
+def test_path_file_write_is_atomic(tmp_path, monkeypatch):
+    import os
+
+    pf = tmp_path / "telegram_path"
+    tr, _, _ = _make(behaviour=lambda r: httpx.ConnectError("x") if r.url.host == HOST else _ok())
+    c = _client(tr, path_file=pf)
+    c.send(5, "oi")
+    assert pf.read_text(encoding="utf-8") == IP1
+    assert [p.name for p in tmp_path.iterdir()] == ["telegram_path"]  # no temp left behind
+
+    def denied(*a, **k):
+        raise OSError("denied")
+
+    monkeypatch.setattr(os, "replace", denied)  # a failing replace keeps the previous value and leaves no temp
+    c._remember_path("9.9.9.9")
+    assert pf.read_text(encoding="utf-8") == IP1
+    assert [p.name for p in tmp_path.iterdir()] == ["telegram_path"]
+
+
+def test_state_is_consistent_under_concurrent_sends():
+    import threading
+
+    tr, http, _ = _make(behaviour=lambda r: httpx.ConnectError("x") if r.url.host == HOST else _ok())
+    errors = []
+
+    def worker():
+        try:
+            for _ in range(20):
+                assert _post(tr)[0] == 200
+        except Exception as exc:  # pragma: no cover
+            errors.append(exc)
+
+    threads = [threading.Thread(target=worker) for _ in range(6)]
+    [t.start() for t in threads]
+    [t.join(30) for t in threads]
+    assert not errors and tr.sticky == IP1

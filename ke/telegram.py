@@ -18,6 +18,7 @@ import ipaddress
 import json
 import logging
 import os
+import socket
 import ssl
 import threading
 import time
@@ -57,24 +58,86 @@ def _load_net():
     return hermes_api.telegram_net()
 
 
+_SEED_IPS = ("149.154.166.110", "149.154.167.220")  # last resort when Hermes' helper bundle has no seed list
+_LOCAL_KEEPALIVE = [(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)]
+
+
+def _resolve_bounded(host: str, timeout_s: float) -> bool:
+    """Whether ``host`` resolves within ``timeout_s`` (``getaddrinfo`` has no timeout of its own).
+
+    The lookup runs in a daemon thread that is abandoned on timeout; an IP literal needs no lookup. The OS
+    resolver caches the answer, so the connect that follows does not wait on DNS again.
+    """
+    try:
+        ipaddress.ip_address(host)
+        return True
+    except ValueError:
+        pass
+    box: list = []
+
+    def run() -> None:
+        try:
+            socket.getaddrinfo(host, 443, type=socket.SOCK_STREAM)
+            box.append(True)
+        except OSError:
+            box.append(False)
+
+    worker = threading.Thread(target=run, name="ke-telegram-dns", daemon=True)
+    worker.start()
+    worker.join(max(0.0, timeout_s))
+    return bool(box and box[0])
+
+
+class _Pool:
+    """One path's httpx transport plus a user count, so a failed pool is closed only when idle."""
+
+    __slots__ = ("transport", "users", "retired")
+
+    def __init__(self, transport: Any) -> None:
+        self.transport = transport
+        self.users = 0
+        self.retired = False
+
+    def close(self) -> None:
+        close = getattr(self.transport, "close", None)
+        if close:
+            try:
+                close()
+            except Exception:
+                pass
+
+
 class TelegramTransport:
     """Synchronous POST with Hermes' fallback strategy: sticky path, IPv4 literals, hostname last.
 
     Order per call: the last path that worked first, then the fallback IPv4 literals (``TELEGRAM_FALLBACK_IPS``
     or Hermes' seed list), the dual-stack hostname last (a blackholed IPv6 route never errors, it only hangs).
     A literal is reached with ``Host`` and the TLS server name still ``api.telegram.org``. Only connect-phase
-    failures (connect error/timeout, TLS handshake timeout, connection reset) move on to the next path: an
-    error after the request went out is NOT retried, it could duplicate a message. Fallback IPs are
-    rediscovered (Hermes' DNS-over-HTTPS) only after a whole walk failed, at most hourly (every 5 min while
-    discovery itself keeps failing). A proxy (``TELEGRAM_PROXY``, via Hermes) owns the route: single path.
-    One call never takes longer than ``budget_s`` across all paths; each attempt gets ``timeout_s`` clamped to
-    what is left of it.
+    failures (connect error/timeout, TLS handshake timeout, connection reset, DNS that does not answer in time)
+    move on to the next path: an error after the request went out is NOT retried, it could duplicate a message.
+    Fallback IPs are rediscovered (Hermes' DNS-over-HTTPS) only after a whole walk failed, at most hourly
+    (every 5 min while discovery itself keeps failing).
+
+    Proxy: when Hermes resolves a proxy (``TELEGRAM_PROXY`` / system proxy) the plugin uses ONE proxied path to
+    the hostname and never walks IPv4 literals (Hermes' own transport does walk them through the proxy; the
+    single path is the deliberately simpler, safer behaviour here).
+
+    Time: one call never takes longer than ``budget_s`` (20 s) across all paths and discovery. Each attempt gets
+    ``timeout_s`` clamped to what is left. The hostname is resolved first with a bounded lookup (``DNS_CAP_S``);
+    httpx's connect timeout is applied to TCP and to TLS separately, so it is set to half of the attempt's connect
+    allowance (``CONNECT_CAP_S``) to keep TCP + TLS inside it; and a watchdog bounds the whole attempt (a slow
+    write/read cannot stack on top). Past the watchdog the outcome of the request is unknown, so that is a
+    :class:`TransportFailure` without a retry on another path.
+
+    Every Hermes helper is called defensively: a helper that raises (renamed or moved in a Hermes upgrade)
+    degrades only that feature, never the send itself.
     """
 
     DISCOVERY_REFRESH_S = 3600.0
     DISCOVERY_RETRY_S = 300.0
     DISCOVERY_TIMEOUT_S = 4.0
     CONNECT_CAP_S = 6.0
+    DNS_CAP_S = 4.0
     MIN_ATTEMPT_S = 1.0
 
     def __init__(
@@ -87,6 +150,7 @@ class TelegramTransport:
         env: Any = None,
         transport_factory: Optional[Callable[[Optional[str], Any], Any]] = None,
         on_path: Optional[Callable[[str], None]] = None,
+        resolver: Callable[[str, float], bool] = _resolve_bounded,
     ) -> None:
         import httpx  # a Hermes dependency; an ImportError here selects the urllib fallback
 
@@ -98,13 +162,21 @@ class TelegramTransport:
         self._env = os.environ if env is None else env
         self._factory = transport_factory or self._default_factory
         self.on_path = on_path
-        configured = net.parse_ips(self._env.get(_FALLBACK_IPS_ENV))
+        self._resolver = resolver
+        try:
+            configured = list(net.parse_ips(self._env.get(_FALLBACK_IPS_ENV)))
+        except Exception:
+            configured = []
+        try:
+            seed = list(net.seed_ips)
+        except Exception:
+            seed = list(_SEED_IPS)
         self._discovery_allowed = not configured
-        self._ips: list[str] = list(dict.fromkeys(configured or net.seed_ips))
+        self._ips: list[str] = list(dict.fromkeys(configured or seed))
         self._disabled = str(self._env.get(_DISABLE_FALLBACK_ENV, "")).strip().lower() in {"1", "true", "yes", "on"}
         self._next_discovery = 0.0
         self._proxy: Any = _UNSET
-        self._transports: dict[Optional[str], Any] = {}
+        self._pools: dict[Optional[str], _Pool] = {}
         self._lock = threading.Lock()
         self._sticky: Any = _UNSET  # _UNSET = none yet, None = the hostname, str = an IPv4 literal
 
@@ -112,78 +184,109 @@ class TelegramTransport:
     @property
     def sticky(self) -> Optional[str]:
         """The last path that worked: an IPv4 literal or the hostname; ``None`` before the first success."""
-        sticky = self._sticky
+        with self._lock:
+            sticky = self._sticky
         if sticky is _UNSET:
             return None
         return API_HOST if sticky is None else str(sticky)
 
+    def _keepalive(self) -> list:
+        try:
+            return list(self._net.keepalive())
+        except Exception:
+            return list(_LOCAL_KEEPALIVE)
+
+    def _verify(self) -> Any:
+        try:
+            return self._net.verify
+        except Exception:
+            return True
+
     def _default_factory(self, proxy: Optional[str], verify: Any):
         kwargs: dict[str, Any] = {
             "verify": verify,
-            "socket_options": self._net.keepalive(),
+            "socket_options": self._keepalive(),
             "limits": self._httpx.Limits(max_connections=4, max_keepalive_connections=2),
         }
         if proxy:
             kwargs["proxy"] = proxy
         return self._httpx.HTTPTransport(**kwargs)
 
-    def _transport(self, path: Optional[str], proxy: Optional[str]):
+    def _acquire(self, path: Optional[str], proxy: Optional[str]) -> _Pool:
         with self._lock:
-            transport = self._transports.get(path)
-            if transport is None:
-                transport = self._factory(proxy, self._net.verify)
-                self._transports[path] = transport
-            return transport
+            pool = self._pools.get(path)
+            if pool is None:
+                pool = self._pools[path] = _Pool(self._factory(proxy, self._verify()))
+            pool.users += 1
+            return pool
 
-    def _discard(self, path: Optional[str]) -> None:
-        """Drop the pool of a failed path: a peer-closed connect leaves half-closed sockets in it."""
+    def _release(self, pool: _Pool) -> None:
         with self._lock:
-            transport = self._transports.pop(path, None)
-        close = getattr(transport, "close", None)
-        if close:
-            try:
-                close()
-            except Exception:
-                pass
+            pool.users -= 1
+            idle_retired = pool.retired and pool.users == 0
+        if idle_retired:
+            pool.close()
+
+    def _retire(self, path: Optional[str], pool: _Pool) -> None:
+        """Drop a failed path's pool (a peer-closed connect leaves half-closed sockets in it); it is closed
+        now when idle, otherwise by its last user, never under another thread's request."""
+        with self._lock:
+            if self._pools.get(path) is pool:
+                del self._pools[path]
+            pool.retired = True
+            idle = pool.users == 0
+        if idle:
+            pool.close()
 
     # -- paths ---------------------------------------------------------------
     def _route(self, host: str) -> tuple[Optional[str], bool]:
         """``(proxy, walkable)``: the proxy to use and whether this call may walk IPv4 fallbacks."""
         if host != API_HOST:
             return None, False
-        if self._proxy is _UNSET:
+        with self._lock:
+            proxy, ips = self._proxy, list(self._ips)
+        if proxy is _UNSET:
             try:
-                self._proxy = self._net.proxy_url([API_HOST, *self._ips]) or None
+                proxy = self._net.proxy_url([API_HOST, *ips]) or None
             except Exception:
-                self._proxy = None
-        return self._proxy, not (self._proxy or self._disabled)
+                proxy = None
+            with self._lock:
+                self._proxy = proxy
+        return proxy, not (proxy or self._disabled)
 
-    def _order(self, walkable: bool) -> list[Optional[str]]:
+    def _order(self, walkable: bool) -> list:
         if not walkable:
             return [None]
-        order: list[Optional[str]] = []
-        if self._sticky is not _UNSET:
-            order.append(self._sticky)
-        order.extend(ip for ip in self._ips if ip not in order)
+        with self._lock:
+            sticky, ips = self._sticky, list(self._ips)
+        order: list = []
+        if sticky is not _UNSET:
+            order.append(sticky)
+        order.extend(ip for ip in ips if ip not in order)
         if None not in order:
             order.append(None)
         return order
 
     def _retryable(self, exc: Exception) -> bool:
+        httpx = self._httpx
+        if isinstance(exc, (httpx.ConnectTimeout, httpx.ConnectError)):
+            return True  # always: a broken Hermes helper must not switch the fallback off
         try:
             if self._net.retryable(exc):
                 return True
         except Exception:
             pass
         # A TLS handshake timeout or reset that escaped httpx's own exception mapping.
-        return isinstance(exc, (ssl.SSLError, ConnectionError)) and not isinstance(exc, self._httpx.HTTPError)
+        return isinstance(exc, (ssl.SSLError, ConnectionError)) and not isinstance(exc, httpx.HTTPError)
 
-    def _request(self, path: Optional[str], url: str, body: bytes, timeout_s: float):
+    def _request(self, path: Optional[str], url: str, body: bytes, attempt_s: float):
         httpx = self._httpx
         parsed = httpx.URL(url)
+        # httpx applies the connect timeout to the TCP connect and to the TLS handshake separately.
+        connect = min(attempt_s, self.CONNECT_CAP_S) / 2
         headers = {"Content-Type": "application/json"}
         extensions: dict[str, Any] = {
-            "timeout": {"connect": min(timeout_s, self.CONNECT_CAP_S), "read": timeout_s, "write": timeout_s, "pool": timeout_s}
+            "timeout": {"connect": connect, "read": attempt_s, "write": attempt_s, "pool": attempt_s}
         }
         if path is not None:  # IPv4 literal: Host and SNI keep the hostname (like ``curl --resolve``)
             headers["Host"] = parsed.host
@@ -191,11 +294,8 @@ class TelegramTransport:
             parsed = parsed.copy_with(host=path)
         return httpx.Request("POST", parsed, headers=headers, content=body, extensions=extensions)
 
-    def _try(self, path: Optional[str], url: str, body: bytes, proxy: Optional[str], deadline: float):
-        """One attempt: ``(status, body)``; raises the underlying exception."""
-        remaining = deadline - self._clock()
-        request = self._request(path, url, body, min(self.timeout_s, remaining))
-        response = self._transport(path, proxy).handle_request(request)
+    def _send(self, pool: _Pool, request: Any) -> tuple[int, bytes]:
+        response = pool.transport.handle_request(request)
         try:
             data = response.read()
         finally:
@@ -205,33 +305,61 @@ class TelegramTransport:
                 pass
         return int(response.status_code), data
 
+    def _try(self, path: Optional[str], url: str, body: bytes, proxy: Optional[str], attempt_s: float):
+        """One attempt, hard-bounded to ``attempt_s``: ``(status, body)``; raises the underlying exception.
+
+        Runs in a helper thread joined with the allowance; an overrun abandons the thread (its own httpx
+        timeouts end it; its pool is released and closed then) and raises :class:`TransportFailure`.
+        """
+        pool = self._acquire(path, proxy)
+        box: list = []
+
+        def run() -> None:
+            try:
+                box.append((True, self._send(pool, self._request(path, url, body, attempt_s))))
+            except BaseException as exc:  # handed to the caller's thread below
+                box.append((False, exc))
+            finally:
+                self._release(pool)
+
+        worker = threading.Thread(target=run, name="ke-telegram-send", daemon=True)
+        worker.start()
+        worker.join(attempt_s)
+        if not box:
+            raise TransportFailure(f"no answer within {attempt_s:.0f}s on {path or API_HOST}") from None
+        ok, value = box[0]
+        if ok:
+            return value
+        raise value
+
     def _succeeded(self, path: Optional[str], failed: bool) -> None:
         with self._lock:
-            changed = self._sticky is _UNSET or self._sticky != path
+            if self._sticky is not _UNSET and self._sticky == path:
+                return
             self._sticky = path
-        if not changed:
-            return
-        label = API_HOST if path is None else path
-        (log.warning if failed else log.info)("kanban-empowered: Telegram path is now %s", label)
-        if self.on_path:
-            try:
-                self.on_path(label)
-            except Exception:
-                pass
+            label = API_HOST if path is None else path
+            (log.warning if failed else log.info)("kanban-empowered: Telegram path is now %s", label)
+            if self.on_path:  # under the lock: two threads cannot report their paths out of order
+                try:
+                    self.on_path(label)
+                except Exception:
+                    pass
 
     def _discover(self, tried: set, remaining: float) -> list:
         """New fallback IPs from Hermes' discovery after a failed walk (refresh-limited), minus ``tried``."""
-        if not self._discovery_allowed or self._clock() < self._next_discovery or remaining < 2 * self.MIN_ATTEMPT_S:
+        with self._lock:
+            due = self._discovery_allowed and self._clock() >= self._next_discovery
+        if not due or remaining < 2 * self.MIN_ATTEMPT_S:
             return []
         try:
             found = self._net.discover(min(self.DISCOVERY_TIMEOUT_S, remaining - self.MIN_ATTEMPT_S))
         except Exception:
             found = None
-        self._next_discovery = self._clock() + (self.DISCOVERY_REFRESH_S if found else self.DISCOVERY_RETRY_S)
-        if not found:
-            return []
-        self._ips = list(dict.fromkeys([*found, *self._ips]))
-        return [ip for ip in found if ip not in tried]
+        with self._lock:
+            self._next_discovery = self._clock() + (self.DISCOVERY_REFRESH_S if found else self.DISCOVERY_RETRY_S)
+            if found:
+                self._ips = list(dict.fromkeys([*found, *self._ips]))
+        return [ip for ip in (found or []) if ip not in tried]
 
     # -- the call ------------------------------------------------------------
     def post(self, url: str, body: bytes) -> tuple[int, bytes]:
@@ -253,17 +381,24 @@ class TelegramTransport:
                     break
                 tried.add(path)
                 try:
-                    status, data = self._try(path, url, body, proxy, deadline)
+                    if path is None and not proxy:  # the hostname path: DNS first, bounded
+                        dns_s = min(self.DNS_CAP_S, deadline - self._clock() - self.MIN_ATTEMPT_S)
+                        if dns_s <= 0 or not self._resolver(host, dns_s):
+                            raise self._httpx.ConnectTimeout(f"{host} did not resolve within {max(dns_s, 0):.0f}s")
+                    attempt_s = min(self.timeout_s, deadline - self._clock())
+                    status, data = self._try(path, url, body, proxy, attempt_s)
                 except Exception as exc:
                     last = exc
                     if not self._retryable(exc):
                         raise TransportFailure(f"{type(exc).__name__}: {exc}") from None
                     failed_paths += 1
                     log.warning("kanban-empowered: Telegram path %s failed (%s)", path or API_HOST, type(exc).__name__)
-                    self._discard(path)
                     with self._lock:
+                        pool = self._pools.get(path)
                         if self._sticky is not _UNSET and self._sticky == path:
                             self._sticky = _UNSET  # re-walk the literals before trusting it again
+                    if pool is not None:
+                        self._retire(path, pool)
                     continue
                 self._succeeded(path, failed=failed_paths > 0)
                 return status, data
@@ -279,10 +414,14 @@ class TelegramTransport:
 
 
 def read_path_file(path: Path) -> Optional[str]:
-    """The last-good path a client recorded (``None`` when there is no file, ``""`` when it is empty)."""
+    """The last-good path a client recorded: ``None`` when there is no (readable) file, ``""`` when empty.
+
+    Reads at most 256 bytes and never raises on a corrupt file (invalid UTF-8 decodes with replacement
+    characters and classifies as unknown)."""
     try:
-        return Path(path).read_text(encoding="utf-8").strip()
-    except OSError:
+        with open(path, "rb") as fh:
+            return fh.read(256).decode("utf-8", errors="replace").strip()
+    except (OSError, ValueError):
         return None
 
 
@@ -345,11 +484,16 @@ class TelegramClient:
 
     def _remember_path(self, label: str) -> None:
         """Record the last-good path where ``doctor`` (another process) can read it. Never raises."""
+        tmp = self._path_file.with_name(f"{self._path_file.name}.{os.getpid()}.{threading.get_ident()}.tmp")
         try:
             self._path_file.parent.mkdir(parents=True, exist_ok=True)
-            self._path_file.write_text(label, encoding="utf-8")
+            tmp.write_text(label, encoding="utf-8")
+            os.replace(tmp, self._path_file)  # atomic: doctor never reads a half-written value
         except Exception:
-            pass
+            try:
+                tmp.unlink()
+            except OSError:
+                pass
 
     @property
     def bot_id(self) -> Optional[int]:

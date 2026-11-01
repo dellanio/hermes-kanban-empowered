@@ -541,3 +541,14 @@ def test_settings_never_rewrite_the_agent_halfs_message_language(kanban_home, mo
     dashboard.load_settings(apply_messages=True)
     assert messages._LANG == "pt" and "boss" in messages._ROLES
     dashboard._cache.clear()
+
+
+def test_count_is_the_light_needs_you_metric(client):
+    """Review minor 6: the Kanban header button polls GET /count, not the whole overview."""
+    assert client.get(PREFIX + "/count").json()["needs_you"] == 0
+    _waiting(ASK_WORD)
+    _waiting(ASK_OPTIONS, held=1)
+    gave_up_with_runs(["infra"])  # a breaker park is not a human wait
+    body = client.get(PREFIX + "/count").json()
+    assert body["needs_you"] == 2 == client.get(PREFIX + "/overview").json()["metrics"]["needs_you"]
+    assert set(body) == {"needs_you", "generated_at"}

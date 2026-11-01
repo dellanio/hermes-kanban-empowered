@@ -8,6 +8,7 @@
  *   GET  /settings  the two Desktop switches (sidebar entry, Kanban header button) and the language
  *   GET  /i18n      every ui.* string in the plugin language (the brand name is never translated)
  *   GET  /overview  metrics, "needs you", running cards, coordinator timeline, infrastructure (polled)
+ *   GET  /count     the number of waits that need you (the Kanban header button's badge)
  *   GET  /item      one item: the reminder text exactly as Telegram shows it, conditions, comments
  *   POST /answer    the owner's answer, classified and applied exactly like a Telegram reply
  *
@@ -161,6 +162,7 @@ function useOverview(board, interval) {
     queryKey: overviewKey(board),
     queryFn: () => api(board && board !== 'all' ? '/overview?board=' + encodeURIComponent(board) : '/overview'),
     refetchInterval: interval,
+    staleTime: Math.floor(interval / 2), // two open windows share one fetch
     retry: 1
   })
 }
@@ -666,6 +668,7 @@ function Drawer({ target, t, onClose }) {
     api('/answer', { method: 'POST', body })
       .then(res => {
         queryClient.invalidateQueries({ queryKey: [ID, 'overview'] })
+        queryClient.invalidateQueries({ queryKey: [ID, 'count'] })
 
         if (res.result === 'resolved') {
           host.notify({ kind: 'success', message: res.message })
@@ -986,8 +989,9 @@ const COUNT_CHIP = {
 }
 
 function KanbanButton() {
-  const overview = useOverview('all', 30000)
-  const count = overview.data && overview.data.metrics ? overview.data.metrics.needs_you : 0
+  // the light GET /count, not the whole overview (fleet scan, infra assessment, comments)
+  const badge = useQuery({ queryKey: [ID, 'count'], queryFn: () => api('/count'), refetchInterval: 30000, retry: 1 })
+  const count = badge.data ? badge.data.needs_you : 0
 
   return jsx(Button, {
     variant: 'ghost',

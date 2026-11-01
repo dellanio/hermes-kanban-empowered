@@ -11,8 +11,10 @@ Routes:
     GET  /settings                     -> {show_sidebar_menu, show_kanban_button, language}
     GET  /i18n                         -> {language, strings: {ui.*: text}}
     GET  /overview?board=<slug|all>    -> metrics, needs_you, running, timeline, infra, boards
+    GET  /count                        -> {needs_you, generated_at} (the Kanban header button's badge)
     GET  /item?board=&task_id=         -> one needs-you entry + reminder text, conditions, comments
-    POST /answer                       -> {result, message, overview_item_removed}
+    POST /answer                       -> {result, message, overview_item_removed, held_behind_count};
+                                          result: resolved | noted | ambiguous | changed | not_found | error
 """
 from __future__ import annotations
 
@@ -148,6 +150,12 @@ def get_overview(board: Optional[str] = Query(None, max_length=64)) -> dict:
         return dashboard.overview(settings, store, time.time(), board=board)
     except LookupError:
         raise HTTPException(status_code=404, detail="board not found")
+
+
+@router.get("/count")
+def get_count() -> dict:
+    dashboard, settings, _store = _context()
+    return dashboard.count(settings, time.time())
 
 
 @router.get("/item")

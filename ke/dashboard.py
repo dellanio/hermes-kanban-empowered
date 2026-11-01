@@ -422,6 +422,24 @@ def overview(settings: Settings, store: Store, now: float, board: Optional[str] 
     }
 
 
+def count(settings: Settings, now: float, api: Any = hermes_api) -> dict:
+    """``GET /count``: how many human waits need you (the Kanban header button's badge).
+
+    Only the blocked cards of each board are read (no held-behind walk, no infra assessment, no
+    comments); an unreadable board is skipped, as in ``fleet_status``.
+    """
+    n = 0
+    for board in _boards(api):
+        try:
+            with api.connect(board) as conn:
+                for task in api.list_tasks(conn, status="blocked"):
+                    if human_block(task, api.events(conn, task.id), settings) is not None:
+                        n += 1
+        except Exception:
+            continue
+    return {"needs_you": n, "generated_at": int(now)}
+
+
 def _comments(api: Any, conn: Any, task_id: str, now: float) -> list:
     rows = sorted(api.comments(conn, task_id), key=lambda c: (c.created_at or 0, c.id))[-COMMENTS_MAX:]
     return [

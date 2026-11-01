@@ -1,7 +1,7 @@
 import json
 import os
-import subprocess
-import sys
+import multiprocessing
+import time
 
 from conftest import make_coordinator
 from ke.leader import LeaderLock, pid_alive
@@ -50,9 +50,24 @@ def test_release_by_non_holder_keeps_the_lock(tmp_path):
     assert not b.acquire(1001)
 
 
+def _noop():
+    pass
+
+
+def _sleep_forever():
+    time.sleep(30)
+
+
+def _spawn(target):
+    """Start a child process (spawned, not forked) and return it."""
+    p = multiprocessing.get_context("spawn").Process(target=target, daemon=True)
+    p.start()
+    return p
+
+
 def test_takeover_when_holder_pid_is_dead(tmp_path):
-    p = subprocess.Popen([sys.executable, "-c", "pass"])
-    p.wait()
+    p = _spawn(_noop)
+    p.join()
     path = tmp_path / "l"
     path.write_text(json.dumps({"pid": p.pid, "token": "ghost", "ts": 1000}))
     assert not pid_alive(p.pid)
@@ -81,14 +96,14 @@ def test_pid_alive_for_own_process_and_garbage():
 
 def test_pid_alive_does_not_kill_the_target():
     # On Windows os.kill(pid, 0) would TerminateProcess; the check must be side-effect free.
-    p = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+    p = _spawn(_sleep_forever)
     try:
         assert pid_alive(p.pid)
         assert pid_alive(p.pid)
-        assert p.poll() is None
+        assert p.is_alive()
     finally:
         p.kill()
-        p.wait()
+        p.join()
     assert not pid_alive(p.pid)
 
 
@@ -107,14 +122,14 @@ def test_only_one_coordinator_evaluates(tmp_path, clock):
 def test_fallback_probe_without_psutil():
     from ke.leader import _pid_alive_fallback
 
-    p = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+    p = _spawn(_sleep_forever)
     try:
         assert _pid_alive_fallback(os.getpid())
         assert _pid_alive_fallback(p.pid)
-        assert p.poll() is None  # probing must not terminate the target
+        assert p.is_alive()  # probing must not terminate the target
     finally:
         p.kill()
-        p.wait()
+        p.join()
     assert not _pid_alive_fallback(p.pid)
 
 

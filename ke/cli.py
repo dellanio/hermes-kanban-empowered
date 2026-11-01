@@ -205,12 +205,31 @@ def run_status(settings: Settings) -> int:
         store.close()
 
 
+_VT_ENABLED = False
+
+
+def _enable_windows_vt() -> None:
+    """Turn on ANSI escape processing for the Windows console once; silent no-op when unavailable."""
+    global _VT_ENABLED
+    if _VT_ENABLED or os.name != "nt":
+        return
+    _VT_ENABLED = True
+    try:
+        import ctypes
+
+        kernel32 = ctypes.windll.kernel32  # type: ignore[attr-defined]
+        handle = kernel32.GetStdHandle(-11)  # STD_OUTPUT_HANDLE
+        mode = ctypes.c_ulong()
+        if kernel32.GetConsoleMode(handle, ctypes.byref(mode)):
+            kernel32.SetConsoleMode(handle, mode.value | 0x0004)  # ENABLE_VIRTUAL_TERMINAL_PROCESSING
+    except Exception:
+        pass
+
+
 def _clear_screen() -> None:
-    """``cls`` on Windows, the ANSI clear-and-home sequence elsewhere."""
-    if os.name == "nt":
-        os.system("cls")
-    else:
-        print("\033[2J\033[H", end="", flush=True)
+    """The ANSI clear-and-home sequence (VT processing is enabled on Windows first)."""
+    _enable_windows_vt()
+    print("\033[2J\033[H", end="", flush=True)
 
 
 def run_status_watch(

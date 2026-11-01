@@ -1,4 +1,3 @@
-import subprocess
 
 from conftest import settings_for_test
 from test_waits import pt_br  # noqa: F401 (pt_br is a fixture)
@@ -88,14 +87,56 @@ def test_hermes_head_is_short_sha_or_none():
     assert head is None or (4 <= len(head) <= 12 and all(c in "0123456789abcdef" for c in head))
 
 
-def test_hermes_head_survives_git_failure(monkeypatch):
+def _fake_checkout(monkeypatch, tmp_path):
+    import hermes_cli
+
+    root = tmp_path / "hermes"
+    (root / "hermes_cli").mkdir(parents=True)
+    monkeypatch.setattr(hermes_cli, "__file__", str(root / "hermes_cli" / "__init__.py"))
+    return root
+
+
+def test_hermes_head_reads_loose_ref(monkeypatch, tmp_path):
     from ke import hermes_api as h
 
-    def boom(*a, **k):
-        raise FileNotFoundError("git")
+    root = _fake_checkout(monkeypatch, tmp_path)
+    (root / ".git" / "refs" / "heads").mkdir(parents=True)
+    (root / ".git" / "HEAD").write_text("ref: refs/heads/main\n")
+    (root / ".git" / "refs" / "heads" / "main").write_text("0123456789abcdef0123456789abcdef01234567\n")
+    assert h.hermes_head() == "0123456789"
 
-    monkeypatch.setattr(subprocess, "run", boom)
-    assert h.hermes_head() is None
+
+def test_hermes_head_falls_back_to_packed_refs(monkeypatch, tmp_path):
+    from ke import hermes_api as h
+
+    root = _fake_checkout(monkeypatch, tmp_path)
+    (root / ".git").mkdir()
+    (root / ".git" / "HEAD").write_text("ref: refs/heads/main\n")
+    (root / ".git" / "packed-refs").write_text(
+        "# pack-refs\nfedcba9876543210fedcba9876543210fedcba98 refs/heads/main\n^1111111111111111111111111111111111111111\n"
+    )
+    assert h.hermes_head() == "fedcba9876"
+
+
+def test_hermes_head_detached_and_gitdir_file(monkeypatch, tmp_path):
+    from ke import hermes_api as h
+
+    root = _fake_checkout(monkeypatch, tmp_path)
+    real = tmp_path / "real-git"
+    real.mkdir()
+    (real / "HEAD").write_text("aaaaaaaaaabbbbbbbbbbccccccccccdddddddddd\n")
+    (root / ".git").write_text(f"gitdir: {real}\n")
+    assert h.hermes_head() == "aaaaaaaaaa"
+
+
+def test_hermes_head_unknown_cases_return_none(monkeypatch, tmp_path):
+    from ke import hermes_api as h
+
+    root = _fake_checkout(monkeypatch, tmp_path)
+    assert h.hermes_head() is None  # no .git at all
+    (root / ".git").mkdir()
+    (root / ".git" / "HEAD").write_text("ref: refs/heads/gone\n")
+    assert h.hermes_head() is None  # ref neither loose nor packed
 
 
 def test_active_profile_follows_hermes_home(kanban_home, monkeypatch):

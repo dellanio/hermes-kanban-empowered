@@ -46,9 +46,13 @@ log = logging.getLogger(__name__)
 SKIP = {"action": "skip", "reason": "kanban-empowered"}
 # The whole message must be the confirmation: an optional item number ("2", "2.", "2)", "2 -"),
 # the word, optional trailing punctuation/emoji. "ok, but not yet" or "done?" is a conversation.
+CHECK_MARK = "\N{WHITE HEAVY CHECK MARK}"
+THUMBS_UP = "\N{THUMBS UP SIGN}"
+VS16 = "\N{VARIATION SELECTOR-16}"
+_TRAILING_MARKS = ".!" + CHECK_MARK + THUMBS_UP + VS16
 REPLY_RE = re.compile(
     r"^\s*(?:([0-9]{1,4})\s*[.):\-]?\s*)?(feito|done|liguei|ok|aprovado|approved)"
-    r"\s*[.!\u2705\U0001F44D\uFE0F]*\s*$",
+    r"\s*[" + re.escape(_TRAILING_MARKS) + r"]*\s*$",
     re.IGNORECASE,
 )
 _ID_RE = re.compile(r"-?[1-9][0-9]{0,19}")

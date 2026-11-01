@@ -182,24 +182,67 @@ def active_profile() -> str:
     return str(get_active_profile_name())
 
 
-def hermes_head() -> str | None:
-    """Short git HEAD of the installed Hermes checkout, or ``None`` when it cannot be read."""
-    import subprocess
+def _git_dir(root: Path) -> Path | None:
+    """The real git directory of a checkout: ``.git`` itself, or the target of a ``gitdir:`` file."""
+    dot_git = root / ".git"
+    if dot_git.is_dir():
+        return dot_git
+    try:
+        text = dot_git.read_text(encoding="utf-8").strip()
+    except OSError:
+        return None
+    if not text.startswith("gitdir:"):
+        return None
+    target = Path(text[len("gitdir:"):].strip())
+    return target if target.is_absolute() else (root / target).resolve()
 
+
+def _read_head_sha(git_dir: Path) -> str | None:
+    """Full sha ``HEAD`` points at (loose ref, then packed-refs; detached HEAD is the sha itself)."""
+    head = (git_dir / "HEAD").read_text(encoding="utf-8").strip()
+    if not head.startswith("ref:"):
+        return head or None
+    ref = head[len("ref:"):].strip()
+    # Worktrees keep per-worktree HEAD in git_dir but shared refs in the "commondir".
+    dirs = [git_dir]
+    try:
+        common = (git_dir / "commondir").read_text(encoding="utf-8").strip()
+        dirs.append((git_dir / common).resolve())
+    except OSError:
+        pass
+    for d in dirs:
+        try:
+            sha = (d / ref).read_text(encoding="utf-8").strip()
+        except OSError:
+            continue
+        if sha:
+            return sha
+    for d in dirs:
+        try:
+            lines = (d / "packed-refs").read_text(encoding="utf-8").splitlines()
+        except OSError:
+            continue
+        for line in lines:
+            parts = line.split()
+            if len(parts) == 2 and parts[1] == ref and not line.startswith(("#", "^")):
+                return parts[0]
+    return None
+
+
+def hermes_head() -> str | None:
+    """Short (10-char) git HEAD of the installed Hermes checkout, or ``None`` when it cannot be read.
+
+    Pure file reads (no git subprocess): ``.git/HEAD`` -> loose ref -> ``packed-refs``.
+    """
     import hermes_cli
 
     root = Path(hermes_cli.__file__).resolve().parent.parent
     try:
-        proc = subprocess.run(
-            ["git", "-C", str(root), "rev-parse", "--short", "HEAD"],
-            capture_output=True,
-            text=True,
-            timeout=5,
-        )
+        git_dir = _git_dir(root)
+        sha = _read_head_sha(git_dir) if git_dir is not None else None
     except Exception:
         return None
-    out = (proc.stdout or "").strip()
-    return out if proc.returncode == 0 and out else None
+    return sha[:10] if sha else None
 
 
 def profiles_with_plugin(plugin: str = "kanban-empowered") -> list[str]:

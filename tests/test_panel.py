@@ -738,19 +738,28 @@ def test_status_watch_survives_a_render_error(kanban_home, tmp_path, capsys, mon
     assert "db locked" in out and "Kanban now" in out
 
 
-def test_clear_screen_uses_cls_on_windows_and_ansi_elsewhere(monkeypatch, capsys):
+def test_clear_screen_prints_ansi_and_enables_vt_once_on_windows(monkeypatch, capsys):
     import os
 
     from ke import cli
 
-    called = []
-    monkeypatch.setattr(os, "system", lambda cmd: called.append(cmd) or 0)
-    monkeypatch.setattr(os, "name", "nt")
+    calls = []
+    monkeypatch.setattr(cli, "_enable_windows_vt", lambda: calls.append(1))
+    monkeypatch.setattr(os, "system", lambda cmd: pytest.fail("os.system must not be used"))
     cli._clear_screen()
-    assert called == ["cls"]
+    assert capsys.readouterr().out == "\x1b[2J\x1b[H"
+    assert calls == [1]
+
+
+def test_enable_windows_vt_is_a_noop_off_windows(monkeypatch):
+    import os
+
+    from ke import cli
+
+    monkeypatch.setattr(cli, "_VT_ENABLED", False)
     monkeypatch.setattr(os, "name", "posix")
-    cli._clear_screen()
-    assert called == ["cls"] and "\x1b[2J" in capsys.readouterr().out
+    cli._enable_windows_vt()
+    assert cli._VT_ENABLED is False
 
 
 def test_run_dispatches_watch(monkeypatch, tmp_path):

@@ -511,3 +511,14 @@ def test_private_package_path_without_the_agent_half(client, api_mod, monkeypatc
     assert api_mod._ke_package() == api_mod._PRIVATE_PKG + ".ke"
     for name in [n for n in sys.modules if n == api_mod._PRIVATE_PKG or n.startswith(api_mod._PRIVATE_PKG + ".")]:
         sys.modules.pop(name, None)
+
+
+def test_web_dashboard_bundle_is_a_slot_only_placeholder():
+    """The manifest makes `hermes dashboard` load dashboard/dist/index.js (no api-only flag exists): ship the
+    documented slot-only placeholder so the web dashboard neither 404s nor reports NO_REGISTER."""
+    data = json.loads((REPO / "dashboard" / "manifest.json").read_text(encoding="utf-8"))
+    bundle = REPO / "dashboard" / data.get("entry", "dist/index.js")
+    src = bundle.read_text(encoding="utf-8")
+    assert 'register("kanban-empowered"' in src and "__HERMES_PLUGINS__" in src
+    assert "import" not in src and "fetch" not in src  # nothing but the placeholder
+    assert data["tab"]["hidden"] is True

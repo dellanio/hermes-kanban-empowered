@@ -41,6 +41,7 @@ def test_doctor_all_keys(kanban_home, capsys, tmp_path):
         "profiles_with_plugin",
         "telegram_token",
         "owner_chats",
+        "boards_suspended",
     ]
     assert out["hermes_compat"] == "bf0203a794"
     assert out["coordinator"] == "none"

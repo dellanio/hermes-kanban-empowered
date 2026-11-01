@@ -5,7 +5,7 @@ import os
 import time
 from typing import Any, Optional
 
-from . import conditions, guards_watch, hermes_api, inbound, panel, telegram
+from . import board_status, conditions, guards_watch, hermes_api, inbound, panel, telegram
 from .leader import LeaderLock
 from .messages import render_done, t
 from .settings import Settings
@@ -46,6 +46,15 @@ def setup(parser: Any) -> None:
     rl.add_argument("card", help="card id (e.g. t_1a2b3c4d)")
     rl.add_argument("--to", required=True, help="profile that takes the card over")
     rl.add_argument("--board", default=None, help="board slug (default: search all boards)")
+    bs = sub.add_parser(
+        "board-status",
+        help="List the boards with their status, or set one (active/suspended/done; ativo/suspenso/concluido)",
+    )
+    bs.add_argument("board", nargs="?", default=None, help="board slug (omit to list every board)")
+    bs.add_argument(
+        "status", nargs="?", default=None,
+        help="new status: active|suspended|done (or ativo|suspenso|concluido); omit to show it",
+    )
     parser.set_defaults(ke_parser=parser)
 
 
@@ -66,11 +75,13 @@ def run(args: Any) -> int:
         return run_done(settings, args.card, getattr(args, "board", None))
     if cmd == "release":
         return run_release(settings, args.card, args.to, getattr(args, "board", None))
+    if cmd == "board-status":
+        return run_board_status(settings, getattr(args, "board", None), getattr(args, "status", None))
     parser = getattr(args, "ke_parser", None)
     if parser is not None:
         parser.print_help()
     else:
-        print("usage: hermes kanban-empowered {doctor,explain,status,done,release}")
+        print("usage: hermes kanban-empowered {doctor,explain,status,done,release,board-status}")
     return 0 if cmd is None else 2
 
 
@@ -195,6 +206,54 @@ def run_done(settings: Settings, card: str, board: Optional[str]) -> int:
         store.close()
 
 
+def _board_rows(boards: list, statuses: dict) -> list[str]:
+    """One aligned ``slug  status  name`` line per board."""
+    rows = [
+        (b, board_status.label((statuses.get(b) or {}).get("status", "active")), hermes_api.board_name(b))
+        for b in boards
+    ]
+    wb = max((len(r[0]) for r in rows), default=0)
+    ws = max((len(r[1]) for r in rows), default=0)
+    return [
+        t("board_status.list.row", board=b.ljust(wb), status=st.ljust(ws), name=name if name != b else "").rstrip()
+        for b, st, name in rows
+    ]
+
+
+def run_board_status(settings: Settings, board: Optional[str], status: Optional[str]) -> int:
+    """``board-status``: list the boards with their status, show one, or set one (source ``cli``).
+
+    Exit 0 on success (also when the board already had that status), 1 for an unknown board, 2 for an
+    unknown status word.
+    """
+    if status is not None:
+        wanted = board_status.normalize(status)
+        if wanted is None:
+            print(t("board_status.bad_status", status=status))
+            return 2
+    else:
+        wanted = None
+    boards = hermes_api.boards()
+    if board is not None and board not in boards:
+        print(t("board_status.unknown_board", board=board))
+        return 1
+    store = _open_store(settings)
+    try:
+        if wanted is None:
+            lines = _board_rows([board] if board is not None else boards, store.board_statuses())
+            print("\n".join(lines) if lines else t("board_status.list.empty"))
+            return 0
+        previous = store.set_board_status(board, wanted, int(time.time()), "cli")
+        if previous is None:
+            print(t("board_status.unchanged", board=board, status=board_status.label(wanted)))
+            return 0
+        print(t("board_status.set", board=board, old=board_status.label(previous), new=board_status.label(wanted)))
+        print(t("board_status.set.reactivated" if wanted == "active" else "board_status.set.held"))
+        return 0
+    finally:
+        store.close()
+
+
 def run_status(settings: Settings) -> int:
     """Print the fleet summary across all boards."""
     store = _open_store(settings)
@@ -268,6 +327,22 @@ def _active_profile() -> str:
         return t("doctor.unknown")
 
 
+def _suspended_boards(settings: Settings) -> str:
+    """The live boards whose status is not active (``slug`` / ``slug (Done)``), read-only; ``none`` when none."""
+    try:
+        statuses = board_status.StatusReader(settings.shared_state_dir / "state.db", ttl_s=0).statuses()
+        names = []
+        for b in hermes_api.boards():
+            st = statuses.get(b, "active")
+            if st == "suspended":
+                names.append(b)
+            elif st == "done":
+                names.append(t("doctor.board_status", board=b, status=board_status.label(st)))
+    except Exception:
+        return t("doctor.unknown")
+    return ", ".join(names) if names else t("doctor.none")
+
+
 def run_doctor(settings: Settings, config_error: Optional[str] = None) -> None:
     """Print ``key: value`` diagnostics, one per line. Opens no Store (safe in a worker profile)."""
     pid = LeaderLock(settings.shared_state_dir / "leader.lock").holder_pid(time.time())
@@ -285,6 +360,7 @@ def run_doctor(settings: Settings, config_error: Optional[str] = None) -> None:
         ("telegram_token", t("doctor.token.present") if token else t("doctor.token.missing")),
         ("owner_chats", t("doctor.owner_chats", n=len(settings.owner_ids))),
     ]
+    rows.append(("boards_suspended", _suspended_boards(settings)))
     path = telegram.read_path_file(settings.shared_state_dir / "telegram_path")
     if path is not None:  # only once a client has recorded one; opens no Store
         kind = telegram.classify_path(path)

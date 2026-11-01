@@ -755,3 +755,149 @@ def test_i18n_has_the_status_strings(client):
     for key in ("ui.status.active", "ui.status.suspended", "ui.status.done", "ui.section.suspended",
                 "ui.projects", "ui.projects.note", "ui.needs.reminders_paused", "ui.projects.failed"):
         assert strings[key], key
+
+
+# -- CLI: hermes kanban-empowered board-status [<slug> [status]] + doctor ---------------------------
+def _cli_settings(tmp_path):
+    return settings_for_test(tmp_path)
+
+
+def _cli_store(settings):
+    from ke.store import Store
+
+    return Store(settings.shared_state_dir / "state.db")
+
+
+def test_cli_lists_every_board_with_its_status(kanban_home, tmp_path, capsys):
+    from ke import cli
+
+    _two_boards()
+    s = _cli_settings(tmp_path)
+    st = _cli_store(s)
+    st.set_board_status("voz-hermes", "suspended", 1, "desktop")
+    st.set_board_status("portal", "done", 1, "desktop")
+    st.close()
+    assert cli.run_board_status(s, None, None) == 0
+    lines = [ln.split() for ln in capsys.readouterr().out.strip().splitlines()]
+    assert [ln[:2] for ln in lines] == [["default", "Active"], ["portal", "Done"], ["voz-hermes", "Suspended"]]
+    assert lines[2][2:] == ["Canal", "de", "Voz", "do", "Hermes"]
+
+
+def test_cli_shows_one_board(kanban_home, tmp_path, capsys):
+    from ke import cli
+
+    _two_boards()
+    s = _cli_settings(tmp_path)
+    assert cli.run_board_status(s, "voz-hermes", None) == 0
+    assert capsys.readouterr().out.split()[:2] == ["voz-hermes", "Active"]
+    assert cli.run_board_status(s, "nope", None) == 1
+    assert "board nope not found" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("word,expected", [
+    ("suspenso", "suspended"), ("suspended", "suspended"), ("concluido", "done"), ("Concluído", "done"),
+])
+def test_cli_sets_the_status_with_pt_or_en_words(kanban_home, tmp_path, capsys, word, expected):
+    from ke import cli
+
+    _two_boards()
+    s = _cli_settings(tmp_path)
+    assert cli.run_board_status(s, "voz-hermes", word) == 0
+    out = capsys.readouterr().out
+    st = _cli_store(s)
+    assert st.board_status("voz-hermes") == expected
+    (act,) = st.recent_actions(["board_status"])
+    assert act["detail"] == f"cli: active->{expected}"
+    st.close()
+    label = {"suspended": "Suspended", "done": "Done"}[expected]
+    assert f"voz-hermes: Active → {label}" in out
+    assert "New cards on this board will not be started" in out
+
+
+def test_cli_reactivation_and_unchanged(kanban_home, tmp_path, capsys):
+    from ke import cli
+
+    _two_boards()
+    s = _cli_settings(tmp_path)
+    cli.run_board_status(s, "voz-hermes", "suspenso")
+    capsys.readouterr()
+    assert cli.run_board_status(s, "voz-hermes", "ativo") == 0
+    out = capsys.readouterr().out
+    assert "voz-hermes: Suspended → Active" in out and "reminders restart from now" in out
+    assert cli.run_board_status(s, "voz-hermes", "active") == 0
+    assert "voz-hermes is already Active" in capsys.readouterr().out
+
+
+def test_cli_rejects_a_bad_status_or_board(kanban_home, tmp_path, capsys):
+    from ke import cli
+
+    _two_boards()
+    s = _cli_settings(tmp_path)
+    assert cli.run_board_status(s, "voz-hermes", "paused") == 2
+    assert "unknown status paused" in capsys.readouterr().out
+    assert cli.run_board_status(s, "nope", "suspenso") == 1
+    assert "board nope not found" in capsys.readouterr().out
+    st = _cli_store(s)
+    assert st.board_statuses() == {}
+    st.close()
+
+
+def test_cli_in_pt_br(kanban_home, tmp_path, capsys, pt_br):  # noqa: F811
+    from ke import cli
+
+    _two_boards()
+    s = _cli_settings(tmp_path)
+    assert cli.run_board_status(s, "voz-hermes", "suspenso") == 0
+    out = capsys.readouterr().out
+    assert "voz-hermes: Ativo → Suspenso" in out
+    assert "Novos cards deste quadro não serão iniciados" in out
+    cli.run_board_status(s, None, None)
+    assert "Suspenso" in capsys.readouterr().out
+
+
+def test_cli_parser_wires_board_status(kanban_home, tmp_path, capsys):
+    import argparse
+
+    from ke import cli
+
+    _two_boards()
+    cli.bind(_cli_settings(tmp_path))
+    parser = argparse.ArgumentParser()
+    cli.setup(parser)
+    try:
+        assert cli.run(parser.parse_args(["board-status", "portal", "concluido"])) == 0
+        assert "portal: Active → Done" in capsys.readouterr().out
+        assert cli.run(parser.parse_args(["board-status"])) == 0
+        assert "portal" in capsys.readouterr().out
+    finally:
+        cli.bind(None)
+
+
+def _doctor(capsys):
+    lines = capsys.readouterr().out.strip().splitlines()
+    return dict(line.split(": ", 1) for line in lines)
+
+
+def test_doctor_reports_the_suspended_boards(kanban_home, tmp_path, capsys):
+    from ke import cli
+
+    _two_boards()
+    s = _cli_settings(tmp_path)
+    cli.run_doctor(s)
+    assert _doctor(capsys)["boards_suspended"] == "none"
+    assert not (s.shared_state_dir / "state.db").exists()  # doctor opens no Store
+    st = _cli_store(s)
+    st.set_board_status("voz-hermes", "suspended", 1, "cli")
+    st.set_board_status("portal", "done", 1, "cli")
+    st.set_board_status("gone", "suspended", 1, "cli")  # not a live board
+    st.close()
+    cli.run_doctor(s)
+    assert _doctor(capsys)["boards_suspended"] == "portal (Done), voz-hermes"
+
+
+def test_doctor_suspended_boards_in_pt_br(kanban_home, tmp_path, capsys, pt_br):  # noqa: F811
+    from ke import cli
+
+    s = _cli_settings(tmp_path)
+    cli.run_doctor(s)
+    assert _doctor(capsys)["boards_suspended"] == "nenhum"

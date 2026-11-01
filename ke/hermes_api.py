@@ -30,6 +30,11 @@ def boards() -> list[str]:
     return [b["slug"] for b in _kbb.list_boards(include_archived=False)]
 
 
+def board_exists(board: str) -> bool:
+    """True when ``board`` is a live (non-archived) board, ``default`` included."""
+    return bool(board) and board in boards()
+
+
 @contextlib.contextmanager
 def connect(board: str) -> Iterator[sqlite3.Connection]:
     """Context manager yielding the kanban DB connection of ``board``.

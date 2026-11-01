@@ -73,6 +73,24 @@ CREATE TABLE IF NOT EXISTS kv (
 );
 """
 
+# The board (project) statuses the plugin knows. A board without a row is ``active``.
+BOARD_STATUSES = ("active", "suspended", "done")
+
+# Schema migrations, applied in order on open while ``PRAGMA user_version`` is below their number.
+# Version 1 is ``_SCHEMA`` above (every statement idempotent); each later step must be idempotent too
+# (``IF NOT EXISTS``), because two processes may open an old file at the same time.
+_MIGRATIONS: tuple[tuple[int, str], ...] = (
+    (2, """
+CREATE TABLE IF NOT EXISTS board_status (
+    board      TEXT PRIMARY KEY,
+    status     TEXT NOT NULL CHECK (status IN ('active', 'suspended', 'done')),
+    changed_at INTEGER NOT NULL,
+    changed_by TEXT
+);
+"""),
+)
+SCHEMA_VERSION = _MIGRATIONS[-1][0]
+
 
 class Store:
     """Thin accessor over the plugin database.
@@ -93,6 +111,18 @@ class Store:
         self.conn.execute("PRAGMA synchronous=NORMAL")
         self.conn.execute("PRAGMA busy_timeout=30000")
         self.conn.executescript(_SCHEMA)
+        self._migrate()
+
+    def _migrate(self) -> None:
+        """Bring the file to ``SCHEMA_VERSION`` (a no-op once there)."""
+        with self.lock:
+            current = int(self.conn.execute("PRAGMA user_version").fetchone()[0])
+            for version, script in _MIGRATIONS:
+                if version <= current:
+                    continue
+                self.conn.executescript(script)
+                self.conn.execute(f"PRAGMA user_version = {int(version)}")
+                current = version
 
     def close(self) -> None:
         with self.lock:
@@ -350,6 +380,68 @@ class Store:
             self.conn.execute(
                 "DELETE FROM guard_alerts WHERE board = ? AND task_id = ?", (board, task_id)
             )
+
+    # -- board (project) status ---------------------------------------------
+    def board_status(self, board: str) -> str:
+        """``active`` | ``suspended`` | ``done`` (``active`` for a board never set)."""
+        with self.lock:
+            row = self.conn.execute("SELECT status FROM board_status WHERE board = ?", (board,)).fetchone()
+        return "active" if row is None else str(row["status"])
+
+    def board_statuses(self) -> dict[str, dict]:
+        """``{board: {status, changed_at, changed_by}}`` for every board with a recorded status."""
+        with self.lock:
+            rows = self.conn.execute(
+                "SELECT board, status, changed_at, changed_by FROM board_status ORDER BY board"
+            ).fetchall()
+        return {
+            r["board"]: {"status": r["status"], "changed_at": int(r["changed_at"]), "changed_by": r["changed_by"]}
+            for r in rows
+        }
+
+    def set_board_status(self, board: str, status: str, ts: int, changed_by: str) -> Optional[str]:
+        """Set the status of ``board``; returns the previous status, or ``None`` when nothing changed.
+
+        One transaction: the row, the ``board_status`` audit action (detail ``"<by>: <old>-><new>"``) and,
+        on a transition to ``active``, the reset of the board's reminder ladder: every wait of the board
+        forgets its sent stage and the escalation markers are dropped, so the ladder starts again from the
+        reactivation time (``changed_at`` of the ``active`` row is its anchor, see ``waits.ladder_anchor``).
+        Raises ValueError for a status outside ``BOARD_STATUSES``.
+        """
+        if status not in BOARD_STATUSES:
+            raise ValueError(f"unknown board status {status!r}; expected one of {BOARD_STATUSES}")
+        with self.lock:
+            self.conn.execute("BEGIN IMMEDIATE")
+            try:
+                row = self.conn.execute("SELECT status FROM board_status WHERE board = ?", (board,)).fetchone()
+                old = "active" if row is None else str(row["status"])
+                if old == status:
+                    self.conn.execute("COMMIT")
+                    return None
+                self.conn.execute(
+                    "INSERT INTO board_status (board, status, changed_at, changed_by) VALUES (?,?,?,?) "
+                    "ON CONFLICT(board) DO UPDATE SET status = excluded.status, "
+                    "changed_at = excluded.changed_at, changed_by = excluded.changed_by",
+                    (board, status, int(ts), changed_by),
+                )
+                self.conn.execute(
+                    "INSERT INTO actions (ts, board, task_id, kind, detail) VALUES (?,?,?,?,?)",
+                    (int(ts), board, "", "board_status", f"{changed_by}: {old}->{status}"),
+                )
+                if status == "active":
+                    self.conn.execute(
+                        "UPDATE waits SET stage = NULL, last_sent_at = NULL WHERE board = ?", (board,)
+                    )
+                    for kind in ("esc_owner", "esc_copy", "esc_copytry"):
+                        prefix = f"{kind}:{board}:"
+                        self.conn.execute(
+                            "DELETE FROM kv WHERE substr(key, 1, ?) = ?", (len(prefix), prefix)
+                        )
+                self.conn.execute("COMMIT")
+            except BaseException:
+                self.conn.execute("ROLLBACK")
+                raise
+        return old
 
     # -- kv --------------------------------------------------------------
     def kv_get(self, key: str) -> Optional[str]:

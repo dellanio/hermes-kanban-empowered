@@ -40,6 +40,26 @@ def _register_worker_guard(ctx, settings) -> None:
         log.exception("kanban-empowered: failed to register the worker guard")
 
 
+def _register_board_status_hook(ctx, settings) -> None:
+    """Register the ``kanban_pre_claim`` veto (claims held on a suspended/done board), in every profile.
+
+    Claims happen in whichever process dispatches, so every profile subscribes; each one reads the
+    shared Store read-only (``settings.shared_state_dir``). Skipped when this Hermes build has no veto
+    hooks (``doctor`` reports it); the callback itself is fail-open.
+    """
+    try:
+        from .ke import hermes_api
+
+        if not hermes_api.veto_hooks_available():
+            return
+        from .ke.board_status import StatusReader, make_pre_claim_hook
+
+        reader = StatusReader(settings.shared_state_dir / "state.db")
+        ctx.register_hook("kanban_pre_claim", make_pre_claim_hook(reader))
+    except Exception:
+        log.exception("kanban-empowered: failed to register the board status claim hook")
+
+
 def _telegram_from_env(settings=None):
     """A Bot API client from ``TELEGRAM_BOT_TOKEN`` of this process, or ``None`` without a token.
 
@@ -158,6 +178,7 @@ def register(ctx) -> None:
         config_error = str(exc) or type(exc).__name__
     _apply_language(settings)
     _register_worker_guard(ctx, settings)
+    _register_board_status_hook(ctx, settings)
     _register_cli(ctx, settings, config_error)
     if config_error is None:  # never run the coordinator on guessed settings
         _start_coordinator(ctx, settings)

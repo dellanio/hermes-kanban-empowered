@@ -1184,3 +1184,25 @@ def test_every_ui_key_the_desktop_uses_is_in_the_catalog():
     used |= {"ui.status." + s for s in ("active", "suspended", "done")}
     missing = sorted(k for k in used if k not in messages.EN and not k.endswith("."))
     assert not missing, missing
+
+
+# -- review Minor 5: one failing board does not stop the scan -----------------------------------------
+def test_one_failing_board_does_not_stop_the_scan(tmp_path):
+    _statuses(tmp_path, a="suspended", b="suspended")
+    clock = Tick()
+    calls = []
+
+    def locate(board, task_id, *_rest):
+        calls.append(board)
+        if board == "a":
+            raise sqlite3.OperationalError("database is locked")
+        return task_id == "t_b" and board == "b"
+
+    from ke.board_status import make_pre_claim_hook
+
+    hook = make_pre_claim_hook(_reader(tmp_path, clock), locate=locate, boards=lambda: ["a", "b"], clock=clock)
+    assert hook(task_id="t_b", board="default") == SUSPENDED_EN
+    assert hook(task_id="t_x", board="default") is None  # fail-open for a card we could not place
+    n = len(calls)
+    assert hook(task_id="t_x", board="default") is None
+    assert len(calls) > n  # a miss with a failed board is not cached: board a may hold the card

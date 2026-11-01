@@ -30,7 +30,8 @@ dispatcher tick asks again. Therefore: the live boards are listed once per scan;
 card id (a hit until the statuses change, since cards never move between boards; a miss for
 ``NEGATIVE_TTL_S``; at most ``LOOKUP_CACHE_MAX`` ids); and the whole scan has a time budget,
 ``SCAN_BUDGET_S``, well under the core's 3 s cap. When the budget runs out the hook fails open (the claim
-proceeds), nothing is cached, and a warning is logged once per process. A single lookup cannot be
+proceeds), nothing is cached, and a warning is logged once per process. A board that cannot be read is
+skipped (the others are still checked); a miss with such a board is not cached. A single lookup cannot be
 interrupted, so the budget is checked between boards; the core's cap still bounds a lookup that hangs.
 """
 from __future__ import annotations
@@ -222,8 +223,8 @@ def make_pre_claim_hook(
             known, where = cache.get(key, tid, now)
             if not known:
                 where = _scan(tid, board, off, now)
-                if where is _OUT_OF_BUDGET:
-                    return None
+                if where is _UNKNOWN:
+                    return None  # out of budget, or a board could not be read: fail-open, not cached
                 cache.put(key, tid, where, None if where else now + NEGATIVE_TTL_S)
             if where is None:
                 return None
@@ -239,15 +240,20 @@ def make_pre_claim_hook(
         find = locate if locate is not None else (lambda b, t: hermes_api.task_exists(b, t, live=live))
         candidates = [b for b in sorted(off, key=lambda b: (b != hint, b)) if b in live_set]
         budget = SCAN_BUDGET_S if budget_s is None else budget_s
+        failed = False
         for n, candidate in enumerate(candidates):
             if clock() - started >= budget:
                 _warn_budget(tid, n, len(candidates))
-                return _OUT_OF_BUDGET
-            if find(candidate, tid):
-                return candidate
-        return None
+                return _UNKNOWN
+            try:
+                if find(candidate, tid):
+                    return candidate
+            except Exception as exc:  # one unreadable board must not let the other boards' cards through
+                failed = True
+                log.debug("kanban-empowered: could not look card %s up on board %s: %s", tid, candidate, exc)
+        return _UNKNOWN if failed else None
 
     return kanban_pre_claim
 
 
-_OUT_OF_BUDGET = object()
+_UNKNOWN = object()  # the scan could not decide (budget spent, or a board failed and nothing was found)

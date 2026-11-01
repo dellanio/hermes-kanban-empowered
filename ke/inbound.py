@@ -32,6 +32,9 @@ e. any other text -> it is the owner's answer: resolved, the text posted as a co
    so the agent continues with the feedback;
 f. several items and no number -> "which item?" (nothing changes).
 
+Steps a-e live in :func:`apply_answer`, shared with the Desktop dashboard's ``POST /answer`` (``ke.dashboard``),
+so an answer means the same thing wherever it is typed.
+
 A bare confirmation for an item that asks for a choice (it has options) also changes nothing: the
 reply asks for one of the listed letters. Replies to the pinned panel count only with an item
 number (anything else passes through to the agent); on a one-item reminder a leading number other
@@ -51,6 +54,7 @@ import logging
 import re
 import threading
 import time
+from dataclasses import dataclass
 from typing import Any, Callable, Optional
 
 from . import panel
@@ -367,61 +371,93 @@ def _act(
         return
     board, task_id, version = str(selected["board"]), str(selected["task_id"]), int(selected["version"])
     body = (event.text or "").strip() if body is None else body
+    name = _clip(getattr(source, "user_name", None) or getattr(event, "user_name", None) or sender)
+    outcome = apply_answer(
+        api, store, board, task_id, version, body, now,
+        detail=f"telegram:{sender}",
+        resolved_comment=lambda said: t("inbound.comment.telegram", name=name, user_id=sender, text=said),
+        note_comment=lambda text: t("inbound.comment.note", name=name, user_id=sender, text=text),
+    )
+    _reply(telegram, int(chat), int(message), outcome.message)
+
+
+@dataclass(frozen=True)
+class Answer:
+    """What a reply did to its item: ``result`` is ``resolved`` | ``noted`` | ``ambiguous`` | ``changed`` |
+    ``error``, ``message`` the confirmation for the person (translated), ``held`` the cards that were waiting
+    on a resolved item and ``kind`` the classification (:func:`classify`)."""
+
+    result: str
+    message: str
+    held: tuple = ()
+    kind: str = ""
+
+
+def apply_answer(
+    api: Any,
+    store: Any,
+    board: str,
+    task_id: str,
+    version: int,
+    body: str,
+    now: float,
+    *,
+    detail: str,
+    resolved_comment: Callable[[str], str],
+    note_comment: Callable[[str], str],
+) -> Answer:
+    """Classify ``body`` against the item's ask and apply it: THE resolution shared by every reply channel.
+
+    The Telegram reply (after its authentication, dedupe and TTL checks) and the Desktop dashboard's
+    ``POST /answer`` both land here, so a reply means the same thing wherever it is typed. The live block
+    version is checked again under the resolve lock (:func:`resolve_wait` / :func:`note_wait`).
+    ``resolved_comment(said)`` / ``note_comment(text)`` word the card comment of the channel; ``detail`` is
+    the audit detail of the ``human_done`` / ``human_note`` action.
+    """
     try:
         live, ask, reason, card_title = _item_ask(api, board, task_id, version)
     except Exception:
-        log.exception("kanban-empowered: reading %s/%s for a Telegram reply failed", board, task_id)
-        _reply(telegram, int(chat), int(message), t("inbound.error"))
-        return
+        log.exception("kanban-empowered: reading %s/%s for a reply failed", board, task_id)
+        return Answer("error", t("inbound.error"))
     if not live:
-        _reply(telegram, int(chat), int(message), t("inbound.changed"))
-        return
+        return Answer("changed", t("inbound.changed"))
     kind, value = classify(body, ask)
     if kind in ("empty", "placeholder"):
-        _reply(telegram, int(chat), int(message), t("reply.empty", word=reply_hint(ask)))
-        return
+        return Answer("ambiguous", t("reply.empty", word=reply_hint(ask)), kind=kind)
     if kind == "unknown_option":
         if ask is not None and ask.options:
             text = t("reply.option_unknown", letter=value, options=", ".join(k for k, _ in ask.options))
         else:
             text = t("reply.option_none")
-        _reply(telegram, int(chat), int(message), text)
-        return
+        return Answer("ambiguous", text, kind=kind)
     if kind == "need_option":
         options = ", ".join(k for k, _ in ask.options)
-        _reply(telegram, int(chat), int(message), t("reply.option_needed", options=options))
-        return
-    name = _clip(getattr(source, "user_name", None) or getattr(event, "user_name", None) or sender)
+        return Answer("ambiguous", t("reply.option_needed", options=options), kind=kind)
     if kind == "negation":
-        note = t("inbound.comment.note", name=name, user_id=sender, text=_clip(body, _ANSWER_TEXT_MAX))
+        note = note_comment(_clip(body, _ANSWER_TEXT_MAX))
         try:
-            noted = note_wait(api, store, board, task_id, version, note, now, f"telegram:{sender}")
+            noted = note_wait(api, store, board, task_id, version, note, now, detail)
         except Exception:
             log.exception("kanban-empowered: noting a reply on %s/%s failed", board, task_id)
-            _reply(telegram, int(chat), int(message), t("inbound.error"))
-            return
-        _reply(telegram, int(chat), int(message), t("reply.noted") if noted else t("inbound.changed"))
-        return
+            return Answer("error", t("inbound.error"), kind=kind)
+        return Answer("noted", t("reply.noted"), kind=kind) if noted else Answer("changed", t("inbound.changed"), kind=kind)
     if kind == "option":
         said = t("inbound.comment.choice", letter=value[0], label=_clip(value[1]))
     elif kind == "answer":
         said = _clip(body, _ANSWER_TEXT_MAX)
     else:
         said = _clip(body)
-    comment = t("inbound.comment.telegram", name=name, user_id=sender, text=said)
     try:
-        done, held = resolve_wait(api, store, board, task_id, version, comment, now, f"telegram:{sender}")
+        done, held = resolve_wait(api, store, board, task_id, version, resolved_comment(said), now, detail)
     except Exception:
-        log.exception("kanban-empowered: resolving %s/%s from Telegram failed", board, task_id)
-        _reply(telegram, int(chat), int(message), t("inbound.error"))
-        return
+        log.exception("kanban-empowered: resolving %s/%s from a reply failed", board, task_id)
+        return Answer("error", t("inbound.error"), kind=kind)
     if not done:
-        _reply(telegram, int(chat), int(message), t("inbound.changed"))
-        return
+        return Answer("changed", t("inbound.changed"), kind=kind)
     board_label = board_title(board, display_name(api, board), ask.subject if ask is not None else "")
     action = _clip_to(short_action(ask, reason, card_title), _ACTION_SHOWN)
-    _reply(telegram, int(chat), int(message),
-           render_answer(board_label, action, len(held), choice=value if kind == "option" else None))
+    message = render_answer(board_label, action, len(held), choice=value if kind == "option" else None)
+    return Answer("resolved", message, tuple(held), kind)
 
 
 def _first_hint(api: Any, items: list) -> str:

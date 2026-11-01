@@ -1386,3 +1386,12 @@ def test_concurrent_opens_apply_a_non_idempotent_step_once(tmp_path, monkeypatch
     assert stores[0].conn.execute("PRAGMA user_version").fetchone()[0] == 3
     for st in stores:
         st.close()
+
+
+# -- review Minor 9: the suspended section counts projects, like the panel line ----------------------
+def test_desktop_suspended_header_counts_distinct_projects():
+    src = _js()
+    block = src[src.index("function SuspendedProjects("):][:1500]
+    assert "new Set(items.map(item => item.board)).size" in block
+    assert "t('ui.section.suspended') + ' (' + projects + ')'" in block
+    assert "' (' + items.length + ')'" not in block

@@ -469,6 +469,7 @@ function SuspendedProjects({ items, t, onOpen }) {
     setOpenState(!open)
     storageSet('suspendedOpen', !open)
   }
+  const projects = new Set(items.map(item => item.board)).size // projects, like the Telegram panel line
 
   return jsxs('section', {
     className: open ? 'ke-section' : 'ke-section ke-section-closed',
@@ -485,7 +486,7 @@ function SuspendedProjects({ items, t, onOpen }) {
             className: 'ke-head-toggle',
             children: [
               jsx(Codicon, { name: open ? 'chevron-down' : 'chevron-right' }),
-              jsx('span', { className: 'ke-section-title', children: t('ui.section.suspended') + ' (' + items.length + ')' })
+              jsx('span', { className: 'ke-section-title', children: t('ui.section.suspended') + ' (' + projects + ')' })
             ]
           })
         })

@@ -158,6 +158,8 @@ generated from the `config_schema` in [`plugin.yaml`](plugin.yaml). It edits the
 | Pin live panel | `telegram.pin_live_panel` |
 | Stuck-card alert after | `guards.alert_after` |
 | Infra undo budget / window | `infra_failures.undo_budget.count` / `.window` |
+| Show the sidebar menu | `show_sidebar_menu` (Desktop dashboard, see below) |
+| Show the Kanban button | `show_kanban_button` (Desktop dashboard, see below) |
 
 The form stores each value as a flat key (`plugins.entries.kanban-empowered.settings.default_owner`,
 not `...settings.waits.default_owner`), because that is how Hermes Desktop reads and writes plugin
@@ -194,6 +196,33 @@ Keys the form cannot express stay in `config.yaml`: `coordinator_profile`,
 
 [`docs/catalog-entry.example.yaml`](docs/catalog-entry.example.yaml) shows the entry a curated
 Hermes plugin catalog would carry (the card image comes from there, not from `plugin.yaml`).
+
+## Desktop dashboard (Empowered)
+
+The package also ships a Hermes Desktop half (`desktop/plugin.js`) and its backend
+(`dashboard/plugin_api.py`, mounted by Hermes at `/api/plugins/kanban-empowered/`). Two switches,
+both off until you turn them on, as for every Desktop plugin: the agent plugin enabled in the
+profile (`plugins.enabled`, which also mounts the backend; restart the gateway after enabling) and
+the Desktop half enabled in **Capabilities > Plugins**.
+
+- **Kanban-Empowered** in the sidebar (setting *Show the sidebar menu*) opens the page; a compact
+  **Empowered** button appears in the header of the Kanban page (setting *Show the Kanban button*;
+  needs the bundled Kanban Desktop plugin enabled and a Desktop that exports the page-header area).
+  The palette command *Kanban Empowered* opens it too.
+- The page shows four counters (need you, impacted cards, active workers, incidents), **Needs you**
+  (sorted by cards held behind, then age; infrastructure cards whose undo budget is used up in red),
+  **Running now**, **Coordinator at work** (unblocks via Telegram/desktop/CLI, released guards,
+  undone infrastructure failures, reminders sent, panel updates) and **Infrastructure** (failures in
+  the last hour, systemic alert, Telegram path, cards out of retries). It refreshes every 10 s and
+  can be filtered by board.
+- **View details** opens a drawer with the project, the request exactly as the Telegram reminder
+  words it, the options, the explain conditions and the last comments. **Send** answers it the same
+  way a Telegram reply would (an option letter or a confirmation word resolves; a "not yet" only adds
+  a comment; any other text is the answer and is posted on the card) and the card comment says
+  "via Kanban-Empowered (desktop)". The answer is applied only while the card is still blocked on the
+  block you were looking at.
+
+Texts follow the plugin language (`language`, else Hermes'); the product name is not translated.
 
 ## Commands
 

@@ -160,9 +160,26 @@ settings. The plugin folds those flat keys onto the nested ones, with this prece
 3. `telegram_owner_id` becomes `owner_ids: {<default owner>: <id>}` only when `telegram.owner_ids`
    is not set; an explicit `owner_ids` mapping always wins.
 
-Hand-written nested config keeps working unchanged. A form field shows the schema default until it is
-saved, even when `config.yaml` sets the nested key; the nested value still applies until the form
-writes that field. Keys the form cannot express stay in `config.yaml`: `coordinator_profile`,
+Hand-written nested config keeps working unchanged. When a form value differs from a nested
+`config.yaml` value it shadows, the plugin logs one warning per load and `hermes kanban-empowered doctor`
+prints a `config_conflict:` row for each; a `telegram_owner_id` that an explicit `owner_ids` leaves
+unused (no id there for the default owner) is reported the same way.
+
+Limits of the form:
+
+- It shows the schema default for a field until that field is saved, not the value that is effective
+  from `config.yaml`. Until the form writes the field, the nested value (or the built-in default) applies.
+- Booleans and numbers cannot be unset from the form: once saved, `Require structured ask`, `Pin live
+  panel` and `Infra undo budget` always hold a value. To go back to the nested or default value, delete
+  the flat key from `config.yaml`.
+- `Owner Telegram id` cannot be cleared from the form (an empty number is rejected). Remove
+  `telegram_owner_id` from `config.yaml` to drop it.
+- A blank `Reminders` field means the default (`30m,2h`). "No reminders" cannot be set from the form.
+- `Escalate to` only names a contact; that contact needs a chat id in `telegram.owner_ids`, which can
+  only be edited in `config.yaml` (the form has no mapping field). Without it, escalation copies are not sent
+  and the coordinator warns once.
+
+Keys the form cannot express stay in `config.yaml`: `coordinator_profile`,
 `shared_state_dir`, `telegram.owner_ids` (several owners), `telegram.reply_ttl`, `boards`,
 `waits.human_kinds` and `infra_failures.alert_count` / `alert_window` / `patterns`.
 

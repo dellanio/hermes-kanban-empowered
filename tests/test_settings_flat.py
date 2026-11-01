@@ -126,3 +126,69 @@ def test_from_ctx_flat_wins_over_nested():
 
     ctx = FlatCtx({"default_owner": "flat", "waits": {"default_owner": "nested"}})
     assert Settings.from_ctx(ctx).default_owner == "flat"
+
+
+# ---- shadowing safety net (conflicts: warning + Settings.conflicts, shown by doctor) -------------
+
+
+def test_conflict_when_form_value_differs_from_nested(caplog):
+    import logging
+
+    from ke.settings import Settings
+
+    with caplog.at_level(logging.WARNING, logger="ke.settings"):
+        s = Settings.from_mapping({"default_owner": "flat", "waits": {"default_owner": "nested"}})
+    assert s.default_owner == "flat"
+    assert s.conflicts == (("override", "default_owner", "waits.default_owner", "flat", "nested"),)
+    msgs = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
+    assert len(msgs) == 1
+    assert "form value flat overrides config.yaml waits.default_owner nested" in msgs[0]
+
+
+def test_no_conflict_when_equal_equivalent_or_unset(caplog):
+    import logging
+
+    from ke.settings import Settings
+
+    with caplog.at_level(logging.WARNING, logger="ke.settings"):
+        s = Settings.from_mapping({
+            "default_owner": "ana", "waits": {"default_owner": "ana", "reminders": ["30m", "2h"]},
+            "reminders": "30m, 2h", "guard_alert_after": "30m", "guards": {"alert_after": 1800},
+            "pin_live_panel": True, "telegram": {"pin_live_panel": "yes"},
+            "undo_budget_count": 2, "infra_failures": {"undo_budget": 2},
+            "escalate_after": "8h",  # nested unset
+        })
+    assert s.conflicts == () and not caplog.records
+
+
+def test_conflict_for_undo_budget_inside_mapping_and_bool():
+    from ke.settings import Settings
+
+    s = Settings.from_mapping({
+        "undo_budget_window": "2d", "infra_failures": {"undo_budget": {"count": 1, "window": "1d"}},
+        "pin_live_panel": False, "telegram": {"pin_live_panel": True},
+    })
+    keys = {c[1]: c for c in s.conflicts}
+    assert keys["undo_budget_window"][2:] == ("infra_failures.undo_budget.window", "2d", "1d")
+    assert keys["pin_live_panel"][2:] == ("telegram.pin_live_panel", "False", "True")
+    assert "undo_budget_count" not in keys
+
+
+def test_blank_flat_value_is_no_conflict():
+    from ke.settings import Settings
+
+    assert Settings.from_mapping({"default_owner": "", "waits": {"default_owner": "n"}}).conflicts == ()
+
+
+def test_conflict_when_owner_id_ignored_by_explicit_owner_ids(caplog):
+    import logging
+
+    from ke.settings import Settings
+
+    with caplog.at_level(logging.WARNING, logger="ke.settings"):
+        s = Settings.from_mapping({"telegram_owner_id": 5, "telegram": {"owner_ids": {"bob": 3}}})
+    assert s.owner_ids == {"bob": 3}
+    assert s.conflicts == (("owner_id_ignored", "telegram_owner_id", "telegram.owner_ids", "5", "sponsor"),)
+    assert any("telegram_owner_id 5 is ignored" in r.getMessage() for r in caplog.records)
+    # the default owner has an id there: nothing is lost
+    assert Settings.from_mapping({"telegram_owner_id": 5, "telegram": {"owner_ids": {"sponsor": 3}}}).conflicts == ()

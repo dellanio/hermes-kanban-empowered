@@ -32,6 +32,8 @@ EN: dict[str, str] = {
     "doctor.token.present": "present",
     "doctor.token.missing": "missing",
     "doctor.owner_chats": "{n} configured",
+    "doctor.conflict.override": "form value {form_value} overrides config.yaml {config_key} {config_value}",
+    "doctor.conflict.owner_id": "telegram_owner_id {form_value} is ignored: telegram.owner_ids is set and has no id for {owner}",
     # explain: header and lookup
     "explain.header": "{id}  {title}  {status} {age} ago",
     "explain.not_found": "card {card} not found {where}",

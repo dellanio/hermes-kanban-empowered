@@ -287,5 +287,11 @@ def run_doctor(settings: Settings, config_error: Optional[str] = None) -> None:
     ]
     if config_error:
         rows.append(("config", t("doctor.config_invalid", error=config_error)))
+    for kind, _flat, nested, form_value, config_value in settings.conflicts:
+        if kind == "override":
+            text = t("doctor.conflict.override", form_value=form_value, config_key=nested, config_value=config_value)
+        else:
+            text = t("doctor.conflict.owner_id", form_value=form_value, owner=config_value)
+        rows.append(("config_conflict", text))
     for key, value in rows:
         print(f"{key}: {value}")

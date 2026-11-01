@@ -340,3 +340,38 @@ def test_worker_guard_survives_a_hermes_module_move(kanban_home, tmp_path, load_
     guard = ctx.hooks["pre_tool_call"]
     r = guard(tool_name="kanban_block", args={"reason": "x", "kind": "needs_input"})
     assert r["action"] == "block" and "How to reply:" in r["message"]
+
+
+def test_doctor_lists_config_conflicts(kanban_home, capsys, tmp_path):
+    from ke import cli
+    from ke.settings import Settings
+
+    s = Settings.from_mapping({
+        "shared_state_dir": str(tmp_path / "state"), "default_owner": "flat",
+        "telegram_owner_id": 5, "telegram": {"owner_ids": {"bob": 3}}, "waits": {"default_owner": "nested"},
+    })
+    cli.run_doctor(s)
+    lines = [ln for ln in capsys.readouterr().out.splitlines() if ln.startswith("config_conflict: ")]
+    assert lines == [
+        "config_conflict: form value flat overrides config.yaml waits.default_owner nested",
+        "config_conflict: telegram_owner_id 5 is ignored: telegram.owner_ids is set and has no id for flat",
+    ]
+
+
+def test_doctor_config_conflicts_in_pt_br(kanban_home, capsys, tmp_path, pt_br):  # noqa: F811
+    from ke import cli
+    from ke.settings import Settings
+
+    s = Settings.from_mapping({
+        "shared_state_dir": str(tmp_path / "state"), "default_owner": "flat", "waits": {"default_owner": "nested"},
+    })
+    cli.run_doctor(s)
+    out = capsys.readouterr().out
+    assert "config_conflict: " in out and "waits.default_owner" in out and "overrides" not in out
+
+
+def test_doctor_no_conflict_rows_without_conflicts(kanban_home, capsys, tmp_path):
+    from ke import cli
+
+    cli.run_doctor(settings_for_test(tmp_path))
+    assert "config_conflict" not in capsys.readouterr().out

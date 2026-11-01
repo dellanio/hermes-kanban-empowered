@@ -14,11 +14,14 @@ keys keep working unchanged for people who edit ``config.yaml`` by hand.
 """
 from __future__ import annotations
 
+import logging
 import os
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Mapping, Optional
+
+_log = logging.getLogger(__name__)
 
 DEFAULT_INFRA_PATTERNS: tuple[str, ...] = (
     "Kanban execution unknown",
@@ -160,29 +163,70 @@ def _set_path(root: dict[str, Any], dotted: str, value: Any) -> None:
     cur[leaf] = value
 
 
-def _fold_form_keys(m: Mapping[str, Any]) -> Mapping[str, Any]:
-    """Overlay the settings form's flat keys onto a copy of the nested mapping (flat wins; blank ignored)."""
+def _nested_value(m: Mapping[str, Any], nested: str) -> Any:
+    """The config.yaml value a flat form key stands for (a bare-int ``undo_budget`` is its count)."""
+    if nested.startswith("infra_failures.undo_budget."):
+        budget = _get(m, "infra_failures.undo_budget")
+        if not isinstance(budget, Mapping):
+            return budget if nested.endswith(".count") else None
+        return budget.get(nested.rsplit(".", 1)[1])
+    return _get(m, nested)
+
+
+# How to compare a flat form value with its nested twin so "30m,2h" and [30m, 2h] are not a conflict.
+_NORMALIZERS: dict[str, Any] = {
+    "reminders": lambda v: _durations(v), "digest": lambda v: _parse_digest(v),
+    "escalate_after": parse_duration, "guard_alert_after": parse_duration,
+    "undo_budget_window": parse_duration, "undo_budget_count": int,
+    "pin_live_panel": lambda v: _parse_bool(v, "pin_live_panel"),
+    "require_structured_ask": lambda v: _parse_bool(v, "require_structured_ask"),
+}
+
+
+def _same(flat: str, a: Any, b: Any) -> bool:
+    norm = _NORMALIZERS.get(flat, lambda v: str(v).strip())
+    try:
+        return norm(a) == norm(b)
+    except (ValueError, TypeError):
+        return False
+
+
+Conflict = tuple[str, str, str, str, str]  # (kind, form key, config.yaml key, form value, config value)
+
+
+def _fold_form_keys(m: Mapping[str, Any]) -> tuple[Mapping[str, Any], list[Conflict]]:
+    """Overlay the settings form's flat keys onto a copy of the nested mapping (flat wins; blank ignored).
+
+    Also returns the shadowing it did: every non-blank flat value that replaces a DIFFERENT, set nested value.
+    """
     out: Optional[dict[str, Any]] = None
+    conflicts: list[Conflict] = []
     for flat, nested in _FORM_ALIASES.items():
         value = m.get(flat)
         if _blank(value):
             continue
+        shadowed = _nested_value(m, nested)
+        if not _blank(shadowed) and not _same(flat, value, shadowed):
+            conflicts.append(("override", flat, nested, str(value), str(shadowed)))
         if out is None:
             out = dict(m)
         _set_path(out, nested, value)
-    return m if out is None else out
+    return (m if out is None else out), conflicts
 
 
-def _owner_ids(m: Mapping[str, Any], default_owner: str) -> dict[str, int]:
+def _owner_ids(m: Mapping[str, Any], default_owner: str) -> tuple[dict[str, int], list[Conflict]]:
     """``telegram.owner_ids`` when set; otherwise the form's single ``telegram_owner_id`` as the default
-    owner's id."""
+    owner's id. Also reports a ``telegram_owner_id`` that an explicit ``owner_ids`` leaves without effect."""
     explicit = _get(m, "telegram.owner_ids") or {}
-    if explicit:
-        return {str(k): int(v) for k, v in dict(explicit).items()}
     single = m.get("telegram_owner_id")
+    if explicit:
+        ids = {str(k): int(v) for k, v in dict(explicit).items()}
+        lost = not _blank(single) and default_owner not in ids
+        return ids, ([("owner_id_ignored", "telegram_owner_id", "telegram.owner_ids", str(single), default_owner)]
+                     if lost else [])
     if _blank(single):
-        return {}
-    return {default_owner: int(single)}
+        return {}, []
+    return {default_owner: int(single)}, []
 
 
 def _durations(value: Any) -> tuple[int, ...]:
@@ -223,6 +267,8 @@ class Settings:
     infra_patterns: tuple[str, ...] = DEFAULT_INFRA_PATTERNS
     reply_ttl_s: int = 604800
     language: str | None = None  # plugin messages' language ("pt", "en"...); None follows Hermes
+    # Settings-form values that shadow or lose against config.yaml (see Conflict); shown by doctor.
+    conflicts: tuple[Conflict, ...] = field(default=(), compare=False)
 
     def __post_init__(self) -> None:
         if self.shared_state_dir is None:
@@ -235,7 +281,7 @@ class Settings:
     def from_mapping(cls, m: Mapping[str, Any]) -> "Settings":
         """Build from a nested mapping shaped like the plugin's ``settings`` subtree."""
         defaults = cls()  # for non-trivial defaults
-        m = _fold_form_keys(m)
+        m, conflicts = _fold_form_keys(m)
 
         def dur(key: str, field_name: str) -> int:
             v = _get(m, key)
@@ -275,11 +321,20 @@ class Settings:
 
         coordinator_profile = str(_get(m, "coordinator_profile", defaults.coordinator_profile))
         default_owner = str(_get(m, "waits.default_owner", defaults.default_owner))
+        owner_ids, owner_conflicts = _owner_ids(m, default_owner)
+        conflicts += owner_conflicts
+        for kind, flat, nested, form_value, config_value in conflicts:
+            if kind == "override":
+                _log.warning("kanban-empowered: form value %s overrides config.yaml %s %s (settings form key %s)",
+                             form_value, nested, config_value, flat)
+            else:
+                _log.warning("kanban-empowered: telegram_owner_id %s is ignored: telegram.owner_ids is set and "
+                             "has no id for %s", form_value, config_value)
         return cls(
             mode=mode,
             coordinator_profile=coordinator_profile,
             shared_state_dir=Path(state_dir) if state_dir else default_shared_state_dir(coordinator_profile),
-            owner_ids=_owner_ids(m, default_owner),
+            owner_ids=owner_ids,
             pin_live_panel=flag("telegram.pin_live_panel", "pin_live_panel"),
             default_owner=default_owner,
             board_owner=_board_owners(m),
@@ -297,6 +352,7 @@ class Settings:
             infra_patterns=_strs(patterns) if patterns is not None else defaults.infra_patterns,
             reply_ttl_s=dur("telegram.reply_ttl", "reply_ttl_s"),
             language=str(language).strip().lower() or None if language else None,
+            conflicts=tuple(conflicts),
         )
 
     @classmethod

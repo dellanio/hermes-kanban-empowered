@@ -135,7 +135,8 @@ def test_section8_fixture_is_all_non_default():
     from ke.settings import Settings
     s, d = Settings.from_mapping(SECTION_8), Settings.from_mapping({})
     same = [f.name for f in dataclasses.fields(Settings)
-            if getattr(s, f.name) == getattr(d, f.name)]
+            if f.name != "conflicts"  # derived diagnostics, not a setting
+            and getattr(s, f.name) == getattr(d, f.name)]
     assert same == []
 
 

@@ -6,7 +6,7 @@ name: kanban-empowered
 title: "Kanban Empowered"
 repo: https://github.com/dellanio/hermes-kanban-empowered
 sha: "0000000000000000000000000000000000000000"   # 40-hex commit SHA to pin (placeholder)
-description: "Makes the Hermes kanban work for a fleet of agent profiles and a human in the loop: human waits with an owner, deadline and Telegram reminders, item-linked replies that unblock cards, guard alerts for stuck cards, infrastructure-failure recovery within a per-card budget, a pinned live panel and explain/status commands. Ships an optional core patch that adds kanban veto hooks. Disclosure: reads and writes only its own SQLite state under plugin-data/kanban-empowered; calls the Telegram Bot API (sendMessage, editMessageText, pinChatMessage) with the gateway's TELEGRAM_BOT_TOKEN; no other network access, no telemetry."
+description: "Makes the Hermes kanban work for a fleet of agent profiles and a human in the loop: human waits with an owner, deadline and Telegram reminders, item-linked replies that unblock cards, guard alerts for stuck cards, infrastructure-failure recovery within a per-card budget, a pinned live panel and explain/status commands. Ships an optional core patch that adds kanban veto hooks. Disclosure: reads the Hermes kanban board databases and, through Hermes' kanban API, adds comments, unblocks and reassigns cards; keeps its own SQLite state under plugin-data/kanban-empowered; calls the Telegram Bot API (sendMessage, editMessageText, pinChatMessage) with the gateway's TELEGRAM_BOT_TOKEN and never polls the bot; no other network access and no telemetry."
 maintainer: dellanio
 tier: community
 category: automation

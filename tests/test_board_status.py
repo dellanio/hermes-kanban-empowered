@@ -1267,3 +1267,36 @@ def test_pinned_kanban_db_does_not_turn_the_hook_fail_closed(kanban_home, tmp_pa
     with kb.pin_first_board_resolution():
         hook = make_pre_claim_hook(StatusReader(tmp_path / "state" / "state.db"))
         assert hook(task_id=live, board="default", assignee="dev") == SUSPENDED_EN
+
+
+# -- review Minor 6: never run Hermes' first-time init of another board inside the hook --------------
+def test_hook_skips_boards_this_process_never_opened(kanban_home, tmp_path, monkeypatch):
+    """The claimed card's board is always open in the claiming process; any other board not yet opened here
+    would make Hermes' connect() run its full first-time init (integrity check, schema, migrations) under
+    the claim's write lock. Such a board cannot hold the card being claimed, so it is skipped."""
+    from hermes_cli import kanban_db as kb
+    from hermes_cli import kanban_db_boards as kbb
+    from hermes_cli import kanban_db_connect as kbc
+    from ke import hermes_api
+    from ke.board_status import StatusReader, make_pre_claim_hook
+    from conftest import create_task
+
+    kbb.create_board("frozen")
+    with hermes_api.connect("frozen") as conn:
+        frozen = create_task(conn, title="frozen", assignee="dev")
+    with hermes_api.connect("default") as conn:
+        live = create_task(conn, title="live", assignee="dev")
+    s = _store(tmp_path)
+    s.set_board_status("frozen", "suspended", 1, "cli")
+    s.close()
+    assert hermes_api.board_opened_here("frozen") and hermes_api.board_opened_here("default")
+    frozen_path = str(kb.kanban_db_path(board="frozen").resolve())
+    monkeypatch.setattr(kbc, "_INITIALIZED_PATHS", set(kbc._INITIALIZED_PATHS) - {frozen_path})
+    assert not hermes_api.board_opened_here("frozen")
+    opened = []
+    real_connect = hermes_api.connect
+    monkeypatch.setattr(hermes_api, "connect", lambda b: opened.append(b) or real_connect(b))
+    hook = make_pre_claim_hook(StatusReader(tmp_path / "state" / "state.db"))
+    assert hook(task_id=live, board="default", assignee="dev") is None
+    assert opened == []  # the never-opened board was not touched
+    assert not hermes_api.claimable_task("frozen", frozen, "dev")

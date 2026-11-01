@@ -26,7 +26,10 @@ board being claimed is in WAL mode, so the claim's open write transaction does n
 random per card but only unique per board, so a hit must also be a ``ready`` card with the claimed
 card's assignee (``hermes_api.claimable_task``) before it counts. A board this process cannot read as
 itself (a pinned ``HERMES_KANBAN_DB`` makes every slug resolve to the pinned file) is never searched, so a
-pinned worker or operator gateway cannot wrongly refuse; the pinned board itself is still checked.
+pinned worker or operator gateway cannot wrongly refuse; the pinned board itself is still checked. Nor
+is a board this process never opened: the claiming process always has the claimed card's board open (it
+holds a connection to it), and opening another one here would run Hermes' first-time init (integrity
+check, schema, migrations, under its process-wide init lock) inside the claim's write transaction.
 
 Cost. The scan runs under the claimed board's write lock and a refused card stays ``ready``, so every
 dispatcher tick asks again. Therefore: the live boards are listed once per scan; the answer is cached per

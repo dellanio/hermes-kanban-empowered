@@ -56,14 +56,29 @@ def _resolves_to_own_db(board: str) -> bool:
         return False
 
 
+def board_opened_here(board: str) -> bool:
+    """True when this process has already opened (initialized) ``board``'s kanban DB, so ``connect`` takes
+    Hermes' fast path instead of the first-time init (cross-process lock, integrity check, schema,
+    migrations). True when this Hermes build does not expose that cache (the caller then simply opens it)."""
+    initialized = getattr(_kbc, "_INITIALIZED_PATHS", None)
+    if initialized is None:
+        return True
+    try:
+        return str(_kb.kanban_db_path(board=board).resolve()) in initialized
+    except (OSError, ValueError):
+        return False
+
+
 def claimable_task(board: str, tid: str, assignee=None, live=None) -> bool:
     """True when ``tid`` is a ``ready`` card of the live board ``board`` and, when ``assignee`` is given, is
     assigned to it: the card a ``kanban_pre_claim`` call is about (ids are only unique per board, so a card
     of another board with the same id does not match). Never opens an unknown or archived board, and False
-    for a board this context cannot read as itself (a pinned ``HERMES_KANBAN_DB`` points elsewhere)."""
+    for a board this context cannot read as itself (a pinned ``HERMES_KANBAN_DB`` points elsewhere) or that
+    this process never opened (the claiming process always has the claimed card's board open, so such a
+    board cannot hold that card, and opening it would run Hermes' full first-time init)."""
     if not board or board not in (boards() if live is None else live):
         return False
-    if not _resolves_to_own_db(board):
+    if not _resolves_to_own_db(board) or not board_opened_here(board):
         return False
     with connect(board) as conn:
         task = _kb.get_task(conn, tid)

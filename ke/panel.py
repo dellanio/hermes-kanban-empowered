@@ -6,9 +6,10 @@ keeps ONE pinned Telegram message up to date by editing it in place (see
 ``Coordinator.update_panel``) and ``hermes kanban-empowered status --watch`` redraws the terminal
 view every few seconds.
 
-Replies to the panel. The "Needs you" items are numbered, and ``"1 done"`` answered to the
-panel resolves item 1 exactly like a reply to a reminder (same authentication, version and TTL
-rules, see ``inbound``). Because the message is edited in place its numbering changes over time,
+Replies to the panel. The pending items are numbered (①, ②...), and ``"1 — done"`` answered to
+the panel resolves item 1 exactly like a reply to a reminder (same authentication, version, TTL
+and classification rules, see ``inbound``). The Telegram panel uses the reminders' vocabulary and
+shows no card ids; the terminal view keeps them (it is the CLI). Because the message is edited in place its numbering changes over time,
 so the panel is recorded as ``sent_messages(kind="panel")`` whose items are the CURRENT numbered
 list ``[{board, task_id, version}]``, and the last two lists (plus the last one known to have
 been applied) are kept with the time each became current (``kv panel_hist:<chat>:<message>``). A reply is resolved against the list that was
@@ -25,10 +26,24 @@ from typing import Any, Optional
 
 from . import conditions, hermes_api
 from .asks import parse_ask
-from .messages import TELEGRAM_LIMIT, _clip_to, _guard_reason_text, _prefix, _tg_len, human_age, t
+from .messages import (
+    TELEGRAM_LIMIT,
+    _clip_to,
+    _guard_reason_text,
+    _prefix,
+    _tg_len,
+    board_title,
+    circled,
+    human_age,
+    natural_age,
+    plural,
+    reply_hint,
+    short_action,
+    t,
+)
 from .settings import Settings
 from .store import Store
-from .waits import current_block, held_behind
+from .waits import current_block, display_name, held_behind
 
 MAX_ITEMS = 10  # "Needs you" items shown (more are summarized as "and N more")
 NEED_MAX = 120  # characters of the request shown per item
@@ -65,7 +80,10 @@ def _enrich_waits(store: Store, api: Any, waits: list[dict]) -> list[dict]:
             for w in group:
                 if w["task_id"] not in done:
                     row = store.latest_wait(board, w["task_id"])
-                    out.append({**w, "version": int(row["version"]) if row else 0, "need": "", "held": 0})
+                    out.append({
+                        **w, "version": int(row["version"]) if row else 0, "need": "", "held": 0,
+                        "hint": t("waits.default_word"), "display": board_title(board),
+                    })
     return out
 
 
@@ -73,12 +91,13 @@ def _enrich_one(api: Any, conn: Any, w: dict) -> dict:
     block = current_block(api.task(conn, w["task_id"]), api.events(conn, w["task_id"]))
     reason = block.reason if block is not None else ""
     ask = parse_ask(reason)
-    need = ask.need if ask is not None else reason
     return {
         **w,
         "version": block.version if block is not None else 0,
-        "need": _clip_to(need, NEED_MAX),
+        "need": _clip_to(short_action(ask, reason) if (ask is not None or reason.strip()) else "", NEED_MAX),
         "held": len(held_behind(api, conn, w["task_id"])),
+        "hint": reply_hint(ask),
+        "display": board_title(w["board"], display_name(api, w["board"]), ask.subject if ask is not None else ""),
     }
 
 
@@ -97,7 +116,10 @@ def build_snapshot(store: Store, api: Any, now: float, settings: Optional[Settin
     last = None
     if resolved:
         a = max(resolved, key=lambda r: (r["ts"], r["id"]))
-        last = {"board": a["board"], "task_id": a["task_id"], "kind": a["kind"], "ts": a["ts"]}
+        last = {
+            "board": a["board"], "task_id": a["task_id"], "kind": a["kind"], "ts": a["ts"],
+            "display": board_title(a["board"], display_name(api, a["board"])),
+        }
     return Snapshot(
         ts=now,
         running=fs["running"],
@@ -122,20 +144,30 @@ def _clock(ts: float) -> str:
 def _head(s: Snapshot) -> list[str]:
     return [
         t("panel.title", time=_clock(s.ts)),
-        t("panel.counts", running=len(s.running), held=len(s.held), waits=len(s.human_waits)),
+        t("panel.counts", running=len(s.running), held=len(s.held),
+          pending=plural("waits.pending", len(s.human_waits))),
     ]
 
 
 def _needs(shown: list[dict], total: int) -> list[str]:
+    """The numbered pending items of the Telegram panel (no ids, the reminders' vocabulary)."""
     if not total:
         return ["", t("panel.nothing")]
-    lines = ["", t("panel.needs")]
+    lines: list[str] = []
     for n, w in enumerate(shown, start=1):
-        need = _clip_to(w.get("need") or w.get("title") or w["task_id"], NEED_MAX)  # one line, no fake numbered lines
-        lines.append(t("panel.item.line", n=n, board=w["board"], need=need))
-        lines.append(t("panel.item.detail", id=w["task_id"], age=human_age(w.get("age_s", 0)), held=w.get("held", 0)))
+        held = int(w.get("held", 0))
+        age = natural_age(w.get("age_s", 0))
+        title = w.get("display") or board_title(w["board"])
+        need = _clip_to(w.get("need") or w.get("title") or "", NEED_MAX)  # one line, no fake numbered lines
+        lines += ["", f"{circled(n)} {title}"]
+        lines.append(
+            t("waits.status.blocks", age=age, cards=plural("waits.cards", held)) if held
+            else t("waits.status", age=age)
+        )
+        if need:
+            lines.append(t("waits.action", text=need))
     if total > len(shown):
-        lines.append(t("panel.more", n=total - len(shown)))
+        lines += ["", t("panel.more", n=total - len(shown))]
     return lines
 
 
@@ -143,7 +175,7 @@ def _tail(s: Snapshot) -> list[str]:
     lines = ["", t("panel.resolved", n=s.resolved_today)]
     if s.last_resolved:
         lr = s.last_resolved
-        lines.append(t("panel.resolved.last", board=lr["board"], id=lr["task_id"], time=_clock(lr["ts"])))
+        lines.append(t("panel.resolved.last", board=lr.get("display") or board_title(lr["board"]), time=_clock(lr["ts"])))
     if s.long_guards:
         lines.append(t("panel.guards", n=s.long_guards))
     return lines
@@ -151,8 +183,10 @@ def _tail(s: Snapshot) -> list[str]:
 
 def _compose(s: Snapshot, shown: list[dict]) -> str:
     lines = _head(s) + _needs(shown, len(s.human_waits)) + _tail(s)
-    if s.human_waits:
-        lines += ["", t("panel.footer")]
+    if shown:
+        lines += ["", t("waits.footer")]
+        lines += [t("waits.footer.example", n=n, word=w.get("hint") or t("waits.default_word"))
+                  for n, w in enumerate(shown, start=1)]
     return "\n".join(lines)
 
 
@@ -181,8 +215,11 @@ def panel_items(s: Snapshot) -> list[dict]:
 
 
 def render_terminal(s: Snapshot) -> str:
-    """The same panel for the terminal: every running and held card is listed, no reply hint."""
-    lines = _head(s)
+    """The same panel for the terminal: every running and held card is listed, with ids, no reply hint."""
+    lines = [
+        t("panel.term.title", time=_clock(s.ts)),
+        t("panel.term.counts", running=len(s.running), held=len(s.held), waits=len(s.human_waits)),
+    ]
     for r in s.running:
         lines.append(
             t("panel.term.running", board=r["board"], id=r["task_id"], title=_clip_to(r.get("title") or "", 60),
@@ -194,7 +231,20 @@ def render_terminal(s: Snapshot) -> str:
               age=human_age(h.get("age_s", 0)))
         )
     ordered = _ordered(s)
-    lines += _needs(ordered, len(ordered)) + _tail(s)
+    if ordered:
+        lines += ["", t("panel.term.needs")]
+        for n, w in enumerate(ordered, start=1):
+            need = _clip_to(w.get("need") or w.get("title") or w["task_id"], NEED_MAX)
+            lines.append(t("panel.term.item", n=n, board=w["board"], id=w["task_id"], need=need,
+                           age=human_age(w.get("age_s", 0)), held=w.get("held", 0)))
+    else:
+        lines += ["", t("panel.nothing")]
+    lines += ["", t("panel.resolved", n=s.resolved_today)]
+    if s.last_resolved:
+        lr = s.last_resolved
+        lines.append(t("panel.term.resolved.last", board=lr["board"], id=lr["task_id"], time=_clock(lr["ts"])))
+    if s.long_guards:
+        lines.append(t("panel.guards", n=s.long_guards))
     if ordered:
         lines += ["", t("panel.term.how")]
     return "\n".join(lines)

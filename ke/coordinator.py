@@ -18,7 +18,7 @@ from typing import Any, Callable, Optional
 from . import hermes_api, panel
 from .guards_watch import GuardWatch
 from .infra import InfraRecovery
-from .messages import render_guard_chunks, render_infra_alert, render_waits_chunks, t
+from .messages import render_config_alert, render_guard_chunks, render_infra_alert, render_waits_chunks
 from .leader import LeaderLock
 from .settings import Settings
 from .store import Store
@@ -29,7 +29,7 @@ log = logging.getLogger(__name__)
 EVAL_INTERVAL_S = 30
 STEP_ORDER = ("waits", "guards", "infra", "panel")
 MAX_MESSAGES_PER_PASS = 3  # Telegram messages per recipient per evaluation (tick time is bounded)
-VETO_RETRY_S = 600  # back-off between failed attempts to send the veto-hooks warning
+VETO_RETRY_S = 600  # back-off between failed attempts to send a setup alert (veto hooks, escalation contact)
 COPY_RETRY_S = 600  # back-off between failed attempts to send one escalation copy
 TERMINAL_HTTP = (400, 403)  # chat not found, bot blocked: retrying cannot help
 # After a transport failure (no HTTP answer: network, DNS, timeout) no message is attempted for this
@@ -384,6 +384,7 @@ class Coordinator:
         s = self.settings
         target = s.escalate_to
         if target is not None and target not in s.owner_ids:
+            # logged here; the owner is told once, in a separate setup alert (see _check_setup)
             self._warn_once("no_chat:" + target, "kanban-empowered: no Telegram chat id for escalate_to %r", target)
             target = None
 
@@ -434,11 +435,7 @@ class Coordinator:
             for owner, group in by_owner.items():
                 if self._tg_down:
                     break
-                # urgent: nobody else hears about an escalation (no escalate_to, or the owner is it)
-                urgent = target is None or target == owner
-                sent = self._send_group(
-                    owner, owner, group, now, counts, urgent=urgent, on_sent=owner_got_it
-                )
+                sent = self._send_group(owner, owner, group, now, counts, on_sent=owner_got_it)
                 owner_sent.update(id(d) for d in sent)
             if target is not None:  # the copy does not depend on the owner's delivery
                 by_origin: dict[str, list[Due]] = {}
@@ -453,9 +450,8 @@ class Coordinator:
                     if self._tg_down:
                         break
                     self._send_group(
-                        target, origin, group, now, counts, urgent=False,
-                        lead=t("waits.copy_of", owner=origin), on_sent=copy_sent, on_failed=copy_failed,
-                        copy=True,
+                        target, origin, group, now, counts,
+                        on_sent=copy_sent, on_failed=copy_failed, copy=True,
                     )
         except Exception:
             log.exception("kanban-empowered: delivering reminders failed")
@@ -481,8 +477,6 @@ class Coordinator:
         group: list[Due],
         now: float,
         counts: dict[str, int],
-        urgent: bool,
-        lead: str = "",
         on_sent: Optional[Callable[[Due], Any]] = None,
         on_failed: Optional[Callable[[list[Due], Exception, bool], Any]] = None,
         copy: bool = False,
@@ -501,7 +495,7 @@ class Coordinator:
         if chat_id is None:
             return []
         sent: list[Due] = []
-        chunks = render_waits_chunks(label, group, urgent_escalation=urgent, lead=lead, copy=copy)
+        chunks = render_waits_chunks(label, group, copy=copy)
         for index, (text, items) in enumerate(chunks):
             if self._tg_down or counts.get(recipient, 0) >= MAX_MESSAGES_PER_PASS:
                 break  # the rest goes out on a later evaluation
@@ -581,6 +575,10 @@ class Coordinator:
             self._warn_missing_veto_hooks(now)
         except Exception:
             log.exception("kanban-empowered: veto-hooks check failed")
+        try:
+            self._check_setup(now)
+        except Exception:
+            log.exception("kanban-empowered: setup check failed")
         for name in STEP_ORDER:
             step = self.steps[name]
             if step is None:
@@ -605,26 +603,41 @@ class Coordinator:
         self._send_veto_warning(now)
 
     def _send_veto_warning(self, now: float) -> None:
-        """Tell the default owner once over Telegram.
+        """Tell the default owner once over Telegram, in a separate setup alert."""
+        self._send_setup_alert("veto", now, sent_key="veto_hooks_warn_sent", try_key="veto_hooks_warn_try")
 
-        Retried on later evaluations until it lands, but after a failed attempt at most once
-        every ``VETO_RETRY_S``.
+    def _check_setup(self, now: float) -> None:
+        """Setup alerts other than the veto hooks: an ``escalate_to`` contact without a chat id.
+
+        (An owner without a chat id cannot be messaged at all: that is only logged.)
         """
-        if not self._telegram_ready():
+        target = self.settings.escalate_to
+        if target is None or target in self.settings.owner_ids:
+            return
+        self._warn_once("no_chat:" + target, "kanban-empowered: no Telegram chat id for escalate_to %r", target)
+        self._send_setup_alert(
+            "escalation_no_chat", now, sent_key="setup_escalation_no_chat_sent", try_key="setup_escalation_no_chat_try"
+        )
+
+    def _send_setup_alert(self, kind: str, now: float, sent_key: str, try_key: str) -> None:
+        """Send the setup alert ``kind`` to the default owner once (its own message, never inside a
+        reminder). Retried on later evaluations until it lands, but after a failed attempt at most
+        once every ``VETO_RETRY_S``."""
+        if self.store.kv_get(sent_key) or self._tg_down or not self._telegram_ready():
             return
         chat_id = self._owner_chat(self.settings.default_owner)
         if chat_id is None:
             return
-        last = self.store.kv_get("veto_hooks_warn_try")
+        last = self.store.kv_get(try_key)
         try:
             if last is not None and now - float(last) < VETO_RETRY_S:
                 return
         except ValueError:
             pass
         try:
-            self._tg_send(chat_id, t("veto.warning"))
+            self._tg_send(chat_id, render_config_alert(kind))
         except Exception as exc:
-            log.warning("kanban-empowered: could not send the veto-hooks warning: %s", exc)
-            self.store.kv_set("veto_hooks_warn_try", repr(float(now)))
+            log.warning("kanban-empowered: could not send the %s setup alert: %s", kind, exc)
+            self.store.kv_set(try_key, repr(float(now)))
             return
-        self.store.kv_set("veto_hooks_warn_sent", "1")
+        self.store.kv_set(sent_key, "1")

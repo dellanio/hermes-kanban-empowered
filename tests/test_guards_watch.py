@@ -311,8 +311,11 @@ def test_one_message_with_all_due_alerts_and_the_release_instruction(kanban_home
     call = fake_tg.calls["send"][0]
     text = call["text"]
     assert call["chat_id"] == OWNER_CHAT
-    assert a in text and b in text and "alpha" in text and "beta" in text
-    assert "hermes kanban-empowered release <id> --to <profile>" in text
+    assert "alpha" in text and "beta" in text
+    # action first; the release command is the only place a card id appears (the action needs it)
+    assert text.splitlines()[1].startswith("👉")
+    assert f"hermes kanban-empowered release {a} --to <profile>" in text
+    assert f"hermes kanban-empowered release {b} --to <profile>" in text
     assert PR in text
     sent = c.store.get_sent_message(OWNER_CHAT, call["message_id"])
     assert sent["kind"] == "guard"
@@ -558,8 +561,8 @@ def test_alert_in_pt_br(pt_br, tmp_path):
         [{"board": "b", "task_id": "t_1", "reason": "active_pr", "age_s": 2000, "title": "x",
           "assignee": "dev", "pr_url": PR, "pr_at": 1_700_000_000}]
     )
-    assert "hermes kanban-empowered release <id> --to <profile>" in text
-    assert "travado" in text
+    assert "hermes kanban-empowered release t_1 --to <perfil>" in text
+    assert "travado" in text.lower() and "CARDS TRAVADOS" in text
 
 
 # -- CLI --------------------------------------------------------------------------

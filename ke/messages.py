@@ -11,6 +11,7 @@ the YAML catalogs and Hermes use.
 """
 from __future__ import annotations
 
+import re
 import time
 
 PREFIX = "kanban_empowered."
@@ -72,45 +73,65 @@ EN: dict[str, str] = {
     "status.row.no_assignee": "no assignee",
     "status.row.wait": "  waiting  {board}/{id}  {title}  (owner: {owner}, {age} ago)",
     "status.row.guarded": "  guarded  {board}/{id}  {title}  ({reason}, {count}x, for {age})",
-    # waits (human reminders)
-    "waits.head.reminder": "🟠 Needs you",
-    "waits.head.urgent": "🔴 Escalated: needs you",
-    "waits.head.digest": "🔴 Daily summary: still needs you",
-    "waits.single.line": "{head} · {board} · stopped for {age}",
-    "waits.group.line": "{head} · {n} items for {owner}",
-    "waits.item.line": "{n}. {board} · {id} · stopped for {age}",
-    "waits.need": "What I need: {text}",
-    "waits.why": "Why: {text}",
+    # natural ages (Telegram): one unit, full words
+    "age.nat.min": "{n} min",
+    "age.nat.hour.one": "{n} hour",
+    "age.nat.hour.many": "{n} hours",
+    "age.nat.day.one": "{n} day",
+    "age.nat.day.many": "{n} days",
+    # waits (human reminders over Telegram)
+    "waits.header": "📋 KANBAN · NEEDS YOU",
+    "waits.counts": "{pending} · {blocked}",
+    "waits.pending.one": "{n} pending",
+    "waits.pending.many": "{n} pending",
+    "waits.blocked.one": "{n} blocked card",
+    "waits.blocked.many": "{n} blocked cards",
+    "waits.status": "⏳ Stalled for {age}",
+    "waits.status.blocks": "⏳ Stalled for {age} · blocks {cards}",
+    "waits.cards.one": "{n} card",
+    "waits.cards.many": "{n} cards",
+    "waits.action": "👉 {text}",
+    "waits.option": "{letter} — {label}",
+    "waits.reply.word": "Then reply: “{word}”.",
+    "waits.next_step": "Next step: {text}",
+    "waits.footer": "↩️ When replying, name the item:",
+    "waits.footer.example": "“{n} — {word}”",
+    "waits.copy.lead": "Copy for follow-up",
+    "waits.default_word": "done",
     "waits.no_reason": "(no reason given)",
-    "waits.held.one": "What is held behind: 1 card ({ids}).",
-    "waits.held.many": "What is held behind: {n} cards ({ids}).",
-    "waits.how.single": "How to reply: reply \"done\" to this message or run: hermes kanban-empowered done {id}",
-    "waits.how.group": "How to reply: reply \"{n} done\" to this message or run: hermes kanban-empowered done <id>",
-    "waits.copy_of": "Escalated copy: this was sent to {owner}.",
-    "waits.how.copy": "For your information: only {owner} can resolve this, from their own reminder.",
-    "waits.urgent": "🚨 URGENT: no escalation contact is configured, so only you received this.",
     # inbound replies (Telegram) and the done command
-    "inbound.which_item": 'Which item? Reply "<n> done" with a number from 1 to {n}.',
+    "inbound.which_item": "Which item? Start your reply with its number, from 1 to {n} (e.g. “1 — {word}”).",
     "inbound.changed": "This request has changed since that message; nothing was changed.",
     "inbound.expired": "This request has expired; nothing was changed.",
-    "inbound.error": "Something went wrong while processing this reply; check the card with: hermes kanban-empowered explain {id}",
+    "inbound.error": "Something went wrong while processing this reply; check the item before replying again.",
     "inbound.unblocked": "✅ Unblocked {board} · {id}.",
     "inbound.held.none": "Nothing else is waiting on it.",
     "inbound.held.one": "Next in line behind it: 1 card ({ids}).",
     "inbound.held.many": "Next in line behind it: {n} cards ({ids}).",
     "inbound.comment.telegram": "unblocked via Telegram by {name} ({user_id}): {text}",
+    "inbound.comment.choice": "choice: {letter} — {label}",
+    "inbound.comment.note": "noted via Telegram from {name} ({user_id}), still waiting: {text}",
     "inbound.comment.cli": "unblocked via CLI by {user}",
+    "reply.resolved": "✅ {board}: {action}",
+    "reply.choice": "Choice: {letter} — {label}",
+    "reply.held.none": "Nothing else was waiting on it.",
+    "reply.held.one": "1 card was waiting on it and can move on now.",
+    "reply.held.many": "{n} cards were waiting on it and can move on now.",
+    "reply.noted": "Noted; the item is still waiting.",
+    "reply.option_unknown": "{letter} is not one of this item's options; reply with one of: {options}.",
+    "reply.option_none": "This item has no options; reply with a word or a sentence.",
+    "reply.empty": "Write your answer after the item number, e.g. “1 — {word}”.",
     "done.no_wait": "card {card} on board {board} has no open human wait; nothing was changed",
     # guards: alert about cards held by a respawn guard, and the release command
-    "guards.head.one": "🔒 1 card is stuck behind a respawn guard",
-    "guards.head.many": "🔒 {n} cards are stuck behind a respawn guard",
-    "guards.item.line": "{n}. {board} · {id} · {title}",
-    "guards.item.detail": "   Held for {age} · {reason} · assigned to {assignee}",
-    "guards.item.pr": "   Latest PR: {url} (commented {when})",
+    "guards.head": "🔒 KANBAN · STUCK CARDS",
+    "guards.action.one": "👉 This card is stuck behind a respawn guard. Hand it to another profile with the command below.",
+    "guards.action.many": "👉 {n} cards are stuck behind a respawn guard. Hand each one to another profile with the command below it.",
+    "guards.item.detail": "⏳ Held for {age} · {reason} · assigned to {assignee}",
+    "guards.item.pr": "Latest PR: {url} (commented {when})",
+    "guards.item.release": "hermes kanban-empowered release {id} --to <profile>",
     "guards.no_assignee": "nobody",
-    "guards.reason.active_pr": "a PR is already open (active_pr)",
-    "guards.reason.blocker_auth": "quota or auth blocker (blocker_auth)",
-    "guards.how": "To hand a card to another profile, run: hermes kanban-empowered release <id> --to <profile>",
+    "guards.reason.active_pr": "a PR is already open",
+    "guards.reason.blocker_auth": "a quota or auth blocker",
     "release.done": "released: assigned to {to}",
     "release.no_profile": "profile {to} does not exist",
     "release.same_profile": "handing off to the same profile does not release the guard",
@@ -121,22 +142,24 @@ EN: dict[str, str] = {
     # infra recovery: the comment on an undone breaker block, and the alerts to the owner
     "infra.undo_comment.one": "block undone: {n} infrastructure failure ({pattern}), not a problem with the work",
     "infra.undo_comment.many": "block undone: {n} infrastructure failures ({pattern}), not a problem with the work",
-    "infra.budget.head": "🔴 {board} · {id} · {title}",
-    "infra.budget.detail": "   Blocked again by infrastructure failures. The automatic undo budget ({count} in {window}) is used up; I will not retry.",
-    "infra.budget.how": "   Check the infrastructure (gateway, workers), then unblock the card yourself. Details: hermes kanban-empowered explain {id} --board {board}",
-    "infra.systemic": "🟠 {n} worker exits caused by infrastructure in {window}. Workers keep dying for reasons unrelated to their work (gateway, persistence); check the host.",
+    "infra.head": "🛠️ KANBAN · INFRASTRUCTURE",
+    "infra.budget.action": "👉 Check the infrastructure (gateway, workers), then unblock this card yourself.",
+    "infra.budget.detail": "Blocked again by infrastructure failures. The automatic undo budget ({count} in {window}) is used up; I will not retry.",
+    "infra.budget.how": "Details: hermes kanban-empowered explain {id} --board {board}",
+    "infra.systemic": "👉 Check the host (gateway, persistence): {n} workers exited for infrastructure reasons in {window}, not because of their work.",
     # live panel (pinned Telegram message, terminal watch)
-    "panel.title": "Kanban now · {time}",
-    "panel.counts": "{running} running · {held} held · {waits} depend on you",
-    "panel.needs": "Needs you",
+    "panel.title": "📋 KANBAN NOW · {time}",
+    "panel.counts": "{running} running · {held} on hold · {pending}",
     "panel.nothing": "Nothing needs you right now.",
-    "panel.item.line": "{n}. {board}: {need}",
-    "panel.item.detail": "   {id} · {age} · holding {held}",
     "panel.more": "… and {n} more",
     "panel.resolved": "Resolved on its own today: {n}",
-    "panel.resolved.last": "Last: {board} · {id} · {time}",
+    "panel.resolved.last": "Last: {board} at {time}",
     "panel.guards": "🔒 Long respawn guards: {n}",
-    "panel.footer": "Reply \"1 done\" to resolve an item (or run: hermes kanban-empowered done <id>).",
+    "panel.term.title": "Kanban now · {time}",
+    "panel.term.counts": "{running} running · {held} held · {waits} depend on you",
+    "panel.term.needs": "Needs you",
+    "panel.term.item": "  {n}. {board}/{id}: {need}  ({age}, holding {held})",
+    "panel.term.resolved.last": "Last: {board} · {id} · {time}",
     "panel.term.running": "  running  {board}/{id}  {title}  ({assignee}, {age} ago)",
     "panel.term.held": "  held     {board}/{id}  ({reason}, for {age})",
     "panel.term.how": "Resolve an item with: hermes kanban-empowered done <id>",
@@ -145,10 +168,38 @@ EN: dict[str, str] = {
     "status.watch.error": "Could not read the state: {error}",
     # agent-facing: the worker guard's veto of an unstructured human block
     "guard.block": "kanban-empowered: a block that waits on a person needs a structured ask.\n{template}",
-    "guard.template": "Use exactly these three lines in the block reason:\nNeed: <what you need the person to do or tell you>\nWhy: <why the work cannot move without it>\nHow to reply: <how the person should answer, e.g. reply \"done\">",
-    # setup warnings
-    "veto.warning": "kanban-empowered: this Hermes build lacks the kanban veto hooks (kanban_pre_claim / kanban_pre_complete). Guards run in cooperative-only mode. Run: hermes kanban-empowered doctor",
+    "guard.template": (
+        "Use these lines in the block reason; the first three are required:\n"
+        "Need: <the action you need from the person, at most two sentences, no card ids>\n"
+        "Why: <why the work cannot move without it, one short sentence>\n"
+        "How to reply: <the word the person should reply, e.g. reply \"done\">\n"
+        "Subject: <optional: a short topic shown next to the board name>\n"
+        "Next step: <optional: what you will do once answered>\n"
+        "Options: <optional: one choice per line below>\n"
+        "A — <first choice>\n"
+        "B — <second choice>"
+    ),
+    # setup alerts (Telegram): one short message per issue, never inside a reminder
+    "config.head": "⚙️ KANBAN · SETUP",
+    "config.veto": (
+        "👉 Re-apply the kanban veto hooks patch to this Hermes build, then check with: "
+        "hermes kanban-empowered doctor\nUntil then the guards run in cooperative mode only."
+    ),
+    "config.escalation_no_chat": (
+        "👉 Add a Telegram chat id for the escalation contact (telegram.owner_ids).\n"
+        "It is configured but has no chat id, so escalations reach nobody else."
+    ),
 }
+
+
+# Language override (``settings.language``): None follows the Hermes language.
+_LANG = None
+
+
+def set_language(lang) -> None:
+    """Force the language of the plugin's messages (``"pt"``, ``"en"``...); ``None`` follows Hermes."""
+    global _LANG
+    _LANG = (str(lang).strip() or None) if lang else None
 
 
 def _translate(full_key: str, **kw):
@@ -158,11 +209,13 @@ def _translate(full_key: str, **kw):
         from . import hermes_api
     except Exception:
         return None
+    if _LANG:
+        return hermes_api.translate(full_key, lang=_LANG, **kw)
     return hermes_api.translate(full_key, **kw)
 
 
 def t(key: str, **kw) -> str:
-    """Text for ``key`` in the user's Hermes language, English when Hermes has none.
+    """Text for ``key`` in the user's Hermes language (or ``settings.language``), English when Hermes has none.
 
     ``kw`` are format arguments; they must not be named ``lang`` or ``key`` (``agent.i18n.t``
     takes ``lang`` itself, and ``key`` is this function's own parameter).
@@ -177,6 +230,11 @@ def t(key: str, **kw) -> str:
         return text.format(**kw)
     except (KeyError, IndexError, ValueError):
         return text
+
+
+def plural(key: str, n: int, **kw) -> str:
+    """``<key>.one`` for 1, ``<key>.many`` otherwise."""
+    return t(f"{key}.one" if n == 1 else f"{key}.many", n=n, **kw)
 
 
 def human_age(seconds: int) -> str:
@@ -194,17 +252,70 @@ def human_age(seconds: int) -> str:
     return f"{t('age.d', n=d)} {t('age.h', n=h)}" if h else t("age.d", n=d)
 
 
+def natural_age(seconds: int) -> str:
+    """``14 days``, ``15 hours``, ``40 min``: the most significant unit only, in words (Telegram)."""
+    s = max(0, int(seconds))
+    if s >= 86400:
+        return plural("age.nat.day", s // 86400)
+    if s >= 3600:
+        return plural("age.nat.hour", s // 3600)
+    return t("age.nat.min", n=max(1, s // 60))
+
+
+# -- Telegram text hygiene: no card ids, hashes or CLI commands ---------------------------
+_CARD_ID_RE = re.compile(r"\bt_[0-9a-f]{8}\b")
+# a standalone lower-case hex run of 7+ characters with at least one digit and one letter (a hash)
+_HASH_RE = re.compile(r"(?<![\w/.\-])(?=[0-9a-f]*[0-9])(?=[0-9a-f]*[a-f])[0-9a-f]{7,}(?![\w/\-])")
+_CODE_CLI_RE = re.compile(r"`[^`\n]*\bhermes\b[^`\n]*`")
+_CLI_RE = re.compile(r"(?:\b(?:run|rode|execute|use)\s*:?\s*)?\bhermes\s+kanban[\w\-]*\b[^.;\n]*", re.IGNORECASE)
+_SENTENCE_RE = re.compile(r"(?<=[.!?…])\s+(?=\S)")
+
+
+def strip_ids(text) -> str:
+    """``text`` on one line without card ids, hashes or ``hermes kanban…`` commands (tidied up)."""
+    text = " ".join(str(text or "").split())
+    text = _CODE_CLI_RE.sub("", text)
+    text = _CLI_RE.sub("", text)
+    text = _CARD_ID_RE.sub("", text)
+    text = _HASH_RE.sub("", text)
+    # tidy what the removals left behind
+    text = re.sub(r"\(\s*[,;]?\s*\)|\[\s*\]", "", text)
+    text = re.sub(r"\s+([.,;:!?)\]])", r"\1", text)
+    text = re.sub(r"([(\[])\s+", r"\1", text)
+    text = re.sub(r"[,;:]+(?=[.!?])", "", text)
+    text = re.sub(r"([,;])(?:\s*[,;])+", r"\1", text)
+    text = re.sub(r"\s{2,}", " ", text).strip()
+    return text.strip(" ,;")
+
+
+def sentences(text: str, n: int = 2) -> str:
+    """The first ``n`` sentences of ``text``."""
+    parts = _SENTENCE_RE.split(text.strip())
+    return " ".join(parts[:n])
+
+
+def circled(n: int) -> str:
+    """①..⑳, then ``(21)``, ``(22)``…"""
+    return chr(0x2460 + n - 1) if 1 <= n <= 20 else f"({n})"
+
+
+def board_title(board: str, name: str = "", subject: str = "") -> str:
+    """``VOZ HERMES`` (the display name, else the slug, upper-cased, ``-``/``_`` as spaces) [`` · SUBJECT``]."""
+    base = _clip_to(str(name or board).replace("-", " ").replace("_", " "), _NAME_MAX).upper()
+    subject = _clip_to(strip_ids(subject), _NAME_MAX)
+    return f"{base} · {subject.upper()}" if subject else base
+
+
+_NAME_MAX = 60  # characters of a board name or a subject in a title
+
+
 # -- human wait reminders ---------------------------------------------------------
 _RAW_REASON_MAX = 600
 _HELD_IDS_SHOWN = 5
-
-
-def _wait_head(stage: str) -> str:
-    if stage == "digest":
-        return t("waits.head.digest")
-    if stage == "escalation":
-        return t("waits.head.urgent")
-    return t("waits.head.reminder")
+_ACTION_MAX = 300
+_CONTEXT_MAX = 200
+_OPTION_MAX = 120
+SEPARATOR = "-" * 38
 
 
 def _clip(text: str) -> str:
@@ -212,52 +323,100 @@ def _clip(text: str) -> str:
     return text if len(text) <= _RAW_REASON_MAX else text[: _RAW_REASON_MAX - 1] + "…"
 
 
-def _wait_body(due) -> list[str]:
-    """What I need / why / what is held behind, for one wait."""
-    lines = []
-    if due.ask is not None:
-        lines.append(t("waits.need", text=due.ask.need))
-        lines.append(t("waits.why", text=due.ask.why))
-    else:  # blocked before the structured ask existed: the raw reason is all there is
-        lines.append(t("waits.need", text=_clip(due.reason) if due.reason.strip() else t("waits.no_reason")))
-    held = list(due.held_behind)
-    if held:
-        shown = held[:_HELD_IDS_SHOWN]
-        ids = ", ".join(shown) + (", …" if len(held) > len(shown) else "")
-        lines.append(t("waits.held.one", ids=ids) if len(held) == 1 else t("waits.held.many", n=len(held), ids=ids))
+def _sentence_end(text: str) -> str:
+    return text if not text or text[-1] in ".!?…" else text + "."
+
+
+def short_action(ask, reason: str = "") -> str:
+    """The request in at most two sentences, without ids (the raw reason for an unstructured block)."""
+    raw = ask.need if ask is not None else reason
+    text = _clip_to(sentences(strip_ids(raw)), _ACTION_MAX)
+    return text or t("waits.no_reason")
+
+
+def reply_hint(ask) -> str:
+    """What a reply to this item looks like: ``A`` for an ask with options, else its primary word."""
+    from .asks import primary_word
+
+    if ask is not None and ask.options:
+        return ask.options[0][0]
+    return primary_word(ask) or t("waits.default_word")
+
+
+def _reply_line(ask) -> str:
+    from .asks import primary_word, reply_is_plain
+
+    if ask is None or reply_is_plain(ask) or not primary_word(ask):
+        return t("waits.reply.word", word=reply_hint(ask))
+    text = _clip_to(sentences(strip_ids(ask.reply)), _ACTION_MAX)
+    return _sentence_end(text[:1].upper() + text[1:])
+
+
+def _context_line(ask) -> str:
+    if ask is None:
+        return ""
+    if ask.next_step and strip_ids(ask.next_step):
+        return _clip_to(t("waits.next_step", text=strip_ids(ask.next_step)), _CONTEXT_MAX)
+    return _clip_to(strip_ids(ask.why), _CONTEXT_MAX)
+
+
+def _wait_item(due, number: int, copy: bool = False) -> list[str]:
+    """One item: title, status, action (+ options or reply instruction), context."""
+    ask = due.ask
+    title = board_title(due.board, getattr(due, "board_name", ""), ask.subject if ask is not None else "")
+    held = len(due.held_behind)
+    age = natural_age(due.age_s)
+    status = (
+        t("waits.status.blocks", age=age, cards=plural("waits.cards", held)) if held else t("waits.status", age=age)
+    )
+    lines = [f"{circled(number)} {title}" if number else title, status, ""]
+    action = short_action(ask, due.reason)
+    if ask is not None and ask.options:
+        if action[-1:] in ".;:!":
+            action = action[:-1]
+        if action[-1:] != "?":
+            action += ":"
+        lines += [t("waits.action", text=action), ""]
+        lines += [t("waits.option", letter=k, label=_clip_to(strip_ids(v), _OPTION_MAX)) for k, v in ask.options]
+    else:
+        lines.append(t("waits.action", text=action))
+        if not copy:
+            lines.append(_reply_line(ask))
+    context = _context_line(ask)
+    if context:
+        lines += ["", context]
     return lines
 
 
 def render_waits(owner: str, dues: list, copy: bool = False) -> str:
-    """The reminder message for ``owner``: one item as-is, several numbered and grouped.
+    """The reminder message: a header, then one block per item (numbered when there are several).
 
-    ``copy`` renders the escalated copy for the ``escalate_to`` contact: same items, but the footer
-    says that only ``owner`` can resolve them (a reply from the contact is never accepted).
+    ``owner`` is not shown (role names never reach Telegram). ``copy`` renders the escalated copy
+    for the ``escalate_to`` contact: a "copy for follow-up" lead, the same items, no reply
+    instructions (a reply from the contact is never accepted).
     """
     if not dues:
         return ""
-    if len(dues) == 1:
-        due = dues[0]
-        head = t(
-            "waits.single.line",
-            head=_wait_head(due.stage),
-            board=due.board,
-            age=human_age(due.age_s),
-        )
-        how = t("waits.how.copy", owner=owner) if copy else t("waits.how.single", id=due.task_id)
-        return "\n".join([head, *_wait_body(due), how])
-    urgent = any(d.stage in ("escalation", "digest") for d in dues)
-    lead = _wait_head("digest" if any(d.stage == "digest" for d in dues) else "escalation" if urgent else "reminder1")
-    lines = [t("waits.group.line", head=lead, n=len(dues), owner=owner)]
+    held = {tid for d in dues for tid in d.held_behind}
+    lines = [t("waits.copy.lead")] if copy else []
+    lines += [
+        t("waits.header"),
+        t("waits.counts", pending=plural("waits.pending", len(dues)), blocked=plural("waits.blocked", len(held))),
+        "",
+    ]
+    many = len(dues) > 1
     for n, due in enumerate(dues, start=1):
-        lines.append(t("waits.item.line", n=n, board=due.board, id=due.task_id, age=human_age(due.age_s)))
-        lines.extend("   " + body for body in _wait_body(due))
-    lines.append(t("waits.how.copy", owner=owner) if copy else t("waits.how.group", n=1))
+        if n > 1:
+            lines += ["", SEPARATOR]
+        lines += _wait_item(due, n if many else 0, copy=copy)
+    if many and not copy:
+        lines += ["", t("waits.footer")]
+        lines += [t("waits.footer.example", n=n, word=reply_hint(d.ask)) for n, d in enumerate(dues, start=1)]
     return "\n".join(lines)
 
 
 def render_done(board: str, task_id: str, held: list) -> str:
-    """Confirmation after a human resolved a wait: the card and what is next in line behind it."""
+    """CLI confirmation after a human resolved a wait: the card and what is next in line behind it."""
     held = list(held)
     if not held:
         tail = t("inbound.held.none")
@@ -268,7 +427,21 @@ def render_done(board: str, task_id: str, held: list) -> str:
     return "\n".join([t("inbound.unblocked", board=board, id=task_id), tail])
 
 
-# -- Telegram delivery: size limit, splitting, urgent marker ------------------------------
+def render_answer(title: str, action: str, held: int, choice=None) -> str:
+    """Telegram confirmation of a resolved item: the board and the short action, no ids."""
+    lines = [t("reply.resolved", board=title, action=action)]
+    if choice is not None:
+        lines.append(t("reply.choice", letter=choice[0], label=_clip_to(strip_ids(choice[1]), _OPTION_MAX)))
+    lines.append(plural("reply.held", held) if held else t("reply.held.none"))
+    return "\n".join(lines)
+
+
+def render_config_alert(kind: str) -> str:
+    """A setup alert (``veto``, ``escalation_no_chat``): its own message, never part of a reminder."""
+    return "\n".join([t("config.head"), t(f"config.{kind}")])
+
+
+# -- Telegram delivery: size limit, splitting ----------------------------------------------
 TELEGRAM_LIMIT = 4096  # sendMessage text limit (UTF-16 code units)
 
 
@@ -277,7 +450,7 @@ def _tg_len(text: str) -> int:
 
 
 def _clip_item(text: str, limit: int) -> str:
-    """Fit one rendered item in ``limit``: the head and the reply footer stay, the middle is clipped."""
+    """Fit one rendered item in ``limit``: the first and the last line stay, the middle is clipped."""
     if _tg_len(text) <= limit:
         return text
     lines = text.split("\n")
@@ -305,7 +478,6 @@ def _prefix(text: str, units: int) -> str:
 def render_waits_chunks(
     owner: str,
     dues: list,
-    urgent_escalation: bool = False,
     limit: int = TELEGRAM_LIMIT,
     lead: str = "",
     copy: bool = False,
@@ -313,16 +485,14 @@ def render_waits_chunks(
     """Reminder messages for ``owner``, each within the Telegram limit, as ``(text, dues)`` pairs.
 
     Dues are packed in order and a due is never split across messages; a single due that alone
-    exceeds the limit is clipped (its head and reply footer are kept). Numbering restarts at 1
-    in every message and ``dues`` is that message's item list, in numbering order, so a reply
-    to a message maps "n done" to ``dues[n - 1]`` of that message and no other.
-    ``urgent_escalation`` marks the messages that carry an escalation (nobody else will hear of
-    it); ``lead`` is a line put first in every message (e.g. who an escalated copy is from) and
-    ``copy`` renders the escalated copy's footer (see :func:`render_waits`).
+    exceeds the limit is clipped (its first and last lines are kept). Every message repeats the
+    header (counted over its own items) and numbering restarts at 1, and ``dues`` is that
+    message's item list in numbering order, so a reply to a message maps "n — …" to
+    ``dues[n - 1]`` of that message and no other. ``lead`` is a line put first in every message
+    and ``copy`` renders the escalated copy (see :func:`render_waits`).
     """
     def render(chunk: list, clip: bool = False) -> str:
-        urgent = urgent_escalation and any(d.stage == "escalation" for d in chunk)
-        marker = (lead + "\n" if lead else "") + (t("waits.urgent") + "\n" if urgent else "")
+        marker = lead + "\n" if lead else ""
         text = render_waits(owner, chunk, copy=copy)
         return marker + (_clip_item(text, limit - _tg_len(marker)) if clip else text)
 
@@ -356,28 +526,36 @@ def _clip_to(text: str, limit: int) -> str:
     return text if len(text) <= limit else text[: limit - 1] + "…"
 
 
+def _card_line(n: int, alert: dict) -> str:
+    title = board_title(alert["board"], alert.get("board_name", ""))
+    card = _clip_to(strip_ids(alert.get("title") or ""), _TITLE_MAX)
+    head = f"{title} · {card}" if card else title
+    return f"{circled(n)} {head}" if n else head
+
+
 def _guard_item(n: int, alert: dict) -> list[str]:
     lines = [
-        t("guards.item.line", n=n, board=alert["board"], id=alert["task_id"],
-          title=_clip_to(alert.get("title") or "", _TITLE_MAX)),
-        t("guards.item.detail", age=human_age(alert.get("age_s", 0)), reason=_guard_reason_text(alert["reason"]),
+        _card_line(n, alert),
+        t("guards.item.detail", age=natural_age(alert.get("age_s", 0)), reason=_guard_reason_text(alert["reason"]),
           assignee=alert.get("assignee") or t("guards.no_assignee")),
     ]
     if alert.get("pr_url"):
         when = time.strftime("%Y-%m-%d %H:%M", time.localtime(alert.get("pr_at") or 0))
         lines.append(t("guards.item.pr", url=_clip_to(alert["pr_url"], _URL_MAX), when=when))
+    lines.append(t("guards.item.release", id=alert["task_id"]))  # the action itself needs the id
     return lines
 
 
 def render_guards(alerts: list) -> str:
-    """One alert message: a headline, one numbered block per card, and how to release them."""
+    """One alert message: a headline, the action, one block per card with its release command."""
     if not alerts:
         return ""
-    head = t("guards.head.one") if len(alerts) == 1 else t("guards.head.many", n=len(alerts))
-    lines = [head]
+    action = t("guards.action.one") if len(alerts) == 1 else t("guards.action.many", n=len(alerts))
+    lines = [t("guards.head"), action]
+    many = len(alerts) > 1
     for n, alert in enumerate(alerts, start=1):
-        lines.extend(_guard_item(n, alert))
-    lines.append(t("guards.how"))
+        lines.append("")
+        lines.extend(_guard_item(n if many else 0, alert))
     return "\n".join(lines)
 
 
@@ -404,10 +582,15 @@ def undo_comment(n: int, pattern: str) -> str:
 def render_infra_alert(alert: dict) -> str:
     """One infra alert: ``kind`` "budget" (a card whose undo budget is used up) or "systemic"."""
     if alert.get("kind") == "systemic":
-        return t("infra.systemic", n=alert.get("n", 0), window=human_age(alert.get("window_s", 0)))
-    board, tid = alert["board"], alert["task_id"]
+        return "\n".join([
+            t("infra.head"),
+            t("infra.systemic", n=alert.get("n", 0), window=natural_age(alert.get("window_s", 0))),
+        ])
     return "\n".join([
-        t("infra.budget.head", board=board, id=tid, title=_clip_to(alert.get("title") or "", _TITLE_MAX)),
-        t("infra.budget.detail", count=alert.get("count", 0), window=human_age(alert.get("window_s", 0))),
-        t("infra.budget.how", board=board, id=tid),
+        t("infra.head"),
+        t("infra.budget.action"),
+        "",
+        _card_line(0, alert),
+        t("infra.budget.detail", count=alert.get("count", 0), window=natural_age(alert.get("window_s", 0))),
+        t("infra.budget.how", board=alert["board"], id=alert["task_id"]),  # the action itself needs the id
     ])

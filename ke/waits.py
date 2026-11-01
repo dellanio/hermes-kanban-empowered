@@ -47,6 +47,7 @@ class Due:
     ask: Optional[Ask] = None
     held_behind: list = field(default_factory=list)
     reason: str = ""  # raw block reason; what the message shows when ``ask`` is None
+    board_name: str = ""  # the board's display name ("" -> the slug is shown)
 
 
 def _payload(event: Any) -> dict:
@@ -115,6 +116,15 @@ def human_block(task: Any, events: list, settings: Settings) -> Optional[Block]:
     if block.kind is not None and block.kind not in settings.human_kinds:
         return None
     return block
+
+
+def display_name(api: Any, board: str) -> str:
+    """The board's display name from Hermes' board metadata, ``""`` when it cannot be read."""
+    try:
+        fn = getattr(api, "board_name", None)
+        return str(fn(board) or "") if fn is not None else ""
+    except Exception:
+        return ""
 
 
 def held_behind(api: Any, conn: Any, tid: str) -> list[str]:
@@ -258,6 +268,7 @@ class WaitTracker:
             ask=parse_ask(reason),
             held_behind=held,
             reason=reason,
+            board_name=display_name(self.api, board),
         )
 
     # -- sent ----------------------------------------------------------------

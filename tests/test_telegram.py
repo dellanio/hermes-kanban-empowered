@@ -144,11 +144,25 @@ def test_client_never_retries():
 
 
 # -- message splitting ----------------------------------------------------------
-def _due(task_id="t_1", board="b", owner="sponsor", stage="reminder1", need="n", why="w", age_s=1800, held=()):
+def _due(task_id="t_1", board="b", owner="sponsor", stage="reminder1", need=None, why="w", age_s=1800, held=(),
+         options=()):
+    """A due whose action names its (short, non-hex) task id, so a message shows which item is which."""
     from ke.asks import Ask
     from ke.waits import Due
 
-    return Due(board, task_id, 1, owner, stage, age_s, Ask(need, why, "r"), list(held), "")
+    need = f"do {task_id}" if need is None else need
+    return Due(board, task_id, 1, owner, stage, age_s, Ask(need, why, "r", tuple(options)), list(held), "")
+
+
+# a big item: message format v2 clips the request and the context, so bulk comes from options
+FAT = tuple((chr(65 + k), "x" * 100) for k in range(8))
+
+
+def _blocks(text):
+    """The item blocks of a reminder (split at the separator line)."""
+    from ke.messages import SEPARATOR
+
+    return text.split(SEPARATOR)
 
 
 def test_small_batch_is_one_message_with_items_in_order():
@@ -156,51 +170,44 @@ def test_small_batch_is_one_message_with_items_in_order():
 
     dues = [_due("t_a"), _due("t_b"), _due("t_c")]
     ((text, items),) = render_waits_chunks("sponsor", dues)
-    assert items == dues and "1. b · t_a" in text and "3. b · t_c" in text
+    blocks = _blocks(text)
+    assert items == dues and len(blocks) == 3
+    assert "① B" in blocks[0] and "do t_a" in blocks[0] and "③ B" in blocks[2] and "do t_c" in blocks[2]
+
+
+def _big(i):
+    # message format v2 clips the request and the context, so a big item is one with many options
+    return _due(f"t_{i:02d}", options=[(chr(65 + k), f"{'x' * 100} {k}") for k in range(8)])
 
 
 def test_oversized_batch_splits_at_item_boundaries_and_numbering_restarts():
-    from ke.messages import _tg_len, render_waits_chunks
+    from ke.messages import _tg_len, circled, render_waits_chunks
 
-    dues = [_due(f"t_{i:02d}", need="x" * 900) for i in range(10)]
+    dues = [_big(i) for i in range(10)]
     chunks = render_waits_chunks("sponsor", dues)
     assert len(chunks) > 1
     assert [d for _, items in chunks for d in items] == dues  # nothing lost, nothing repeated, order kept
     for text, items in chunks:
         assert _tg_len(text) <= 4096
-        if len(items) > 1:  # "n done" in this message maps to items[n-1] of this message only
-            for n, due in enumerate(items, start=1):
-                assert f"{n}. b · {due.task_id}" in text
+        assert text.startswith("📋 KANBAN · NEEDS YOU\n")  # every chunk repeats the header
+        if len(items) > 1:  # "n — ..." in this message maps to items[n-1] of this message only
+            for n, (due, block) in enumerate(zip(items, _blocks(text)), start=1):
+                assert f"{circled(n)} B" in block and f"do {due.task_id}" in block
         else:
-            assert items[0].task_id in text or "t_" in text
-        assert "x" * 900 in text  # no item is cut when it fits
+            assert f"do {items[0].task_id}" in text
+        for k in range(8):
+            assert f"{chr(65 + k)} — {'x' * 100} {k}" in text  # no item is cut when it fits
 
 
-def test_single_oversized_item_is_clipped_keeping_head_and_footer():
+def test_single_oversized_item_is_clipped_keeping_head_and_last_line():
     from ke.messages import _tg_len, render_waits_chunks
 
-    dues = [_due("t_big", need="y" * 6000), _due("t_ok")]
-    chunks = render_waits_chunks("sponsor", dues)
-    assert [[d.task_id for d in items] for _, items in chunks] == [["t_big"], ["t_ok"]]
+    dues = [_big(0), _due("t_ok")]
+    chunks = render_waits_chunks("sponsor", dues, limit=600)
+    assert [[d.task_id for d in items] for _, items in chunks] == [["t_00"], ["t_ok"]]
     text = chunks[0][0]
-    assert _tg_len(text) <= 4096 and "…" in text
-    assert text.splitlines()[0].startswith("🟠") and text.splitlines()[-1].startswith("How to reply")
-
-
-def test_urgent_marker_only_on_escalation_chunks_when_requested():
-    from ke.messages import render_waits_chunks, t
-
-    esc = [_due("t_e", stage="escalation")]
-    assert render_waits_chunks("s", esc, urgent_escalation=True)[0][0].startswith(t("waits.urgent"))
-    assert t("waits.urgent") not in render_waits_chunks("s", esc)[0][0]
-    assert t("waits.urgent") not in render_waits_chunks("s", [_due()], urgent_escalation=True)[0][0]
-
-
-def test_urgent_marker_fits_in_the_limit():
-    from ke.messages import _tg_len, render_waits_chunks
-
-    (text, _), = render_waits_chunks("s", [_due(stage="escalation", need="z" * 6000)], urgent_escalation=True)
-    assert _tg_len(text) <= 4096 and text.splitlines()[-1].startswith("How to reply")
+    assert _tg_len(text) <= 600 and "…" in text
+    assert text.splitlines()[0] == "📋 KANBAN · NEEDS YOU" and text.splitlines()[-1] == "w"
 
 
 def test_clip_of_a_huge_ask_is_fast_and_within_the_limit():
@@ -212,7 +219,7 @@ def test_clip_of_a_huge_ask_is_fast_and_within_the_limit():
     start = time.perf_counter()
     ((text, _),) = render_waits_chunks("sponsor", [due])
     assert time.perf_counter() - start < 0.05
-    assert _tg_len(text) <= 4096 and "…" in text and text.splitlines()[-1].startswith("How to reply")
+    assert _tg_len(text) <= 4096 and "…" in text and text.splitlines()[-1] == "w"
 
 
 def test_pathological_clip_counts_utf16_units():
@@ -287,7 +294,7 @@ def test_successful_send_records_message_and_marks_sent_once(kanban_home, clock,
     clock.advance(1800)
     coord.evaluate(clock.now)
     (call,) = fake_tg.calls["send"]
-    assert call["chat_id"] == 111 and tid in call["text"]
+    assert call["chat_id"] == 111 and "👉 a" in call["text"] and tid not in call["text"]
     (row,) = _sent_rows(coord)
     assert (row["message_id"], row["chat_id"], row["kind"]) == (call["message_id"], 111, "waits")
     assert json.loads(row["items_json"]) == [{"board": "default", "task_id": tid, "version": ev.id}]
@@ -306,8 +313,9 @@ def test_dues_are_grouped_one_message_per_owner(tmp_path, fake_tg, clock):
     coord._deliver_waits(clock.now)
     by_chat = {c["chat_id"]: c for c in fake_tg.calls["send"]}
     assert set(by_chat) == {111, 222} and fake_tg.count("send") == 2
-    assert "1. b · t_1" in by_chat[111]["text"] and "2. b · t_3" in by_chat[111]["text"]
-    assert "t_2" in by_chat[222]["text"] and "t_1" not in by_chat[222]["text"]
+    blocks = _blocks(by_chat[111]["text"])
+    assert "① B" in blocks[0] and "do t_1" in blocks[0] and "② B" in blocks[1] and "do t_3" in blocks[1]
+    assert "do t_2" in by_chat[222]["text"] and "do t_1" not in by_chat[222]["text"]
     rows = {r["chat_id"]: json.loads(r["items_json"]) for r in _sent_rows(coord)}
     assert [i["task_id"] for i in rows[111]] == ["t_1", "t_3"]  # same order as the numbering
     assert coord.pending_dues == []
@@ -338,18 +346,20 @@ def _stage(coord, due):
     return coord.store.latest_wait(due.board, due.task_id)["stage"]
 
 
-def test_escalation_goes_to_owner_and_escalate_to(tmp_path, fake_tg, clock):
-    from ke.messages import t
+def _no_urgent(text):
+    return "urgent" not in text.lower() and "🚨" not in text
 
+
+def test_escalation_goes_to_owner_and_escalate_to(tmp_path, fake_tg, clock):
     coord = _coord(tmp_path, fake_tg, clock, escalate_to="ops")
     coord.pending_dues = [_due("t_1", stage="escalation", age_s=8 * H)]
     coord._deliver_waits(clock.now)
     assert sorted(c["chat_id"] for c in fake_tg.calls["send"]) == [111, 222]
-    assert all(t("waits.urgent") not in c["text"] for c in fake_tg.calls["send"])
+    assert all(_no_urgent(c["text"]) for c in fake_tg.calls["send"])
     assert {r["chat_id"] for r in _sent_rows(coord)} == {111, 222}
 
 
-def test_escalated_copy_names_the_original_owner(tmp_path, fake_tg, clock):
+def test_escalated_copy_has_a_follow_up_lead_and_no_role_name(tmp_path, fake_tg, clock):
     from ke.messages import t
 
     coord = _coord(tmp_path, fake_tg, clock, escalate_to="ops")
@@ -357,32 +367,30 @@ def test_escalated_copy_names_the_original_owner(tmp_path, fake_tg, clock):
     coord._deliver_waits(clock.now)
     copy = next(c for c in fake_tg.calls["send"] if c["chat_id"] == 222)
     owner_msg = next(c for c in fake_tg.calls["send"] if c["chat_id"] == 111)
-    assert copy["text"].splitlines()[0] == t("waits.copy_of", owner="sponsor")
-    assert "sponsor" in copy["text"].splitlines()[0] and "copy" not in owner_msg["text"].lower()
-    assert "1. b · t_1" in copy["text"] and "2. b · t_2" in copy["text"]
+    assert copy["text"].splitlines()[0] == t("waits.copy.lead")
+    assert "sponsor" not in copy["text"] and "copy" not in owner_msg["text"].lower()
+    blocks = _blocks(copy["text"])
+    assert "① B" in blocks[0] and "do t_1" in blocks[0] and "② B" in blocks[1] and "do t_2" in blocks[1]
+    assert "↩️" not in copy["text"]  # the copy cannot be answered
 
 
-def test_escalation_without_escalate_to_is_owner_only_and_urgent(tmp_path, fake_tg, clock):
-    from ke.messages import t
-
+def test_escalation_without_escalate_to_is_owner_only_and_not_marked_urgent(tmp_path, fake_tg, clock):
     coord = _coord(tmp_path, fake_tg, clock)
     coord.pending_dues = [_due("t_1", stage="escalation", age_s=8 * H)]
     coord._deliver_waits(clock.now)
     (call,) = fake_tg.calls["send"]
-    assert call["chat_id"] == 111 and call["text"].startswith(t("waits.urgent"))
+    assert call["chat_id"] == 111 and call["text"].startswith("📋 KANBAN · NEEDS YOU") and _no_urgent(call["text"])
 
 
-def test_escalate_to_same_as_owner_sends_once_and_is_urgent(tmp_path, fake_tg, clock):
-    from ke.messages import t
-
+def test_escalate_to_same_as_owner_sends_once(tmp_path, fake_tg, clock):
     coord = _coord(tmp_path, fake_tg, clock, escalate_to="sponsor")
     coord.pending_dues = [_due("t_1", stage="escalation")]
     coord._deliver_waits(clock.now)
     (call,) = fake_tg.calls["send"]
-    assert call["chat_id"] == 111 and call["text"].startswith(t("waits.urgent"))
+    assert call["chat_id"] == 111 and _no_urgent(call["text"])
 
 
-def test_urgent_marker_is_decided_per_owner_in_a_mixed_batch(tmp_path, fake_tg, clock):
+def test_mixed_batch_escalations_and_copies_per_owner(tmp_path, fake_tg, clock):
     from ke.messages import t
 
     coord = _coord(tmp_path, fake_tg, clock, escalate_to="ops")
@@ -394,9 +402,10 @@ def test_urgent_marker_is_decided_per_owner_in_a_mixed_batch(tmp_path, fake_tg, 
     by_chat = {}
     for c in fake_tg.calls["send"]:
         by_chat.setdefault(c["chat_id"], []).append(c["text"])
-    assert not any(t("waits.urgent") in m for m in by_chat[111])  # ops will hear of sponsor's card
-    assert any(m.startswith(t("waits.urgent")) and "t_o" in m for m in by_chat[222])  # ops IS the escalation
-    assert not any("t_o" in m for m in by_chat[111])
+    assert all(_no_urgent(m) for msgs in by_chat.values() for m in msgs)
+    assert any("do t_o" in m and not m.startswith(t("waits.copy.lead")) for m in by_chat[222])  # ops' own
+    assert any("do t_s" in m and m.startswith(t("waits.copy.lead")) for m in by_chat[222])  # the copy
+    assert not any("do t_o" in m for m in by_chat[111])
 
 
 def test_non_escalation_stages_are_not_copied(tmp_path, fake_tg, clock):
@@ -481,7 +490,7 @@ def test_permanent_copy_rejection_gives_up_every_pending_card_of_the_group(tmp_p
     from ke.telegram import TelegramError
 
     coord = _coord(tmp_path, fake_tg, clock, escalate_to="ops")
-    dues = [_due(f"t_{i}", stage="escalation", need="x" * 900) for i in range(9)]
+    dues = [_due(f"t_{i}", stage="escalation", options=FAT) for i in range(9)]
     attempts, _ = _track(coord, fake_tg, {222: TelegramError(400, "Bad Request: chat not found")})
     coord.pending_dues = list(dues)
     coord._deliver_waits(clock.now)
@@ -493,7 +502,7 @@ def test_owner_400_on_one_chunk_does_not_hold_back_the_next(tmp_path, fake_tg, c
     from ke.telegram import TelegramError
 
     coord = _coord(tmp_path, fake_tg, clock)
-    dues = [_due(f"t_{i:02d}", need="x" * 900) for i in range(10)]  # three messages
+    dues = [_due(f"t_{i:02d}", options=FAT) for i in range(10)]  # three messages
     for d in dues:
         _wait_row(coord, d)
     fake_tg.fail_next = TelegramError(400, "Bad Request: can't parse message text")  # first chunk only
@@ -514,7 +523,7 @@ def test_permanent_owner_rejection_is_one_attempt_per_pass_and_logged_once(tmp_p
     from ke.telegram import TelegramError
 
     coord = _coord(tmp_path, fake_tg, clock)
-    dues = [_due(f"t_{i}", need="x" * 900) for i in range(10)]
+    dues = [_due(f"t_{i}", options=FAT) for i in range(10)]
     attempts, _ = _track(coord, fake_tg, {111: TelegramError(403, "Forbidden: bot was blocked by the user")})
     with caplog.at_level(logging.WARNING):
         for _ in range(3):
@@ -544,13 +553,16 @@ def test_escalation_copy_is_sent_when_the_owner_send_failed(tmp_path, fake_tg, c
 
 
 def test_escalation_copy_is_sent_when_the_owner_has_no_chat_id(tmp_path, fake_tg, clock):
+    from ke.messages import t
+
     coord = _coord(tmp_path, fake_tg, clock, escalate_to="ops")
     due = _due("t_1", owner="ghost", stage="escalation")
     _wait_row(coord, due)
     coord.pending_dues = [due]
     coord._deliver_waits(clock.now)
     (call,) = fake_tg.calls["send"]
-    assert call["chat_id"] == 222 and "ghost" in call["text"].splitlines()[0]
+    assert call["chat_id"] == 222 and call["text"].splitlines()[0] == t("waits.copy.lead")
+    assert "ghost" not in call["text"]  # role names never reach Telegram
     assert _stage(coord, due) is None  # the owner never got it
     coord.pending_dues = [due]
     coord._deliver_waits(clock.now)
@@ -597,7 +609,7 @@ def test_http_errors_do_not_abort_the_pass(tmp_path, fake_tg, clock):
 
 def test_at_most_three_messages_per_owner_per_pass(tmp_path, fake_tg, clock):
     coord = _coord(tmp_path, fake_tg, clock)
-    dues = [_due(f"t_{i:02d}", need="x" * 900) for i in range(30)]
+    dues = [_due(f"t_{i:02d}", options=FAT) for i in range(30)]
     coord.pending_dues = list(dues)
     coord._deliver_waits(clock.now)
     assert fake_tg.count("send") == 3
@@ -610,8 +622,8 @@ def test_at_most_three_messages_per_owner_per_pass(tmp_path, fake_tg, clock):
 
 def test_cap_is_per_recipient(tmp_path, fake_tg, clock):
     coord = _coord(tmp_path, fake_tg, clock)
-    coord.pending_dues = [_due(f"a{i:02d}", need="x" * 900) for i in range(20)] + [
-        _due(f"b{i:02d}", owner="ops", need="x" * 900) for i in range(20)
+    coord.pending_dues = [_due(f"a{i:02d}", options=FAT) for i in range(20)] + [
+        _due(f"b{i:02d}", owner="ops", options=FAT) for i in range(20)
     ]
     coord._deliver_waits(clock.now)
     chats = [c["chat_id"] for c in fake_tg.calls["send"]]
@@ -654,7 +666,7 @@ def test_no_telegram_client_logs_once_and_keeps_dues(tmp_path, clock, caplog):
 
 def test_oversized_group_is_split_and_each_message_has_its_own_items(tmp_path, fake_tg, clock):
     coord = _coord(tmp_path, fake_tg, clock)
-    dues = [_due(f"t_{i}", need="x" * 900) for i in range(10)]
+    dues = [_due(f"t_{i}", options=FAT) for i in range(10)]
     coord.pending_dues = dues
     coord._deliver_waits(clock.now)
     assert fake_tg.count("send") > 1
@@ -666,7 +678,9 @@ def test_oversized_group_is_split_and_each_message_has_its_own_items(tmp_path, f
         assert len(call["text"].encode("utf-16-le")) // 2 <= 4096
         items = json.loads(row["items_json"])
         if len(items) > 1:
-            assert f"{len(items)}. b · {items[-1]['task_id']}" in call["text"]
+            from ke.messages import circled
+
+            assert f"{circled(len(items))} B" in call["text"] and f"do {items[-1]['task_id']}" in call["text"]
     assert coord.pending_dues == []
 
 
@@ -674,7 +688,7 @@ def test_rate_limit_stops_that_owner_but_not_the_others(tmp_path, fake_tg, clock
     from ke.telegram import TelegramError
 
     coord = _coord(tmp_path, fake_tg, clock)
-    coord.pending_dues = [_due(f"t_{i}", need="x" * 900) for i in range(10)]
+    coord.pending_dues = [_due(f"t_{i}", options=FAT) for i in range(10)]
     coord.pending_dues.append(_due("t_ops", owner="ops"))
     fake_tg.fail_next = TelegramError(429, "slow down")
     coord._deliver_waits(clock.now)
@@ -697,13 +711,13 @@ def test_delivery_failure_does_not_stop_later_steps(tmp_path, fake_tg, clock):
 
 # -- veto hooks warning over Telegram -------------------------------------------
 def test_veto_warning_is_sent_once_to_default_owner(tmp_path, fake_tg, clock):
-    from ke.messages import t
+    from ke.messages import render_config_alert
 
     coord = _coord(tmp_path, fake_tg, clock, veto_hooks=False)
     coord.evaluate(1.0)
     coord.evaluate(2.0)
     (call,) = fake_tg.calls["send"]
-    assert call["chat_id"] == 111 and call["text"] == t("veto.warning")
+    assert call["chat_id"] == 111 and call["text"] == render_config_alert("veto")
     assert coord.store.kv_get("veto_hooks_warned") == "1"
     assert coord.store.kv_get("veto_hooks_warn_sent") == "1"
 
@@ -816,9 +830,10 @@ def test_escalated_copy_does_not_tell_the_contact_to_reply_done(tmp_path, fake_t
     coord._deliver_waits(clock.now)
     copy = next(c for c in fake_tg.calls["send"] if c["chat_id"] == 222)["text"]
     owner_msg = next(c for c in fake_tg.calls["send"] if c["chat_id"] == 111)["text"]
-    assert "done" not in copy.lower() and "How to reply" not in copy
-    assert copy.splitlines()[-1] == t("waits.how.copy", owner="sponsor")
-    assert owner_msg.splitlines()[-1].startswith("How to reply")  # the owner's own reminder keeps it
+    assert copy.splitlines()[0] == t("waits.copy.lead")
+    assert "reply" not in copy.lower() and "↩️" not in copy
+    # the owner's own reminder keeps its reply instructions
+    assert ("Then reply" in owner_msg) if n == 1 else ("↩️ When replying, name the item:" in owner_msg)
 
 
 def test_escalated_copy_footer_in_pt_br(tmp_path, fake_tg, clock, kanban_home, pt_br):  # noqa: F811
@@ -826,4 +841,5 @@ def test_escalated_copy_footer_in_pt_br(tmp_path, fake_tg, clock, kanban_home, p
     coord.pending_dues = [_due("t_1", stage="escalation")]
     coord._deliver_waits(clock.now)
     copy = next(c for c in fake_tg.calls["send"] if c["chat_id"] == 222)["text"]
-    assert "feito" not in copy and "só sponsor pode resolver" in copy
+    assert copy.splitlines()[0] == "Cópia para acompanhamento"
+    assert "responda" not in copy.lower() and "sponsor" not in copy

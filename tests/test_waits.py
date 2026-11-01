@@ -329,51 +329,52 @@ def _due(task_id="t_1", board="voz", owner="sponsor", stage="reminder2", age_s=7
 
 
 def test_render_single_item_follows_spec_format():
+    # message format v2: header, title, status, action, reply word, context; no ids, no number
     from ke.messages import render_waits
 
     txt = render_waits("sponsor", [_due("t_02690416", held=["t_cbdccb7a", "t_577bd508"])])
     lines = txt.splitlines()
-    assert lines[0].startswith("🟠") and "voz" in lines[0] and "2 h" in lines[0]
-    assert "ligue a placa" in txt and "o teste so roda com ela" in txt
-    assert "2 cards" in txt and "t_cbdccb7a" in txt and "t_577bd508" in txt
-    assert '"done"' in lines[-1] and lines[-1].endswith("hermes kanban-empowered done t_02690416")
-    assert "1." not in txt
+    assert lines[:5] == ["📋 KANBAN · NEEDS YOU", "1 pending · 2 blocked cards", "", "VOZ",
+                         "⏳ Stalled for 2 hours · blocks 2 cards"]
+    assert "👉 ligue a placa" in txt and "o teste so roda com ela" in txt
+    assert "Then reply: “feito”." in txt
+    assert "t_" not in txt and "hermes kanban-empowered" not in txt and "①" not in txt
 
 
 def test_render_omits_held_line_when_nothing_is_held():
     from ke.messages import render_waits
 
     txt = render_waits("sponsor", [_due(held=[])])
-    assert "t_1" in txt.splitlines()[-1]
-    assert len(txt.splitlines()) == 4  # header, need, why, how to reply
+    assert "⏳ Stalled for 2 hours" in txt.splitlines() and "blocks" not in txt
+    # header (2) + blank, title, status, blank, action, reply word, blank, why
+    assert len(txt.splitlines()) == 10
 
 
 def test_render_numbers_items_when_grouped():
     from ke.messages import render_waits
 
     txt = render_waits("sponsor", [_due("t_a", board="b1"), _due("t_b", board="b2", held=["t_x"])])
-    assert "1." in txt and "2." in txt and '"1 done"' in txt
-    assert "t_a" in txt and "t_b" in txt and "t_x" in txt
-    assert txt.splitlines()[-1].endswith("hermes kanban-empowered done <id>")
+    assert "① B1" in txt and "② B2" in txt and "-" * 38 in txt
+    assert txt.splitlines()[-3:] == ["↩️ When replying, name the item:", "“1 — feito”", "“2 — feito”"]
+    assert "t_a" not in txt and "t_x" not in txt
 
 
 def test_render_raw_reason_without_ask():
     from ke.messages import render_waits
 
-    txt = render_waits("sponsor", [_due(ask=False, reason="aguardando o sponsor")])
-    assert "aguardando o sponsor" in txt and "t_1" in txt
+    txt = render_waits("sponsor", [_due(ask=False, reason="aguardando a placa")])
+    assert "👉 aguardando a placa" in txt and "Then reply: “done”." in txt and "t_1" not in txt
 
 
-def test_render_marks_escalation_and_digest():
+def test_render_has_no_stage_marker():
+    # "urgent" only with a concrete reason: v0.1 has no deadlines, so every stage looks the same
     from ke.messages import render_waits
 
-    reminder = render_waits("sponsor", [_due(stage="reminder1")]).splitlines()[0]
-    escalation = render_waits("sponsor", [_due(stage="escalation", age_s=8 * H)]).splitlines()[0]
-    digest = render_waits("sponsor", [_due(stage="digest", age_s=32 * H)]).splitlines()[0]
-    assert len({reminder, escalation, digest}) == 3
-    assert "8 h" in escalation and "1 d 8 h" in digest
-    grouped = render_waits("sponsor", [_due(stage="reminder1"), _due("t_2", stage="escalation")])
-    assert grouped.splitlines()[0].startswith("🔴")  # the most severe stage sets the tone
+    reminder = render_waits("sponsor", [_due(stage="reminder1")]).splitlines()
+    escalation = render_waits("sponsor", [_due(stage="escalation", age_s=8 * H)]).splitlines()
+    digest = render_waits("sponsor", [_due(stage="digest", age_s=32 * H)]).splitlines()
+    assert reminder[0] == escalation[0] == digest[0] == "📋 KANBAN · NEEDS YOU"
+    assert "⏳ Stalled for 8 hours" in escalation and "⏳ Stalled for 1 day" in digest
 
 
 @pytest.fixture
@@ -398,18 +399,14 @@ def test_render_in_pt_br(pt_br):
     from ke.messages import render_waits
 
     single = render_waits("sponsor", [_due("t_02690416", held=["t_a", "t_b"])])
-    assert "Precisa de você" in single.splitlines()[0] and "parado há 2 h" in single.splitlines()[0]
-    assert "O que preciso: ligue a placa" in single
-    assert "Por quê: o teste so roda com ela" in single
-    assert "O que está parado atrás: 2 cards (t_a, t_b)." in single
-    assert single.splitlines()[-1] == (
-        'Como responder: responda "feito" a esta mensagem ou rode: hermes kanban-empowered done t_02690416'
-    )
+    lines = single.splitlines()
+    assert lines[:2] == ["📋 KANBAN · PRECISA DE VOCÊ", "1 pendência · 2 cards bloqueados"]
+    assert "⏳ Parado há 2 horas · bloqueia 2 cards" in lines
+    assert "👉 ligue a placa" in lines and "Depois, responda: “feito”." in lines
+    assert lines[-1] == "o teste so roda com ela"
     grouped = render_waits("sponsor", [_due("t_a"), _due("t_b")])
-    assert "1." in grouped and "2." in grouped
-    assert grouped.splitlines()[-1] == (
-        'Como responder: responda "1 feito" a esta mensagem ou rode: hermes kanban-empowered done <id>'
-    )
+    assert "① VOZ" in grouped and "② VOZ" in grouped
+    assert grouped.splitlines()[-3:] == ["↩️ Ao responder, indique o item:", "“1 — feito”", "“2 — feito”"]
 
 
 # -- coordinator wiring --------------------------------------------------------

@@ -101,24 +101,32 @@ def test_render_contains_spec_sections():
     from ke.panel import render_telegram
 
     text = render_telegram(snapshot_fixture())
-    for s in ("Kanban now", "Needs you", "Resolved on its own today", 'Reply "1 done"'):
+    for s in ("📋 KANBAN NOW", "① MATRIX", "Resolved on its own today", "↩️ When replying, name the item:"):
         assert s in text
 
 
 def test_render_title_counts_items_and_guards():
+    # message format v2: the reminders' vocabulary, circled numbers, no card ids
     from ke.panel import render_telegram
 
     lines = render_telegram(snapshot_fixture()).splitlines()
-    assert lines[0] == "Kanban now · 14:05"
-    assert lines[1] == "1 running · 1 held · 2 depend on you"
+    assert lines[0] == "📋 KANBAN NOW · 14:05"
+    assert lines[1] == "1 running · 1 on hold · 2 pending"
     text = "\n".join(lines)
-    assert "1. matrix: plug the board in" in text
-    assert "2. side: approve the deploy" in text
-    assert "2 h 5 min" in text and "holding 3" in text and "holding 0" in text
+    assert "① MATRIX\n⏳ Stalled for 2 hours · blocks 3 cards\n👉 plug the board in" in text
+    assert "② SIDE\n⏳ Stalled for 5 min\n👉 approve the deploy" in text
     assert "Resolved on its own today: 4" in text
-    assert "t_done1" in text and "13:40" in text
+    assert "Last: MATRIX at 13:40" in text and "t_" not in text
     assert "Long respawn guards: 1" in text  # the long-guards line
-    assert lines[-1].startswith('Reply "1 done"')
+    assert lines[-3:] == ["↩️ When replying, name the item:", "“1 — done”", "“2 — done”"]
+
+
+def test_render_reply_hint_uses_each_items_word_or_option():
+    from ke.panel import render_telegram
+
+    waits = [{**_item(1), "hint": "conectei"}, {**_item(2, board="side", age_s=300), "hint": "A"}]
+    lines = render_telegram(snapshot_fixture(human_waits=waits)).splitlines()
+    assert lines[-2:] == ["“1 — conectei”", "“2 — A”"]
 
 
 def test_render_without_waits_resolved_or_guards():
@@ -126,7 +134,7 @@ def test_render_without_waits_resolved_or_guards():
 
     text = render_telegram(snapshot_fixture(human_waits=[], held=[], running=[], last_resolved=None,
                                             resolved_today=0, long_guards=0))
-    assert "Needs you" not in text and "guard" not in text.lower() and "Reply" not in text
+    assert "①" not in text and "guard" not in text.lower() and "↩️" not in text
     assert "Nothing needs you right now." in text
     assert "Resolved on its own today: 0" in text
 
@@ -135,7 +143,8 @@ def test_render_in_pt_br(pt_br):  # noqa: F811
     from ke.panel import render_telegram
 
     text = render_telegram(snapshot_fixture())
-    for s in ("Kanban agora · 14:05", "Precisa de você", "Resolvido sozinho hoje: 4", 'Responda "1 feito"'):
+    for s in ("📋 KANBAN AGORA · 14:05", "2 pendências", "⏳ Parado há 2 horas · bloqueia 3 cards",
+              "Resolvido sozinho hoje: 4", "↩️ Ao responder, indique o item:", "“1 — feito”"):
         assert s in text
 
 
@@ -150,7 +159,9 @@ def test_render_clips_long_lists_to_telegram_limit():
     shown = shown_waits(snap)
     assert 0 < len(shown) < len(waits)
     assert f"{len(waits) - len(shown)} more" in text
-    assert text.count("\n1. ") == 1 and f"\n{len(shown)}. " in text
+    from ke.messages import circled
+
+    assert text.count("\n① ") == 1 and f"\n{circled(len(shown))} " in text
 
 
 def test_shown_waits_oldest_first_and_stable():
@@ -166,7 +177,7 @@ def test_render_terminal_has_rows_and_no_reply_hint():
     text = render_terminal(snapshot_fixture())
     assert "Kanban now · 14:05" in text
     assert "matrix/t_r1" in text and "matrix/t_g1" in text  # running and held rows
-    assert "1. matrix: plug the board in" in text
+    assert "1. matrix/t_00000001: plug the board in" in text  # the terminal (CLI) keeps the ids
     assert "Resolved on its own today: 4" in text
     assert "Reply" not in text and "hermes kanban-empowered done" in text
 
@@ -255,7 +266,7 @@ def test_panel_edits_when_the_text_changed(coord, fake_tg, clock):
     coord.update_panel(clock.now)
     assert fake_tg.count("send") == 1 and fake_tg.count("edit") == 1
     assert fake_tg.calls["edit"][0]["message_id"] == fake_tg.calls["send"][0]["message_id"]
-    assert "Needs you" in fake_tg.calls["edit"][0]["text"]
+    assert "①" in fake_tg.calls["edit"][0]["text"]
     coord.update_panel(clock.now)
     assert fake_tg.count("edit") == 1  # unchanged again
 
@@ -397,7 +408,7 @@ def test_panel_recreated_when_the_owner_chat_changes(kanban_home, tmp_path, cloc
 
 def test_panel_step_runs_in_evaluate_after_the_others(coord, fake_tg, clock):
     coord.evaluate(clock.now)
-    assert fake_tg.count("send") == 1 and "Kanban now" in fake_tg.last_text
+    assert fake_tg.count("send") == 1 and "KANBAN NOW" in fake_tg.last_text
 
 
 def test_panel_step_failure_is_contained(coord, fake_tg, clock, monkeypatch, caplog):
@@ -487,7 +498,7 @@ def test_numbered_done_on_the_panel_unblocks_that_item(rig, fake_tg, clock):
     n = [i["task_id"] for i in items].index(t2) + 1
     assert rig.handle(str(OWNER), f"{n} done", clock.now + 1)["action"] == "skip"
     assert rig.status(t2) != "blocked" and rig.status(t1) == "blocked"
-    assert fake_tg.calls["send"][-1]["reply_to"] == rig.msg or "Unblocked" in fake_tg.last_text
+    assert fake_tg.calls["send"][-1]["reply_to"] == rig.msg or "✅" in fake_tg.last_text
 
 
 def test_bare_done_on_a_single_item_panel(rig, clock):
@@ -882,7 +893,7 @@ def test_title_fallback_is_one_clipped_line():
     item["title"] = "real title\n9. fake numbered line\n   " + "x" * 400
     text = render_telegram(snapshot_fixture(human_waits=[item]))
     assert "\n9. fake" not in text and "real title 9. fake numbered line" in text
-    line = next(l for l in text.splitlines() if l.startswith("1. matrix:"))
+    line = next(l for l in text.splitlines() if l.startswith("👉 real title"))
     assert len(line) < 200 and line.endswith("…")
 
 

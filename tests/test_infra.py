@@ -661,11 +661,11 @@ def test_alert_texts_render_in_pt_br(pt_br):
     budget = render_infra_alert(
         {"kind": "budget", "board": "tw", "task_id": "t_1", "title": "Deploy", "count": 2, "window_s": 86400}
     )
-    assert "tw" in budget and "t_1" in budget and "Deploy" in budget
-    assert "1 d" in budget  # 86400 s, via human_age
+    assert "TW" in budget and "t_1" in budget and "Deploy" in budget  # the id only in the explain command
+    assert "1 dia" in budget  # 86400 s, via natural_age
     assert "desfazer" in budget  # translated, not the English fallback
     systemic = render_infra_alert({"kind": "systemic", "n": 3, "window_s": 3600})
-    assert "3" in systemic and "1 h" in systemic and "infraestrutura" in systemic
+    assert "3" in systemic and "1 hora" in systemic and "infraestrutura" in systemic
 
 
 def test_undo_comment_follows_the_language(kanban_home, tmp_path, clock, pt_br):

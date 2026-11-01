@@ -108,3 +108,15 @@ def test_kanban_button_follows_router_navigation_not_only_hashchange():
     assert "'popstate'" in src and "'hashchange'" in src
     assert re.search(r"ctx\.setInterval\(\s*checkRoute\s*,\s*ROUTE_POLL_MS\s*\)", src)
     assert re.search(r"const ROUTE_POLL_MS = 500\b", src)
+
+
+def test_attempts_copy_and_the_card_label_are_used():
+    """Review minor 7: idiomatic Portuguese plural; ui.drawer.card labels the card title in the drawer."""
+    from agent.i18n_layers import parse_locale_file
+
+    for name in ("pt", "pt-br"):
+        cat = parse_locale_file(REPO / "locales" / f"{name}.yaml")
+        assert cat["kanban_empowered.ui.infra.attempts.one"] == "desfeito automaticamente {n} vez"
+        assert cat["kanban_empowered.ui.infra.attempts.many"] == "desfeito automaticamente {n} vezes"
+        assert "desfazeres" not in (REPO / "locales" / f"{name}.yaml").read_text(encoding="utf-8")
+    assert "t('ui.drawer.card')" in _source()

@@ -807,6 +807,9 @@ function Drawer({ target, t, onClose }) {
                   jsx('div', { className: 'ke-label', children: t('ui.drawer.project') }),
                   jsx('div', { style: { fontWeight: 600 }, children: (item && item.board_name) || target.board }),
                   item && item.title
+                    ? jsx('div', { className: 'ke-label', style: { marginTop: 8 }, children: t('ui.drawer.card') })
+                    : null,
+                  item && item.title
                     ? jsx('div', { className: 'ke-muted', style: { marginTop: 2, overflowWrap: 'anywhere' }, children: item.title })
                     : null
                 ]

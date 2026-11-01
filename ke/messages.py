@@ -294,9 +294,12 @@ def sentences(text: str, n: int = 2) -> str:
     return " ".join(parts[:n])
 
 
+_CIRCLED = "①②③④⑤⑥⑦⑧⑨⑩⑪⑫⑬⑭⑮⑯⑰⑱⑲⑳"
+
+
 def circled(n: int) -> str:
     """①..⑳, then ``(21)``, ``(22)``…"""
-    return chr(0x2460 + n - 1) if 1 <= n <= 20 else f"({n})"
+    return _CIRCLED[n - 1] if 1 <= n <= len(_CIRCLED) else f"({n})"
 
 
 def board_title(board: str, name: str = "", subject: str = "") -> str:

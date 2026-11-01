@@ -901,3 +901,43 @@ def test_doctor_suspended_boards_in_pt_br(kanban_home, tmp_path, capsys, pt_br):
     s = _cli_settings(tmp_path)
     cli.run_doctor(s)
     assert _doctor(capsys)["boards_suspended"] == "nenhum"
+
+
+# -- Desktop half (static checks; the lint/validate checks live in test_desktop_plugin.py) -------------
+def _js():
+    from pathlib import Path
+
+    return (Path(__file__).resolve().parent.parent / "desktop" / "plugin.js").read_text(encoding="utf-8")
+
+
+def test_desktop_shows_the_suspended_section_and_status_tags():
+    src = _js()
+    assert "data.suspended" in src and "t('ui.section.suspended')" in src
+    assert "storageGet('suspendedOpen', false)" in src  # collapsed unless the viewer opened it
+    tags = src.count("jsx(StatusTag")
+    assert tags >= 4, tags  # needs-you card, infra card, running row, drawer header
+    assert "t('ui.status.' + status)" in src
+    assert "t('ui.needs.reminders_paused')" in src
+
+
+def test_desktop_projects_panel_posts_the_status_and_refreshes():
+    src = _js()
+    block = src[src.index("function Projects("):][:4000]
+    assert "api('/board-status', { method: 'POST', body: { board, status } })" in block
+    assert "invalidateQueries({ queryKey: [ID, 'overview'] })" in block
+    assert "t('ui.projects.note')" in block
+    assert "STATUSES.map" in block
+    assert "boards_status" in src and "t('ui.projects')" in src
+    assert "const STATUSES = ['active', 'suspended', 'done']" in src
+
+
+def test_every_ui_key_the_desktop_uses_is_in_the_catalog():
+    import re
+
+    from ke import messages
+
+    src = _js()
+    used = set(re.findall(r"\bt\('(ui\.[A-Za-z0-9_.]+)'", src))
+    used |= {"ui.status." + s for s in ("active", "suspended", "done")}
+    missing = sorted(k for k in used if k not in messages.EN and not k.endswith("."))
+    assert not missing, missing

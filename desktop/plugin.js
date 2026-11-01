@@ -11,6 +11,12 @@
  *   GET  /count     the number of waits that need you (the Kanban header button's badge)
  *   GET  /item      one item: the reminder text exactly as Telegram shows it, conditions, comments
  *   POST /answer    the owner's answer, classified and applied exactly like a Telegram reply
+ *   POST /board-status  a board's status (active / suspended / done) from the "Projects" panel
+ *
+ * Board status: items of a suspended or done board come in overview.suspended and are shown in a collapsed
+ * "Suspended projects (N)" section below "Needs you" (still openable and answerable); every item, running row
+ * and the drawer carry a status tag (none for an active board). The "Projects" button opens a panel listing
+ * each board with a status selector and a one-line note that new cards will not be started.
  *
  * Contributions: a full page at /kanban-empowered, a palette command, a sidebar row (only while the
  * show_sidebar_menu setting is on) and a compact "Empowered" button in the Kanban page header (only
@@ -259,6 +265,13 @@ const CSS = `
 .ke-cond { display: grid; grid-template-columns: 16px 90px minmax(0, 1fr); gap: 6px; padding: 3px 0; }
 .ke-comment { border-left: 2px solid var(--ui-stroke-secondary); padding: 2px 0 2px 8px; }
 .ke-error { padding: 40px 16px; }
+.ke-tag { flex: none; }
+.ke-head-toggle { display: flex; align-items: center; gap: 6px; }
+.ke-section-closed .ke-section-head { border-bottom: none; }
+.ke-proj-row { display: grid; grid-template-columns: minmax(0, 1fr) minmax(130px, 170px); gap: 10px; align-items: center;
+  padding: 7px 0; border-bottom: 1px solid var(--ui-stroke-tertiary); }
+.ke-proj-row:last-child { border-bottom: none; }
+.ke-note { font-size: 0.75rem; color: var(--ui-yellow); }
 @container (max-width: 900px) {
   .ke-cols { grid-template-columns: minmax(0, 1fr); }
   .ke-metrics { grid-template-columns: repeat(2, minmax(0, 1fr)); }
@@ -312,12 +325,35 @@ function Empty({ text }) {
   return jsx('div', { className: 'ke-empty', children: text })
 }
 
+// -- board (project) status ---------------------------------------------------------------------
+const STATUSES = ['active', 'suspended', 'done']
+const STATUS_TONE = { suspended: 'amber', done: 'green' }
+
+function isPaused(status) {
+  return Boolean(status) && status !== 'active'
+}
+
+// The tag next to a board name: amber "Suspended", green "Done", nothing for an active board.
+function StatusTag({ status, t }) {
+  if (!isPaused(status)) {
+    return null
+  }
+
+  return jsx('span', {
+    className: 'ke-chip ke-chip-tone ke-tag',
+    style: TONE[STATUS_TONE[status]] || TONE.neutral,
+    children: t('ui.status.' + status)
+  })
+}
+
 // -- needs you ----------------------------------------------------------------------------------
 function NeedCard({ item, t, onOpen }) {
+  const paused = isPaused(item.board_status)
+
   if (item.kind === 'infra_exhausted') {
     return jsxs('div', {
       className: 'ke-card',
-      style: TONE.red,
+      style: paused ? TONE.neutral : TONE.red,
       children: [
         jsxs('div', {
           className: 'ke-card-top',
@@ -330,6 +366,7 @@ function NeedCard({ item, t, onOpen }) {
           className: 'ke-chips',
           children: [
             jsx('span', { className: 'ke-chip', children: item.board_title }),
+            jsx(StatusTag, { status: item.board_status, t }),
             jsx('span', { className: 'ke-chip ke-chip-tone', children: t('ui.needs.exhausted') }),
             item.held_behind_count
               ? jsx('span', { className: 'ke-chip', children: plural(t, 'ui.needs.blocks', item.held_behind_count) })
@@ -348,7 +385,9 @@ function NeedCard({ item, t, onOpen }) {
     })
   }
 
-  const reminder = item.reminder_sent
+  const reminder = paused
+    ? t('ui.needs.reminders_paused')
+    : item.reminder_sent
     ? t('ui.needs.reminder_sent', { age: item.next_reminder_text || ageText(t, item.next_reminder_in_s) })
     : item.next_reminder_in_s > 0
       ? t('ui.needs.reminder_next', { age: item.next_reminder_text || ageText(t, item.next_reminder_in_s) })
@@ -356,7 +395,7 @@ function NeedCard({ item, t, onOpen }) {
 
   return jsxs('div', {
     className: 'ke-card',
-    style: TONE.amber,
+    style: paused ? TONE.neutral : TONE.amber,
     children: [
       jsxs('div', {
         className: 'ke-card-top',
@@ -369,6 +408,7 @@ function NeedCard({ item, t, onOpen }) {
         className: 'ke-chips',
         children: [
           jsx('span', { className: 'ke-chip', title: item.board_title, children: item.board_title }),
+          jsx(StatusTag, { status: item.board_status, t }),
           item.held_behind_count
             ? jsx('span', { className: 'ke-chip ke-chip-tone', children: plural(t, 'ui.needs.blocks', item.held_behind_count) })
             : null
@@ -417,6 +457,158 @@ function NeedsYou({ items, t, onOpen }) {
   })
 }
 
+// Items of suspended / done boards: a collapsed section (the open state is remembered per viewer).
+function SuspendedProjects({ items, t, onOpen }) {
+  const [open, setOpenState] = useState(() => storageGet('suspendedOpen', false) === true)
+
+  if (!items.length) {
+    return null
+  }
+
+  const toggle = () => {
+    setOpenState(!open)
+    storageSet('suspendedOpen', !open)
+  }
+
+  return jsxs('section', {
+    className: open ? 'ke-section' : 'ke-section ke-section-closed',
+    style: TONE.neutral,
+    children: [
+      jsx('div', {
+        className: 'ke-section-head',
+        children: jsx(Button, {
+          variant: 'ghost',
+          size: 'xs',
+          'aria-expanded': open,
+          onClick: toggle,
+          children: jsxs('span', {
+            className: 'ke-head-toggle',
+            children: [
+              jsx(Codicon, { name: open ? 'chevron-down' : 'chevron-right' }),
+              jsx('span', { className: 'ke-section-title', children: t('ui.section.suspended') + ' (' + items.length + ')' })
+            ]
+          })
+        })
+      }),
+      open
+        ? jsx('div', {
+            className: 'ke-section-body',
+            children: items.map(item => jsx(NeedCard, { item, t, onOpen }, item.board + '/' + item.task_id))
+          })
+        : null
+    ]
+  })
+}
+
+// The "Projects" panel: every board with a status selector. A change POSTs /board-status and refreshes.
+function Projects({ boards, t, onClose }) {
+  const queryClient = useQueryClient()
+  const [local, setLocal] = useState({}) // board -> status chosen here, until the overview shows it
+  const [busy, setBusy] = useState({})
+  const [error, setError] = useState(null)
+
+  useEffect(() => {
+    const stale = Object.keys(local).filter(b => boards.some(row => row.board === b && row.status === local[b]))
+
+    if (stale.length) {
+      setLocal(prev => {
+        const next = { ...prev }
+        stale.forEach(b => delete next[b])
+
+        return next
+      })
+    }
+  }, [boards])
+
+  const change = (board, status) => {
+    setLocal(prev => ({ ...prev, [board]: status }))
+    setBusy(prev => ({ ...prev, [board]: true }))
+    setError(null)
+    api('/board-status', { method: 'POST', body: { board, status } })
+      .then(() => {
+        queryClient.invalidateQueries({ queryKey: [ID, 'overview'] })
+        queryClient.invalidateQueries({ queryKey: [ID, 'count'] })
+      })
+      .catch(err => {
+        setLocal(prev => {
+          const next = { ...prev }
+          delete next[board]
+
+          return next
+        })
+        setError(t('ui.projects.failed', { error: String((err && err.message) || err) }))
+      })
+      .finally(() =>
+        setBusy(prev => {
+          const next = { ...prev }
+          delete next[board]
+
+          return next
+        })
+      )
+  }
+
+  return jsx(Section, {
+    title: t('ui.projects.title'),
+    tone: 'violet',
+    extra: jsx(Button, {
+      variant: 'ghost',
+      size: 'icon-xs',
+      'aria-label': t('ui.drawer.close'),
+      title: t('ui.drawer.close'),
+      onClick: onClose,
+      children: jsx(Codicon, { name: 'close' })
+    }),
+    children: jsxs(Fragment, {
+      children: [
+        jsx('div', {
+          className: 'ke-table',
+          children: boards.map(row => {
+            const value = local[row.board] || row.status
+
+            return jsxs(
+              'div',
+              {
+                className: 'ke-proj-row',
+                children: [
+                  jsxs('div', {
+                    style: { minWidth: 0 },
+                    children: [
+                      jsx('div', { className: 'ke-ellipsis', title: row.board_title, children: row.board_title }),
+                      isPaused(value)
+                        ? jsx('div', { className: 'ke-note', children: t('ui.projects.note') })
+                        : jsx('div', { className: 'ke-sub ke-ellipsis', children: row.board })
+                    ]
+                  }),
+                  jsx(Select, {
+                    value,
+                    disabled: Boolean(busy[row.board]),
+                    onValueChange: next => {
+                      if (next && next !== value) {
+                        change(row.board, next)
+                      }
+                    },
+                    children: [
+                      jsx(SelectTrigger, { 'aria-label': row.board_title, children: jsx(SelectValue, {}) }, 'trigger'),
+                      jsx(
+                        SelectContent,
+                        { children: STATUSES.map(st => jsx(SelectItem, { value: st, children: t('ui.status.' + st) }, st)) },
+                        'content'
+                      )
+                    ]
+                  })
+                ]
+              },
+              row.board
+            )
+          })
+        }),
+        error ? jsx('div', { className: 'ke-result', style: TONE.red, children: error }) : null
+      ]
+    })
+  })
+}
+
 // -- running ------------------------------------------------------------------------------------
 function Running({ rows, t }) {
   const head = jsxs('div', {
@@ -456,7 +648,13 @@ function Running({ rows, t }) {
                         jsx('div', { className: 'ke-sub ke-ellipsis', children: r.profile || '—' })
                       ]
                     }),
-                    jsx('div', { className: 'ke-cell ke-ellipsis ke-muted', title: r.board_name, children: r.board_name }),
+                    jsxs('div', {
+                      className: 'ke-cell ke-cell-main ke-muted',
+                      children: [
+                        jsx('span', { className: 'ke-ellipsis', title: r.board_name, children: r.board_name }),
+                        jsx(StatusTag, { status: r.board_status, t })
+                      ]
+                    }),
                     jsxs('div', {
                       className: 'ke-cell',
                       children: [
@@ -814,7 +1012,13 @@ function Drawer({ target, t, onClose }) {
                 style: { minWidth: 0 },
                 children: [
                   jsx('div', { className: 'ke-label', children: t('ui.drawer.project') }),
-                  jsx('div', { style: { fontWeight: 600 }, children: (item && item.board_name) || target.board }),
+                  jsxs('div', {
+                    className: 'ke-cell-main',
+                    children: [
+                      jsx('span', { style: { fontWeight: 600 }, children: (item && item.board_name) || target.board }),
+                      jsx(StatusTag, { status: item && item.board_status, t })
+                    ]
+                  }),
                   item && item.title
                     ? jsx('div', { className: 'ke-label', style: { marginTop: 8 }, children: t('ui.drawer.card') })
                     : null,
@@ -841,7 +1045,7 @@ function Drawer({ target, t, onClose }) {
 }
 
 // -- the page -----------------------------------------------------------------------------------
-function BoardFilter({ boards, names, value, onChange, t }) {
+function BoardFilter({ boards, names, statuses, value, onChange, t }) {
   return jsx(Select, {
     value,
     onValueChange: onChange,
@@ -852,7 +1056,18 @@ function BoardFilter({ boards, names, value, onChange, t }) {
         {
           children: [
             jsx(SelectItem, { value: 'all', children: t('ui.filter.all') }, 'all'),
-            ...boards.map(b => jsx(SelectItem, { value: b, children: (names && names[b]) || b }, b))
+            ...boards.map(b =>
+              jsx(
+                SelectItem,
+                {
+                  value: b,
+                  children:
+                    ((names && names[b]) || b) +
+                    (statuses && isPaused(statuses[b]) ? ' · ' + t('ui.status.' + statuses[b]) : '')
+                },
+                b
+              )
+            )
           ]
         },
         'content'
@@ -866,6 +1081,7 @@ function EmpoweredPage() {
   const now = useClock()
   const [board, setBoardState] = useState(() => storageGet('board', 'all'))
   const [open, setOpen] = useState(null)
+  const [projectsOpen, setProjectsOpen] = useState(false)
   const overview = useOverview(board, POLL_MS)
   const data = overview.data
 
@@ -886,6 +1102,11 @@ function EmpoweredPage() {
   const nowS = Math.floor(now / 1000)
   const live = !overview.error && data
   const updated = overview.dataUpdatedAt ? Math.max(0, Math.floor((now - overview.dataUpdatedAt) / 1000)) : null
+  const boardsStatus = (data && data.boards_status) || []
+  const statusOf = {}
+  boardsStatus.forEach(row => {
+    statusOf[row.board] = row.status
+  })
 
   const header = jsxs('div', {
     className: 'ke-header',
@@ -901,7 +1122,22 @@ function EmpoweredPage() {
       jsxs('div', {
         className: 'ke-tools',
         children: [
-          data ? jsx(BoardFilter, { boards: data.boards || [], names: data.board_names, value: board, onChange: setBoard, t }) : null,
+          data
+            ? jsx(BoardFilter, { boards: data.boards || [], names: data.board_names, statuses: statusOf, value: board, onChange: setBoard, t })
+            : null,
+          data
+            ? jsx(Button, {
+                variant: 'ghost',
+                size: 'xs',
+                'aria-pressed': projectsOpen,
+                title: t('ui.projects.title'),
+                onClick: () => setProjectsOpen(!projectsOpen),
+                children: jsxs('span', {
+                  className: 'ke-head-toggle',
+                  children: [jsx(Codicon, { name: 'project' }), jsx('span', { children: t('ui.projects') })]
+                })
+              })
+            : null,
           jsxs('span', {
             className: 'ke-live',
             children: [
@@ -945,6 +1181,7 @@ function EmpoweredPage() {
     const m = data.metrics || {}
     content = jsxs(Fragment, {
       children: [
+        projectsOpen ? jsx(Projects, { boards: boardsStatus, t, onClose: () => setProjectsOpen(false) }) : null,
         jsxs('div', {
           className: 'ke-metrics',
           children: [
@@ -961,6 +1198,7 @@ function EmpoweredPage() {
               className: 'ke-col',
               children: [
                 jsx(NeedsYou, { items: data.needs_you || [], t, onOpen }),
+                jsx(SuspendedProjects, { items: data.suspended || [], t, onOpen }),
                 jsx(Running, { rows: data.running || [], t })
               ]
             }),

@@ -43,7 +43,7 @@ import {
   useQuery,
   useQueryClient
 } from '@hermes/plugin-sdk'
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { Fragment, jsx, jsxs } from 'react/jsx-runtime'
 
 const ID = 'kanban-empowered'
@@ -243,6 +243,7 @@ const CSS = `
 .ke-tone-green { color: var(--ui-green); }
 .ke-tone-amber { color: var(--ui-yellow); }
 .ke-backdrop { position: absolute; inset: 0; background: color-mix(in srgb, var(--ui-bg-elevated) 55%, transparent); z-index: 20; }
+.ke-drawer:focus { outline: none; }
 .ke-drawer { position: absolute; top: 0; right: 0; bottom: 0; width: min(460px, 100%); z-index: 21; overflow: auto;
   background: var(--ui-bg-elevated); border-left: 1px solid var(--ui-stroke-secondary); display: flex; flex-direction: column; }
 .ke-drawer-head { display: flex; justify-content: space-between; align-items: flex-start; gap: 10px; padding: 14px 16px;
@@ -634,17 +635,22 @@ function Drawer({ target, t, onClose }) {
   const [sending, setSending] = useState(false)
   const [result, setResult] = useState(null)
 
-  useEffect(() => {
-    if (!pluginCtx) {
-      return undefined
-    }
+  // Escape is handled on the drawer itself (focused when it opens), never on the window: an Escape that
+  // closes the palette or a popover over the page must not also close the drawer.
+  const drawerRef = useRef(null)
 
-    return pluginCtx.addEventListener(window, 'keydown', event => {
-      if (event.key === 'Escape') {
-        onClose()
-      }
-    })
-  }, [onClose])
+  useEffect(() => {
+    if (drawerRef.current && typeof drawerRef.current.focus === 'function') {
+      drawerRef.current.focus()
+    }
+  }, [])
+
+  const onDrawerKeyDown = event => {
+    if (event.key === 'Escape' && !event.defaultPrevented) {
+      event.preventDefault()
+      onClose()
+    }
+  }
 
   const item = detail.data
   const human = item && item.kind === 'human_wait'
@@ -794,6 +800,9 @@ function Drawer({ target, t, onClose }) {
       jsx('div', { className: 'ke-backdrop', onClick: onClose }),
       jsxs('aside', {
         className: 'ke-drawer',
+        ref: drawerRef,
+        tabIndex: -1,
+        onKeyDown: onDrawerKeyDown,
         role: 'dialog',
         'aria-modal': true,
         'aria-label': (item && item.title) || target.task_id,

@@ -120,3 +120,11 @@ def test_attempts_copy_and_the_card_label_are_used():
         assert cat["kanban_empowered.ui.infra.attempts.many"] == "desfeito automaticamente {n} vezes"
         assert "desfazeres" not in (REPO / "locales" / f"{name}.yaml").read_text(encoding="utf-8")
     assert "t('ui.drawer.card')" in _source()
+
+
+def test_escape_is_handled_by_the_drawer_not_the_window():
+    """Review minor 9: Escape that closes the palette or a popover must not also close the drawer."""
+    src = _source()
+    assert "'keydown'" not in src
+    drawer = src[src.index("className: 'ke-drawer'"):][:600]
+    assert "onKeyDown" in drawer and "tabIndex: -1" in drawer and "defaultPrevented" in src

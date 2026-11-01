@@ -678,3 +678,36 @@ def test_one_failure_uses_the_singular(kanban_home, tmp_path, clock):
     tid = gave_up_with_runs(["infra"])
     ir.evaluate(clock.now)
     assert any("1 infrastructure failure (" in c for c in _comments(tid))
+
+
+# -- the exit hook's board (final review I-2) -------------------------------------------------
+def test_worker_exited_hook_finds_the_card_on_its_real_board(kanban_home, tmp_path, clock):
+    """Hermes reports ``board=get_current_board()``, which is wrong for a non-default board in the gateway."""
+    from hermes_cli import kanban_db_boards as kbb
+    from ke import hermes_api
+
+    kbb.create_board("side")
+    ir, store = _ir(tmp_path, clock)
+    with hermes_api.connect("side") as conn:
+        tid = create_task(conn, title="x", assignee="dev")
+        _fail_run(conn, tid, INFRA_ERR)
+        run_id = hermes_api.runs(conn, tid)[-1].id
+    ir.on_worker_exited(task_id=tid, board="default", run_id=run_id, exit_kind="nonzero_exit")
+    (row,) = [a for a in store.actions_since(0) if a["kind"] == "infra_exit"]
+    assert (row["board"], row["task_id"]) == ("side", tid)
+    assert row["detail"] == f"infra:{run_id}"
+
+
+def test_worker_exited_hook_keeps_the_reported_board_when_the_card_is_there(kanban_home, tmp_path, clock):
+    from hermes_cli import kanban_db_boards as kbb
+    from ke import hermes_api
+
+    kbb.create_board("side")
+    ir, store = _ir(tmp_path, clock)
+    with hermes_api.connect("side") as conn:
+        tid = create_task(conn, title="x", assignee="dev")
+        _fail_run(conn, tid, CONTENT_ERR)
+        run_id = hermes_api.runs(conn, tid)[-1].id
+    ir.on_worker_exited(task_id=tid, board="side", run_id=run_id, exit_kind="nonzero_exit")
+    (row,) = [a for a in store.actions_since(0) if a["kind"] == "infra_exit"]
+    assert (row["board"], row["detail"]) == ("side", f"content:{run_id}")

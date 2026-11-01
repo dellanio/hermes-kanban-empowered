@@ -124,16 +124,43 @@ class InfraRecovery:
             tid = kw.get("task_id")
             if not tid:
                 return
-            board = kw.get("board") or "default"
+            reported = kw.get("board") or "default"
             run_id = kw.get("run_id")
             exit_kind = kw.get("exit_kind")
             if not isinstance(exit_kind, str):
                 exit_kind = None
+            board = self._board_of(str(tid), reported)
             error = self._run_error(board, str(tid), run_id)
             classification = classify_exit(error, exit_kind, self.settings.infra_patterns)
             self.record_exit(board, str(tid), run_id, classification, self.clock())
         except Exception:
             log.exception("kanban-empowered: recording a worker exit failed")
+
+    def _board_of(self, tid: str, reported: str) -> str:
+        """The board that holds ``tid``: ``reported`` when the card is there, else the first board that has it.
+
+        Hermes fills the hook's ``board`` with ``get_current_board()``, which in the gateway is not the
+        board of the exited worker when that is a non-default board; task ids are unique across boards.
+        ``reported`` is kept when no board has the card (or none can be read).
+        """
+        def has(board: str) -> bool:
+            try:
+                with self.api.connect(board) as conn:
+                    return self.api.task(conn, tid) is not None
+            except Exception:
+                log.debug("kanban-empowered: could not look for %s on board %s", tid, board, exc_info=True)
+                return False
+
+        if has(reported):
+            return reported
+        try:
+            boards = list(self.api.boards())
+        except Exception:
+            return reported
+        for board in boards:
+            if board != reported and has(board):
+                return board
+        return reported
 
     def _run_error(self, board: str, tid: str, run_id: Any) -> Optional[str]:
         """The error Hermes booked on the run that just ended (``None`` when there is none)."""

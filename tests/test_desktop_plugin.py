@@ -93,3 +93,18 @@ def test_validate_plugin_dir_passes():
     failed = [c for c in report.checks if not c[1]]
     assert not failed, failed
     assert any(c[0] == "desktop surface" for c in report.checks)
+
+
+def test_kanban_button_follows_router_navigation_not_only_hashchange():
+    """Review finding 2: Desktop's HashRouter navigates with pushState (no hashchange, no popstate).
+
+    The header button is registered once with ``when: () => <route is /kanban>`` (re-evaluated whenever the
+    header area is rebuilt) and a route watcher (hashchange, popstate and a 500 ms ctx.setInterval) forces a
+    rebuild when the route flips, so it never stays on another page and appears after a sidebar navigation.
+    """
+    src = _source()
+    block = src[src.index("id: 'kanban-button'"):][:400]
+    assert re.search(r"when:\s*onKanban", block), block
+    assert "'popstate'" in src and "'hashchange'" in src
+    assert re.search(r"ctx\.setInterval\(\s*checkRoute\s*,\s*ROUTE_POLL_MS\s*\)", src)
+    assert re.search(r"const ROUTE_POLL_MS = 500\b", src)

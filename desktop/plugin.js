@@ -14,8 +14,11 @@
  * Contributions: a full page at /kanban-empowered, a palette command, a sidebar row (only while the
  * show_sidebar_menu setting is on) and a compact "Empowered" button in the Kanban page header (only
  * while the hash route is /kanban, show_kanban_button is on and this Desktop exports
- * WORKSPACE_PAGE_HEADER_AREA; feature-detected through the namespace import). Without the bundled
- * Kanban Desktop plugin the button is inert and the sidebar row still works.
+ * WORKSPACE_PAGE_HEADER_AREA; feature-detected through the namespace import). The button is registered
+ * with `when: <route is /kanban>`; because Desktop's router navigates with pushState (no hashchange),
+ * a route watcher (hashchange + popstate + a 500 ms ctx.setInterval string compare) re-registers it
+ * when the route flips, so the area is rebuilt and the button never lingers on another page. Without
+ * the bundled Kanban Desktop plugin the button is inert and the sidebar row still works.
  *
  * Styling uses the app's theme variables only (no hardcoded colours): amber (--ui-yellow) = needs you,
  * red (--ui-red) = incident, green (--ui-green) = running, violet (--ui-purple) = coordinator.
@@ -52,6 +55,7 @@ const SETTINGS_ROUTE = '/settings?tab=plugins&agent=' + ID
 const POLL_MS = 10000
 const SETTINGS_POLL_MS = 30000
 const CLOCK_MS = 5000
+const ROUTE_POLL_MS = 500
 
 // English text used until GET /i18n answers, and when the backend cannot be reached at all.
 const FALLBACK = {
@@ -1054,14 +1058,46 @@ export default {
       }
     }
 
+    // Desktop's HashRouter navigates with history.pushState, which fires neither hashchange nor popstate.
+    // So the button is registered once, with `when` (the registry re-evaluates it whenever the header area
+    // is rebuilt; the Kanban page's own board switcher mounts and unmounts there), and a route watcher
+    // re-registers it when the route flips without such a rebuild: hashchange (host.navigate), popstate
+    // (back/forward) and a cheap 500 ms poll (sidebar, palette, keybinds).
+    const onKanban = () => currentRoute() === KANBAN_ROUTE
+    let lastOnKanban = onKanban()
+    const registerButton = () =>
+      ctx.register({
+        id: 'kanban-button',
+        area: headerArea,
+        order: 10,
+        when: onKanban,
+        render: () => (onKanban() ? jsx(KanbanButton, {}) : null)
+      })
+
     const syncButton = () => {
-      const wanted = Boolean(headerArea) && prefs.button && currentRoute() === KANBAN_ROUTE
+      const wanted = Boolean(headerArea) && prefs.button
 
       if (wanted && !disposeButton) {
-        disposeButton = ctx.register({ id: 'kanban-button', area: headerArea, order: 10, render: () => jsx(KanbanButton, {}) })
+        lastOnKanban = onKanban()
+        disposeButton = registerButton()
       } else if (!wanted && disposeButton) {
         disposeButton()
         disposeButton = null
+      }
+    }
+
+    const checkRoute = () => {
+      const now = onKanban()
+
+      if (now === lastOnKanban) {
+        return
+      }
+
+      lastOnKanban = now
+
+      if (disposeButton) {
+        disposeButton()
+        disposeButton = registerButton()
       }
     }
 
@@ -1080,7 +1116,9 @@ export default {
 
     syncNav()
     syncButton()
-    ctx.addEventListener(window, 'hashchange', syncButton)
+    ctx.addEventListener(window, 'hashchange', checkRoute)
+    ctx.addEventListener(window, 'popstate', checkRoute)
+    ctx.setInterval(checkRoute, ROUTE_POLL_MS)
     loadSettings()
     ctx.setInterval(loadSettings, SETTINGS_POLL_MS)
 

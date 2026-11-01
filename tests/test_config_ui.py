@@ -145,15 +145,21 @@ def test_desktop_save_then_plugin_read_roundtrip(kanban_home):
     assert s.pin_live_panel is False and s.language == "en" and s.digest_every_s == 3600 and s.escalate_to == "bob"
 
 
-def test_catalog_entry_example_parses_with_hermes_catalog_rules(caplog):
+def test_catalog_entry_draft_parses_with_hermes_catalog_rules(caplog):
+    """docs/catalog/kanban-empowered.yaml (the draft catalog entry; the sha is filled in at submission)."""
     import hermes_yaml as yaml
     from hermes_cli.plugin_catalog import entry_from_mapping
 
-    data = yaml.safe_load((REPO / "docs" / "catalog-entry.example.yaml").read_text(encoding="utf-8"))
+    text = (REPO / "docs" / "catalog" / "kanban-empowered.yaml").read_text(encoding="utf-8")
+    assert text.count("PLACEHOLDER_SHA") == 2  # sha and the image URL, pinned to the same commit
+    data = yaml.safe_load(text.replace("PLACEHOLDER_SHA", "a" * 40))
+    assert "\n" not in data["description"] and "Disclosure — " in data["description"]
     with caplog.at_level(logging.WARNING):
         entry = entry_from_mapping(data, "kanban-empowered")
     assert entry is not None and not caplog.records
     assert entry.image.endswith("/docs/assets/banner.jpg") and entry.tier == "community"
+    assert entry.image == f"https://raw.githubusercontent.com/dellanio/hermes-kanban-empowered/{'a' * 40}/docs/assets/banner.jpg"
+    assert (entry.title, entry.category, entry.maintainer) == ("Kanban Empowered", "automation", "dellanio")
     assert entry.requires_hermes == _manifest()["requires_hermes"] and entry.version == _manifest()["version"]
     assert entry.capabilities.provides_hooks == _manifest()["provides_hooks"]
     assert (REPO / "docs" / "assets" / "banner.jpg").is_file()

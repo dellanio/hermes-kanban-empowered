@@ -70,6 +70,7 @@ class Coordinator:
         self.infra = InfraRecovery(settings, store, api, clock=clock)
         self._warned: set[str] = set()  # log-once keys (per process)
         self._tg_down = False
+        self._merged_ids: set[int] = set()  # id() of due reminders already sent inside the layout re-send
         self._tg_retry_at = 0.0  # no Telegram attempt before this time (transport back-off)
         self._now = 0.0  # time of the evaluation in progress
         self.register_step("waits", self._waits_step)
@@ -88,34 +89,43 @@ class Coordinator:
         self.waits.sync(now)
         self.pending_dues = self.waits.collect_due(now)
         counts: dict[str, int] = {}  # messages per recipient this pass, shared by the re-send and the reminders
+        self._merged_ids = set()
         self._resend_template(now, counts)
         self._deliver_waits(now, counts)
+        self._merged_ids = set()
         self._check_escalation_setup(now)
 
     # -- reminder layout version -----------------------------------------------------
     @staticmethod
-    def _template_marker(board: str, task_id: str, version: int) -> str:
-        return f"tmpl:{msgs.MESSAGE_TEMPLATE_VERSION}:{board}:{task_id}:{version}"
+    def _template_marker(board: str, task_id: str, version: int, skip: bool = False) -> str:
+        return f"{'tmpl-skip' if skip else 'tmpl'}:{msgs.MESSAGE_TEMPLATE_VERSION}:{board}:{task_id}:{version}"
 
     def _resend_template(self, now: float, counts: dict[str, int]) -> None:
         """After a change of the reminder layout, send each open wait once more in the current one.
 
         A wait already messaged (``stage`` set) was last shown in the layout of its time: the owner may
-        have missed the news (or only ever seen an old-format message). Waits that are due now are left
-        to the normal reminder (the current layout). The re-send is grouped per owner, recorded as
-        ``sent_messages`` (so replies resolve) and does NOT touch ``waits.stage``/``last_sent_at``: it is
-        not a stage. One kv marker per wait and layout version makes it idempotent across passes;
-        ``kv template_version`` is written only once every wait has been delivered, so a failed send is
-        retried and a delivered one never repeated.
+        have missed the news (or only ever seen an old-format message). The re-send is grouped per owner,
+        recorded as ``sent_messages`` (so replies resolve) and does NOT touch ``waits.stage`` /
+        ``last_sent_at``: it is not a stage. When the same owner also has reminders due in this pass,
+        those go in the same message (``self._merged_ids``; ``_deliver_waits`` then only advances
+        their stage). One kv marker per wait and layout version makes it idempotent across passes; a wait
+        that cannot be re-sent for good (its owner has no chat id, or it cannot be rebuilt) gets a
+        "skipped" marker instead. ``kv template_version`` is written once every wait is delivered or
+        skipped, so a failed send is retried and a delivered one never repeated; the markers are then
+        deleted.
         """
         current = str(msgs.MESSAGE_TEMPLATE_VERSION)
         if self.store.kv_get(TEMPLATE_KEY) == current:
             return
-        due_now = {(d.board, d.task_id, d.version) for d in self.pending_dues}
+        due_now = {(d.board, d.task_id, d.version): d for d in self.pending_dues}
         todo = []
         for row in self.store.all_waits():
             key = (row["board"], row["task_id"], row["version"])
-            if row["stage"] is None or key in due_now or self.store.kv_get(self._template_marker(*key)):
+            if (
+                row["stage"] is None or key in due_now
+                or self.store.kv_get(self._template_marker(*key))
+                or self.store.kv_get(self._template_marker(*key, skip=True))
+            ):
                 continue
             todo.append(row)
         if todo:
@@ -123,30 +133,53 @@ class Coordinator:
                 return
             by_owner: dict[str, list] = {}
             for row in todo:
+                key = (row["board"], row["task_id"], row["version"])
                 try:
                     due = self.waits.due_for(row, now)
                 except Exception:
+                    # one broken wait must not hold back the others: log it once and skip it for good
                     log.exception(
-                        "kanban-empowered: could not rebuild wait %s/%s for the re-send", row["board"], row["task_id"]
+                        "kanban-empowered: could not rebuild wait %s/%s for the re-send; skipping it",
+                        row["board"], row["task_id"],
                     )
-                    return  # not done: retried on the next evaluation
+                    self.store.kv_set(self._template_marker(*key, skip=True), "1")
+                    continue
                 if due is None:
                     continue  # resolved or re-blocked since the sync: nothing to re-send
+                if self.settings.owner_ids.get(due.owner) is None:
+                    # an owner without a chat id cannot be messaged at all (logged by _owner_chat): not retried
+                    self._owner_chat(due.owner)
+                    self.store.kv_set(self._template_marker(*key, skip=True), "1")
+                    continue
                 by_owner.setdefault(due.owner, []).append(due)
+            resend_ids = {id(d) for group in by_owner.values() for d in group}
+            now_by_owner: dict[str, list] = {}
+            for d in self.pending_dues:
+                if d.owner in by_owner:
+                    now_by_owner.setdefault(d.owner, []).append(d)
 
             def delivered(d: Due) -> None:
-                self.store.kv_set(self._template_marker(d.board, d.task_id, d.version), "1")
+                if id(d) in resend_ids:
+                    self.store.kv_set(self._template_marker(d.board, d.task_id, d.version), "1")
+                else:
+                    self._merged_ids.add(id(d))  # a reminder due now that rode along: no second message
 
             for owner, group in by_owner.items():
                 if self._tg_down:
                     break
-                self._send_group(owner, owner, group, now, counts, on_sent=delivered)
+                # the re-send items first, then the reminders due now: one message per owner, not two
+                self._send_group(owner, owner, group + now_by_owner.get(owner, []), now, counts, on_sent=delivered)
             if any(
                 not self.store.kv_get(self._template_marker(d.board, d.task_id, d.version))
                 for group in by_owner.values() for d in group
             ):
                 return
         self.store.kv_set(TEMPLATE_KEY, current)
+        for prefix in ("tmpl:", "tmpl-skip:"):
+            try:
+                self.store.kv_delete_prefix(prefix)
+            except Exception:
+                log.exception("kanban-empowered: could not clean up the layout re-send markers")
 
     def _check_escalation_setup(self, now: float) -> None:
         """A wait reached the escalation stage but there is nobody to escalate to: one setup alert.
@@ -507,7 +540,10 @@ class Coordinator:
         try:
             by_owner: dict[str, list[Due]] = {}
             for due in dues:
-                if copy_needed(due) and self.store.kv_get(marker("owner", due)):
+                if id(due) in self._merged_ids:
+                    owner_sent.add(id(due))  # went out inside the layout re-send of this pass
+                    owner_got_it(due)
+                elif copy_needed(due) and self.store.kv_get(marker("owner", due)):
                     owner_sent.add(id(due))  # escalation already delivered to the owner earlier
                 else:
                     by_owner.setdefault(due.owner, []).append(due)

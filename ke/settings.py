@@ -359,7 +359,7 @@ class Settings:
             reminders_s=_durations(reminders) if reminders is not None else defaults.reminders_s,
             escalate_after_s=dur("waits.escalate_after", "escalate_after_s"),
             digest_every_s=_parse_digest(digest) if digest is not None else defaults.digest_every_s,
-            blocking_digest_every_s=_parse_digest(blocking_digest) if blocking_digest is not None else None,
+            blocking_digest_every_s=None if _blank(blocking_digest) else _parse_digest(blocking_digest),
             escalate_to=str(escalate_to) if escalate_to else None,
             human_kinds=_strs(human_kinds) if human_kinds is not None else defaults.human_kinds,
             require_structured_ask=flag("waits.require_structured_ask", "require_structured_ask"),

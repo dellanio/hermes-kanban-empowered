@@ -14,7 +14,7 @@ from . import hermes_api
 from .messages import human_age, t
 from .settings import Settings
 from .store import Store
-from .waits import human_block
+from .waits import held_behind, human_block
 
 _CLOSED = frozenset({"done", "archived"})
 # Events that carry no news about the card itself.
@@ -206,13 +206,30 @@ def _fresh(conn, board, task, store, now, settings) -> Condition:
     return Condition("fresh", False, t("explain.fresh.stale", age=age, news=joined), warn=True)
 
 
-def _next_reminder_in(age: int, settings: Settings) -> int:
+def _next_reminder_in(
+    age: int, settings: Settings, row: Optional[dict] = None, now: float = 0.0, digest: Optional[int] = None
+) -> int:
+    """Seconds to the wait's next message. ``digest`` is its effective period (the blocking one when it
+    holds other cards); a digest already sent is repeated one period after it was sent."""
     for threshold in sorted((*settings.reminders_s, settings.escalate_after_s)):
         if threshold > age:
             return threshold - age
-    digest = max(1, settings.digest_every_s)
-    k = (age - settings.escalate_after_s) // digest + 1
-    return settings.escalate_after_s + k * digest - age
+    digest = max(1, settings.digest_every_s if digest is None else digest)
+    last = None if row is None else row.get("last_sent_at")
+    if row is not None and row.get("stage") == "digest" and last is not None:
+        return max(0, int(last + digest - now))
+    return max(0, settings.escalate_after_s + digest - age)  # the first digest; 0 when it is overdue
+
+
+def _digest_period(conn, task, settings: Settings) -> int:
+    """The wait's digest period: ``blocking_digest_s`` when it holds other cards back, else the plain one."""
+    plain, blocking = max(1, settings.digest_every_s), max(1, settings.blocking_digest_s)
+    if plain == blocking:
+        return plain
+    try:
+        return blocking if held_behind(hermes_api, conn, task.id) else plain
+    except Exception:
+        return plain
 
 
 def _wait(conn, board, task, store, now, settings) -> Condition:
@@ -228,7 +245,10 @@ def _wait(conn, board, task, store, now, settings) -> Condition:
     return Condition(
         "wait",
         False,
-        t("explain.wait.active", owner=owner, age=human_age(age), next=human_age(_next_reminder_in(age, settings))),
+        t(
+            "explain.wait.active", owner=owner, age=human_age(age),
+            next=human_age(_next_reminder_in(age, settings, row, now, _digest_period(conn, task, settings))),
+        ),
     )
 
 

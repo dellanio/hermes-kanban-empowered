@@ -306,6 +306,14 @@ class Store:
                 (key, value),
             )
 
+    def kv_delete_prefix(self, prefix: str) -> int:
+        """Delete every kv key that starts with ``prefix`` (a literal prefix, no wildcards); returns how many."""
+        with self.lock:
+            cur = self.conn.execute(
+                "DELETE FROM kv WHERE substr(key, 1, ?) = ?", (len(prefix), prefix)
+            )
+            return cur.rowcount
+
     # -- telegram update dedupe -----------------------------------------
     def mark_update(self, update_key: str, ts: int) -> bool:
         """Record ``update_key``; False if it had already been processed."""

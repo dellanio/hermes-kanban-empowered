@@ -386,3 +386,153 @@ def test_setup_alert_in_portuguese(kanban_home, fake_tg, clock, tmp_path, pt_br)
     c.evaluate(clock.now)
     (alert,) = _setups(fake_tg)
     assert "CONFIGURAÇÃO" in alert and "escalate_to" in alert
+
+
+# -- fix round 1 ------------------------------------------------------------------------------------
+def test_blank_nested_blocking_digest_means_same_as_digest():
+    from ke.settings import Settings
+
+    for blank in ("", "   ", None):
+        s = Settings.from_mapping({"waits": {"digest": "12h", "blocking_digest_every": blank}})
+        assert s.blocking_digest_every_s is None and s.blocking_digest_s == 12 * H
+
+
+def test_one_wait_that_cannot_be_rebuilt_does_not_block_the_resend(kanban_home, fake_tg, clock, tmp_path, caplog):
+    import logging
+
+    from ke import messages
+
+    c = _coord(tmp_path, fake_tg, clock)
+    tids, evs = _blocks(2)
+    _start(clock, evs[-1])
+    clock.advance(9 * H)
+    _pretend_old_send(c, tids, evs, "escalation", at=clock.now - 60)
+    bad = tids[0]
+    orig = c.waits.due_for
+
+    def due_for(row, now):
+        if row["task_id"] == bad:
+            raise RuntimeError("corrupt card")
+        return orig(row, now)
+
+    c.waits.due_for = due_for
+    with caplog.at_level(logging.ERROR):
+        c.evaluate(clock.now)
+    (call,) = [m for m in fake_tg.calls["send"] if "NEEDS YOU" in m["text"]]
+    (row,) = _sent_rows(c)
+    assert [i["task_id"] for i in json.loads(row["items_json"])] == [tids[1]]
+    assert c.store.kv_get("template_version") == str(messages.MESSAGE_TEMPLATE_VERSION)
+    assert len([r for r in caplog.records if "could not rebuild" in r.getMessage()]) == 1
+    clock.advance(31)
+    c.evaluate(clock.now)
+    assert len(_reminders(fake_tg)) == 1
+    assert len([r for r in caplog.records if "could not rebuild" in r.getMessage()]) == 1  # logged once
+
+
+def test_skip_marker_stops_retrying_a_broken_wait_while_others_are_pending(kanban_home, fake_tg, clock, tmp_path, caplog):
+    import logging
+
+    from ke import messages
+
+    c = _coord(tmp_path, fake_tg, clock)
+    tids, evs = _blocks(2)
+    _start(clock, evs[-1])
+    clock.advance(9 * H)
+    _pretend_old_send(c, tids, evs, "escalation", at=clock.now - 60)
+    orig = c.waits.due_for
+    calls = []
+
+    def due_for(row, now):
+        calls.append(row["task_id"])
+        if row["task_id"] == tids[0]:
+            raise RuntimeError("corrupt card")
+        return orig(row, now)
+
+    c.waits.due_for = due_for
+    fake_tg.fail_next = RuntimeError("network down")  # the first send fails: the version stays unwritten
+    with caplog.at_level(logging.ERROR):
+        c.evaluate(clock.now)
+    assert c.store.kv_get("template_version") != str(messages.MESSAGE_TEMPLATE_VERSION)
+    clock.advance(300)
+    c.evaluate(clock.now)
+    assert calls.count(tids[0]) == 1  # the broken one was skipped for good after its first failure
+    assert c.store.kv_get("template_version") == str(messages.MESSAGE_TEMPLATE_VERSION)
+
+
+def test_owner_without_chat_id_is_skipped_not_retried(kanban_home, fake_tg, clock, tmp_path):
+    from ke import messages
+
+    c = _coord(tmp_path, fake_tg, clock, owner_ids={"ops": 222})  # the default owner "sponsor" has no chat
+    tids, evs = _blocks(1)
+    _start(clock, evs[0])
+    clock.advance(9 * H)
+    _pretend_old_send(c, tids, evs, "escalation", at=clock.now - 60)
+    c.evaluate(clock.now)
+    assert _reminders(fake_tg) == []
+    assert c.store.kv_get("template_version") == str(messages.MESSAGE_TEMPLATE_VERSION)  # not stuck on it
+
+
+def test_due_reminder_and_resend_for_one_owner_are_one_message(kanban_home, fake_tg, clock, tmp_path):
+    c = _coord(tmp_path, fake_tg, clock)
+    tids, evs = _blocks(2)
+    _start(clock, evs[-1])
+    clock.advance(30 * 60)
+    # tids[0]: messaged long ago in the old layout, nothing due; tids[1]: its first reminder is due now
+    c.store.upsert_wait("default", tids[0], evs[0].id, "sponsor", evs[0].created_at)
+    c.store.mark_wait_sent("default", tids[0], evs[0].id, "reminder1", int(clock.now - 1))
+    c.store.upsert_wait("default", tids[1], evs[1].id, "sponsor", evs[1].created_at)
+    clock.advance(0)
+    c.evaluate(clock.now)
+    (text,) = _reminders(fake_tg)
+    (row,) = _sent_rows(c)
+    assert {i["task_id"] for i in json.loads(row["items_json"])} == set(tids)
+    # the due one advanced its stage, the re-sent one did not
+    assert c.store.latest_wait("default", tids[1])["stage"] == "reminder1"
+    assert c.store.latest_wait("default", tids[0])["last_sent_at"] == int(clock.now - 1)
+    clock.advance(31)
+    c.evaluate(clock.now)
+    assert len(_reminders(fake_tg)) == 1
+
+
+def test_markers_are_deleted_once_the_version_is_written(kanban_home, fake_tg, clock, tmp_path):
+    c = _coord(tmp_path, fake_tg, clock)
+    tids, evs = _blocks(1)
+    _start(clock, evs[0])
+    clock.advance(9 * H)
+    _pretend_old_send(c, tids, evs, "escalation", at=clock.now - 60)
+    c.evaluate(clock.now)
+    assert len(_reminders(fake_tg)) == 1
+    keys = [r["key"] for r in c.store.conn.execute("SELECT key FROM kv")]
+    assert not [k for k in keys if k.startswith("tmpl")]
+
+
+def test_kv_delete_prefix(tmp_path):
+    from ke.store import Store
+
+    st = Store(tmp_path / "s.db")
+    for k in ("tmpl:1:a", "tmpl:1:b", "tmpl-skip:1:a", "other"):
+        st.kv_set(k, "1")
+    assert st.kv_delete_prefix("tmpl:") == 2
+    assert st.kv_get("tmpl-skip:1:a") == "1" and st.kv_get("other") == "1" and st.kv_get("tmpl:1:a") is None
+
+
+def test_explain_next_digest_follows_the_last_send_and_the_blocking_period(kanban_home, tmp_path):
+    import time
+
+    from ke import conditions, hermes_api as h
+    from ke.settings import Settings
+    from ke.store import Store
+
+    store = Store(tmp_path / "state.db")
+    with h.connect("default") as conn:
+        tid, ev = make_human_block(conn)
+        create_task(conn, title="child", parents=[tid])
+        now = float(ev.created_at) + 3 * D
+        store.upsert_wait("default", tid, ev.id, "sponsor", ev.created_at)
+        store.mark_wait_sent("default", tid, ev.id, "digest", int(now - 2 * H))
+        plain = Settings.from_mapping({})
+        blocking = Settings.from_mapping({"blocking_digest_every": "6h"})
+        text = lambda st: next(c for c in conditions.explain(conn, "default", tid, store, now, st).conditions
+                               if c.name == "wait").text
+        assert "next reminder in 22 h" in text(plain)  # a day after the last digest
+        assert "next reminder in 4 h" in text(blocking)  # holds a card: 6 h after the last digest

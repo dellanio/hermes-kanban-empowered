@@ -4,6 +4,13 @@ Config lives under ``plugins.entries.kanban-empowered.settings`` and is read
 through ``ctx.get_config("<dotted.key>", default)``. ``Settings.from_mapping``
 accepts the same structure as a nested dict (``{"waits": {"reminders": [...]}}``),
 so tests and ``from_ctx`` share one code path.
+
+The Hermes Desktop settings form (``plugin.yaml`` ``config_schema``) reads and writes its keys as FLAT
+literals (``settings.default_owner``, never ``settings.waits.default_owner``), so the form uses the
+flat names in ``_FORM_ALIASES`` plus ``telegram_owner_id``. They are folded onto the nested structure
+before parsing: a non-blank flat value WINS over the nested key it aliases (it is the one a person just
+edited in the UI); a blank flat string ("" - the form's way of saying unset) is ignored. The nested
+keys keep working unchanged for people who edit ``config.yaml`` by hand.
 """
 from __future__ import annotations
 
@@ -114,8 +121,74 @@ def _board_owners(m: Mapping[str, Any]) -> dict[str, str]:
     return out
 
 
+# Flat settings-form key -> the nested key it overrides. ``telegram_owner_id`` is handled apart (it feeds
+# ``owner_ids``); ``mode`` and ``language`` are already flat.
+_FORM_ALIASES: dict[str, str] = {
+    "default_owner": "waits.default_owner",
+    "reminders": "waits.reminders",
+    "escalate_after": "waits.escalate_after",
+    "digest": "waits.digest",
+    "escalate_to": "waits.escalate_to",
+    "require_structured_ask": "waits.require_structured_ask",
+    "pin_live_panel": "telegram.pin_live_panel",
+    "guard_alert_after": "guards.alert_after",
+    "undo_budget_count": "infra_failures.undo_budget.count",
+    "undo_budget_window": "infra_failures.undo_budget.window",
+}
+# Every flat key the form can write (read by ``from_ctx`` next to the nested keys).
+FORM_FLAT_KEYS: tuple[str, ...] = (*_FORM_ALIASES, "telegram_owner_id")
+
+
+def _blank(value: Any) -> bool:
+    return value is None or (isinstance(value, str) and not value.strip())
+
+
+def _set_path(root: dict[str, Any], dotted: str, value: Any) -> None:
+    """Set ``dotted`` in ``root``, copying each mapping on the way so the caller's dict is untouched."""
+    cur = root
+    *parents, leaf = dotted.split(".")
+    for part in parents:
+        child = cur.get(part)
+        if isinstance(child, Mapping):
+            child = dict(child)
+        elif part == "undo_budget" and child is not None:
+            child = {"count": child}  # a bare int is the budget's count
+        else:
+            child = {}
+        cur[part] = child
+        cur = child
+    cur[leaf] = value
+
+
+def _fold_form_keys(m: Mapping[str, Any]) -> Mapping[str, Any]:
+    """Overlay the settings form's flat keys onto a copy of the nested mapping (flat wins; blank ignored)."""
+    out: Optional[dict[str, Any]] = None
+    for flat, nested in _FORM_ALIASES.items():
+        value = m.get(flat)
+        if _blank(value):
+            continue
+        if out is None:
+            out = dict(m)
+        _set_path(out, nested, value)
+    return m if out is None else out
+
+
+def _owner_ids(m: Mapping[str, Any], default_owner: str) -> dict[str, int]:
+    """``telegram.owner_ids`` when set; otherwise the form's single ``telegram_owner_id`` as the default
+    owner's id."""
+    explicit = _get(m, "telegram.owner_ids") or {}
+    if explicit:
+        return {str(k): int(v) for k, v in dict(explicit).items()}
+    single = m.get("telegram_owner_id")
+    if _blank(single):
+        return {}
+    return {default_owner: int(single)}
+
+
 def _durations(value: Any) -> tuple[int, ...]:
-    if isinstance(value, (str, int, float)):
+    if isinstance(value, str):
+        value = [part for part in value.split(",") if part.strip()]  # "30m,2h" from the settings form
+    elif isinstance(value, (int, float)):
         value = [value]
     return tuple(parse_duration(v) for v in value)
 
@@ -162,6 +235,7 @@ class Settings:
     def from_mapping(cls, m: Mapping[str, Any]) -> "Settings":
         """Build from a nested mapping shaped like the plugin's ``settings`` subtree."""
         defaults = cls()  # for non-trivial defaults
+        m = _fold_form_keys(m)
 
         def dur(key: str, field_name: str) -> int:
             v = _get(m, key)
@@ -175,7 +249,7 @@ class Settings:
             v = _get(m, key)
             return _parse_bool(v, key) if v is not None else getattr(defaults, field_name)
 
-        mode = str(_get(m, "mode", defaults.mode))
+        mode = str(_get(m, "mode", defaults.mode)).strip() or defaults.mode
         if mode not in _VALID_MODES:
             raise ValueError(f"invalid value for mode: {mode!r} (expected one of {_VALID_MODES})")
 
@@ -196,18 +270,18 @@ class Settings:
         human_kinds = _get(m, "waits.human_kinds")
         patterns = _get(m, "infra_failures.patterns")
         state_dir = _get(m, "shared_state_dir")
-        owner_ids = _get(m, "telegram.owner_ids") or {}
         escalate_to = _get(m, "waits.escalate_to")
         language = _get(m, "language")
 
         coordinator_profile = str(_get(m, "coordinator_profile", defaults.coordinator_profile))
+        default_owner = str(_get(m, "waits.default_owner", defaults.default_owner))
         return cls(
             mode=mode,
             coordinator_profile=coordinator_profile,
             shared_state_dir=Path(state_dir) if state_dir else default_shared_state_dir(coordinator_profile),
-            owner_ids={str(k): int(v) for k, v in dict(owner_ids).items()},
+            owner_ids=_owner_ids(m, default_owner),
             pin_live_panel=flag("telegram.pin_live_panel", "pin_live_panel"),
-            default_owner=str(_get(m, "waits.default_owner", defaults.default_owner)),
+            default_owner=default_owner,
             board_owner=_board_owners(m),
             reminders_s=_durations(reminders) if reminders is not None else defaults.reminders_s,
             escalate_after_s=dur("waits.escalate_after", "escalate_after_s"),
@@ -249,6 +323,7 @@ class Settings:
             "infra_failures.alert_count",
             "infra_failures.alert_window",
             "infra_failures.patterns",
+            *FORM_FLAT_KEYS,
         )
         nested: dict[str, Any] = {}
         for key in keys:

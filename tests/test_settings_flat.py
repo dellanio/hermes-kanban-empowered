@@ -190,5 +190,13 @@ def test_conflict_when_owner_id_ignored_by_explicit_owner_ids(caplog):
     assert s.owner_ids == {"bob": 3}
     assert s.conflicts == (("owner_id_ignored", "telegram_owner_id", "telegram.owner_ids", "5", "sponsor"),)
     assert any("telegram_owner_id 5 is ignored" in r.getMessage() for r in caplog.records)
-    # the default owner has an id there: nothing is lost
-    assert Settings.from_mapping({"telegram_owner_id": 5, "telegram": {"owner_ids": {"sponsor": 3}}}).conflicts == ()
+    # the default owner has a DIFFERENT id there: the form value is silently lost without a conflict
+    caplog.clear()
+    with caplog.at_level(logging.WARNING, logger="ke.settings"):
+        s = Settings.from_mapping({"telegram_owner_id": 5, "telegram": {"owner_ids": {"sponsor": 3}}})
+    assert s.owner_ids == {"sponsor": 3}
+    assert s.conflicts == (("owner_id_differs", "telegram_owner_id", "telegram.owner_ids.sponsor", "5", "3"),)
+    assert any("telegram_owner_id 5 is ignored" in r.getMessage() and "sponsor" in r.getMessage()
+               for r in caplog.records)
+    # the same id (or the id as a string) is no conflict
+    assert Settings.from_mapping({"telegram_owner_id": 3, "telegram": {"owner_ids": {"sponsor": "3"}}}).conflicts == ()

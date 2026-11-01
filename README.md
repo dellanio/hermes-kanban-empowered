@@ -163,7 +163,7 @@ settings. The plugin folds those flat keys onto the nested ones, with this prece
 Hand-written nested config keeps working unchanged. When a form value differs from a nested
 `config.yaml` value it shadows, the plugin logs one warning per load and `hermes kanban-empowered doctor`
 prints a `config_conflict:` row for each; a `telegram_owner_id` that an explicit `owner_ids` leaves
-unused (no id there for the default owner) is reported the same way.
+unused (no id there for the default owner, or a different id) is reported the same way.
 
 Limits of the form:
 
@@ -174,7 +174,8 @@ Limits of the form:
   the flat key from `config.yaml`.
 - `Owner Telegram id` cannot be cleared from the form (an empty number is rejected). Remove
   `telegram_owner_id` from `config.yaml` to drop it.
-- A blank `Reminders` field means the default (`30m,2h`). "No reminders" cannot be set from the form.
+- A blank `Reminders` field means the `waits.reminders` value from `config.yaml`, or the default `30m,2h` when
+  there is none. "No reminders" cannot be set from the form.
 - `Escalate to` only names a contact; that contact needs a chat id in `telegram.owner_ids`, which can
   only be edited in `config.yaml` (the form has no mapping field). Without it, escalation copies are not sent
   and the coordinator warns once.
@@ -236,6 +237,8 @@ with its author.
 | `profiles_with_plugin` | Profiles whose `config.yaml` has `plugins.entries.kanban-empowered`. |
 | `telegram_token` | `present` / `missing`: `TELEGRAM_BOT_TOKEN` in **this** process (the token itself is never printed). |
 | `owner_chats` | Number of entries in `telegram.owner_ids`. |
+| `telegram_path` | Only once a Telegram client has recorded one: how the Bot API was reached last, `<host> (hostname)` or `<ip> (IPv4 fallback)`. |
+| `config_conflict` | One row per settings-form value that shadows a different `config.yaml` value, or a `telegram_owner_id` that `telegram.owner_ids` leaves unused. |
 | `config` | Only when the settings are invalid: the error. The plugin then runs the worker guard on defaults and does not start the coordinator. |
 
 Human-facing text follows the Hermes language (English by default; `pt` and `pt-br` included).

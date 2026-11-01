@@ -375,3 +375,16 @@ def test_doctor_no_conflict_rows_without_conflicts(kanban_home, capsys, tmp_path
 
     cli.run_doctor(settings_for_test(tmp_path))
     assert "config_conflict" not in capsys.readouterr().out
+
+
+def test_doctor_lists_owner_id_difference_conflict(kanban_home, capsys, tmp_path):
+    from ke import cli
+    from ke.settings import Settings
+
+    s = Settings.from_mapping({
+        "shared_state_dir": str(tmp_path / "state"), "telegram_owner_id": 5,
+        "telegram": {"owner_ids": {"sponsor": 3}},
+    })
+    cli.run_doctor(s)
+    assert ("config_conflict: telegram_owner_id 5 is ignored: config.yaml telegram.owner_ids.sponsor is 3"
+            in capsys.readouterr().out.splitlines())

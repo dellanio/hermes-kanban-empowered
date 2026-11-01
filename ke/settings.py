@@ -221,9 +221,14 @@ def _owner_ids(m: Mapping[str, Any], default_owner: str) -> tuple[dict[str, int]
     single = m.get("telegram_owner_id")
     if explicit:
         ids = {str(k): int(v) for k, v in dict(explicit).items()}
-        lost = not _blank(single) and default_owner not in ids
-        return ids, ([("owner_id_ignored", "telegram_owner_id", "telegram.owner_ids", str(single), default_owner)]
-                     if lost else [])
+        if _blank(single):
+            return ids, []
+        if default_owner not in ids:
+            return ids, [("owner_id_ignored", "telegram_owner_id", "telegram.owner_ids", str(single), default_owner)]
+        if ids[default_owner] != int(single):
+            return ids, [("owner_id_differs", "telegram_owner_id", f"telegram.owner_ids.{default_owner}",
+                          str(single), str(ids[default_owner]))]
+        return ids, []
     if _blank(single):
         return {}, []
     return {default_owner: int(single)}, []
@@ -327,6 +332,9 @@ class Settings:
             if kind == "override":
                 _log.warning("kanban-empowered: form value %s overrides config.yaml %s %s (settings form key %s)",
                              form_value, nested, config_value, flat)
+            elif kind == "owner_id_differs":
+                _log.warning("kanban-empowered: telegram_owner_id %s is ignored: config.yaml %s is %s",
+                             form_value, nested, config_value)
             else:
                 _log.warning("kanban-empowered: telegram_owner_id %s is ignored: telegram.owner_ids is set and "
                              "has no id for %s", form_value, config_value)

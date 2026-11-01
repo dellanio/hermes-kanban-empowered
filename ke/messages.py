@@ -36,6 +36,7 @@ EN: dict[str, str] = {
     "doctor.telegram_path.ip": "{path} (IPv4 fallback)",
     "doctor.conflict.override": "form value {form_value} overrides config.yaml {config_key} {config_value}",
     "doctor.conflict.owner_id": "telegram_owner_id {form_value} is ignored: telegram.owner_ids is set and has no id for {owner}",
+    "doctor.conflict.owner_id_differs": "telegram_owner_id {form_value} is ignored: config.yaml {config_key} is {config_value}",
     # explain: header and lookup
     "explain.header": "{id}  {title}  {status} {age} ago",
     "explain.not_found": "card {card} not found {where}",

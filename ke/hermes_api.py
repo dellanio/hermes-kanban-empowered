@@ -45,11 +45,25 @@ def task_exists(board: str, tid: str, live=None) -> bool:
         return _kb.get_task(conn, tid) is not None
 
 
+def _resolves_to_own_db(board: str) -> bool:
+    """True when ``connect(board)`` in this context opens ``board``'s own ``kanban.db``. False under a
+    ``HERMES_KANBAN_DB`` pin that wins over an explicit board (``pin_first_board_resolution()``, dispatched
+    workers, delegated children): every slug then resolves to the pinned file."""
+    own = _kb.kanban_home() / "kanban.db" if board == _kb.DEFAULT_BOARD else _kb.board_dir(board) / "kanban.db"
+    try:
+        return _kb.kanban_db_path(board=board).resolve() == own.resolve()
+    except (OSError, ValueError):
+        return False
+
+
 def claimable_task(board: str, tid: str, assignee=None, live=None) -> bool:
     """True when ``tid`` is a ``ready`` card of the live board ``board`` and, when ``assignee`` is given, is
     assigned to it: the card a ``kanban_pre_claim`` call is about (ids are only unique per board, so a card
-    of another board with the same id does not match). Never opens an unknown or archived board."""
+    of another board with the same id does not match). Never opens an unknown or archived board, and False
+    for a board this context cannot read as itself (a pinned ``HERMES_KANBAN_DB`` points elsewhere)."""
     if not board or board not in (boards() if live is None else live):
+        return False
+    if not _resolves_to_own_db(board):
         return False
     with connect(board) as conn:
         task = _kb.get_task(conn, tid)

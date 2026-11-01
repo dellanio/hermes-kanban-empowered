@@ -1234,3 +1234,36 @@ def test_a_hit_must_be_the_ready_card_with_the_same_assignee(kanban_home, tmp_pa
     assert not hermes_api.claimable_task("frozen", waiting, "dev")
     assert hermes_api.claimable_task("frozen", ready, None)  # no assignee given: status alone
     assert not hermes_api.claimable_task("nope", ready, "dev")
+
+
+# -- review Minor 3: a process with HERMES_KANBAN_DB pinned must not wrongly refuse ------------------
+def test_pinned_kanban_db_does_not_turn_the_hook_fail_closed(kanban_home, tmp_path, monkeypatch):
+    """Inside pin_first_board_resolution() with HERMES_KANBAN_DB set, every slug resolves to the pinned file:
+    a lookup "on board frozen" would really read the pinned board and find the card being claimed there."""
+    from hermes_cli import kanban_db as kb
+    from hermes_cli import kanban_db_boards as kbb
+    from ke import hermes_api
+    from ke.board_status import StatusReader, make_pre_claim_hook
+    from conftest import create_task
+
+    kbb.create_board("frozen")
+    with hermes_api.connect("frozen") as conn:
+        frozen = create_task(conn, title="frozen", assignee="dev")
+    with hermes_api.connect("default") as conn:
+        live = create_task(conn, title="live", assignee="dev")
+    s = _store(tmp_path)
+    s.set_board_status("frozen", "suspended", 1, "cli")
+    s.close()
+    monkeypatch.setenv("HERMES_KANBAN_DB", str(kb.kanban_db_path(board="default")))
+    with kb.pin_first_board_resolution():
+        assert kb.kanban_db_path(board="frozen") == kb.kanban_db_path(board="default")  # the hazard
+        hook = make_pre_claim_hook(StatusReader(tmp_path / "state" / "state.db"))
+        assert hook(task_id=live, board="default", assignee="dev") is None
+        assert not hermes_api.claimable_task("frozen", live, "dev")
+        assert not hermes_api.claimable_task("frozen", frozen, "dev")  # cannot be read here: not claimed here either
+    s = _store(tmp_path)
+    s.set_board_status("default", "suspended", 2, "cli")  # the pinned board itself suspended: still held
+    s.close()
+    with kb.pin_first_board_resolution():
+        hook = make_pre_claim_hook(StatusReader(tmp_path / "state" / "state.db"))
+        assert hook(task_id=live, board="default", assignee="dev") == SUSPENDED_EN

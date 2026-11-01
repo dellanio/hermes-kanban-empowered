@@ -63,6 +63,13 @@ def clock() -> FakeClock:
     return FakeClock()
 
 
+def unbranded(text: str) -> str:
+    """``text`` without the brand line every outgoing message starts with (asserts that it is there)."""
+    brand = FakeTelegram.BRAND_LINE
+    assert text.startswith(brand), text
+    return text[len(brand):]
+
+
 class FakeTelegram:
     """Records Bot API calls by method name (send/edit/pin) instead of hitting the network.
 
@@ -90,7 +97,14 @@ class FakeTelegram:
         self.calls[method].append(call)
         self._log.append((method, call))
 
+    BRAND_LINE = "[Kanban - Empowered]" + chr(10)  # literal on purpose: the tests must not import the constant they check
+
+    def _assert_branded(self, text) -> None:
+        """Owner rule: EVERY outgoing message starts with the brand line (any send/edit, any path)."""
+        assert str(text).startswith(self.BRAND_LINE), f"outgoing Telegram text without the brand line: {text!r}"
+
     def send(self, chat_id, text, **kw) -> int:
+        self._assert_branded(text)
         self._pop_failure("fail_next")
         self._next_id += 1
         self._record(
@@ -100,6 +114,7 @@ class FakeTelegram:
         return self._next_id
 
     def edit(self, chat_id, message_id, text, **kw):
+        self._assert_branded(text)
         self._pop_failure("fail_next_edit")
         self._record(
             "edit", {"chat_id": chat_id, "message_id": message_id, "text": text, **kw}

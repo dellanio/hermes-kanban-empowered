@@ -313,7 +313,7 @@ def test_one_message_with_all_due_alerts_and_the_release_instruction(kanban_home
     assert call["chat_id"] == OWNER_CHAT
     assert "alpha" in text and "beta" in text
     # action first; the release command is the only place a card id appears (the action needs it)
-    assert text.splitlines()[1].startswith("👉")
+    assert text.splitlines()[0] == "[Kanban - Empowered]" and text.splitlines()[2].startswith("👉")
     assert f"hermes kanban-empowered release {a} --to <profile>" in text
     assert f"hermes kanban-empowered release {b} --to <profile>" in text
     assert PR in text

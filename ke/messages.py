@@ -546,8 +546,21 @@ def render_config_alert(kind: str) -> str:
     return "\n".join([t("config.head"), t(f"config.{kind}")])
 
 
-# -- Telegram delivery: size limit, splitting ----------------------------------------------
+# -- Telegram delivery: brand prefix, size limit, splitting -----------------------------------
+BRAND = "[Kanban - Empowered]"  # the plugin's name: fixed, never translated, so not in the locale catalogs
 TELEGRAM_LIMIT = 4096  # sendMessage text limit (UTF-16 code units)
+
+
+def branded(text: str) -> str:
+    """``text`` under the brand line (``[Kanban - Empowered]`` + newline); already branded text is unchanged.
+
+    Every Telegram message the plugin sends or edits goes through this (see ``Coordinator._tg_send`` /
+    ``_tg_call`` and ``inbound._reply``). Renderers that split to the limit apply it themselves, because the
+    prefix counts toward the 4096 units of every chunk.
+    """
+    text = str(text)
+    line = BRAND + "\n"
+    return text if text.startswith(line) else line + text
 
 
 def _tg_len(text: str) -> int:
@@ -590,14 +603,14 @@ def render_waits_chunks(
     """Reminder messages for ``owner``, each within the Telegram limit, as ``(text, dues)`` pairs.
 
     Dues are packed in order and a due is never split across messages; a single due that alone
-    exceeds the limit is clipped (its first and last lines are kept). Every message repeats the
-    header (counted over its own items) and numbering restarts at 1, and ``dues`` is that
+    exceeds the limit is clipped (its first and last lines are kept). Every message starts with the
+    brand line (counted in the limit), repeats the header (counted over its own items) and numbering restarts at 1, and ``dues`` is that
     message's item list in numbering order, so a reply to a message maps "n — …" to
     ``dues[n - 1]`` of that message and no other. ``lead`` is a line put first in every message
-    and ``copy`` renders the escalated copy (see :func:`render_waits`).
+    (after the brand line) and ``copy`` renders the escalated copy (see :func:`render_waits`).
     """
     def render(chunk: list, clip: bool = False) -> str:
-        marker = lead + "\n" if lead else ""
+        marker = BRAND + "\n" + (lead + "\n" if lead else "")
         text = render_waits(owner, chunk, copy=copy)
         return marker + (_clip_item(text, limit - _tg_len(marker)) if clip else text)
 
@@ -665,16 +678,16 @@ def render_guards(alerts: list) -> str:
 
 
 def render_guard_chunks(alerts: list, limit: int = TELEGRAM_LIMIT) -> list[tuple[str, list]]:
-    """Alert messages within the Telegram limit as ``(text, alerts)`` pairs; an alert is never split."""
+    """Branded alert messages within the Telegram limit as ``(text, alerts)`` pairs; an alert is never split."""
     out: list[tuple[str, list]] = []
     current: list = []
     for alert in alerts:
-        if current and _tg_len(render_guards(current + [alert])) > limit:
-            out.append((render_guards(current), current))
+        if current and _tg_len(branded(render_guards(current + [alert]))) > limit:
+            out.append((branded(render_guards(current)), current))
             current = []
         current = current + [alert]
     if current:
-        out.append((render_guards(current), current))
+        out.append((branded(render_guards(current)), current))
     return [(_prefix(text, limit), items) for text, items in out]
 
 

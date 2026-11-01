@@ -5,7 +5,7 @@ import pathlib
 
 import pytest
 
-from conftest import create_task, make_coordinator, settings_for_test
+from conftest import create_task, unbranded, make_coordinator, settings_for_test
 from test_inbound import OWNER, BOSS, STRANGER, _comments, _status, reply_event
 from test_waits import make_human_block, pt_br  # noqa: F401 (pt_br is a fixture)
 
@@ -285,8 +285,9 @@ def test_escalation_copy_has_its_lead_and_no_reply_footer(pt_br):  # noqa: F811
 
     ((copy, _),) = render_waits_chunks("sponsor", owner_scenario_pt(), copy=True)
     lines = copy.splitlines()
-    assert lines[0] == "Cópia para acompanhamento"
-    assert lines[1] == "📋 KANBAN · PRECISA DE VOCÊ"
+    assert lines[0] == "[Kanban - Empowered]"
+    assert lines[1] == "Cópia para acompanhamento"
+    assert lines[2] == "📋 KANBAN · PRECISA DE VOCÊ"
     assert "↩️" not in copy and "responda" not in copy.lower()
 
 
@@ -311,7 +312,7 @@ def test_chunks_repeat_the_header_and_number_from_one():
     assert len(chunks) > 1
     for text, items in chunks:
         assert _tg_len(text) <= 1500
-        assert text.startswith("📋 KANBAN · NEEDS YOU\n")
+        assert text.startswith("[Kanban - Empowered]\n📋 KANBAN · NEEDS YOU\n")
         if len(items) > 1:
             assert "① B" in text and "↩️ When replying, name the item:" in text
 
@@ -442,7 +443,7 @@ def test_veto_alert_is_a_separate_setup_message_sent_once(tmp_path, fake_tg, clo
     c.evaluate(1.0)
     c.evaluate(100.0)
     texts = [m["text"] for m in fake_tg.calls["send"]]
-    assert len(texts) == 1 and texts[0].startswith("⚙️ KANBAN · SETUP\n")
+    assert len(texts) == 1 and texts[0].startswith("[Kanban - Empowered]\n⚙️ KANBAN · SETUP\n")
 
 
 def test_escalate_to_without_chat_id_is_a_setup_alert_sent_once(tmp_path, fake_tg, clock):
@@ -450,7 +451,7 @@ def test_escalate_to_without_chat_id_is_a_setup_alert_sent_once(tmp_path, fake_t
     c.evaluate(1.0)
     c.evaluate(100.0)
     texts = [m["text"] for m in fake_tg.calls["send"]]
-    assert len(texts) == 1 and texts[0].startswith("⚙️ KANBAN · SETUP\n")
+    assert len(texts) == 1 and texts[0].startswith("[Kanban - Empowered]\n⚙️ KANBAN · SETUP\n")
     assert "boss" not in texts[0]
     assert fake_tg.calls["send"][0]["chat_id"] == 111
 
@@ -462,7 +463,7 @@ def test_setup_alert_never_opens_a_reminder(tmp_path, fake_tg, clock):
     c._deliver_waits(1.0)
     c.evaluate(2.0)
     reminders = [m["text"] for m in fake_tg.calls["send"] if "NEEDS YOU" in m["text"]]
-    assert reminders and all(r.startswith("📋 KANBAN · NEEDS YOU") for r in reminders)
+    assert reminders and all(r.startswith("[Kanban - Empowered]\n📋 KANBAN · NEEDS YOU") for r in reminders)
     assert all("⚙️" not in r for r in reminders)
 
 
@@ -475,7 +476,7 @@ def test_owner_without_chat_id_is_only_logged(tmp_path, fake_tg, clock, caplog):
 def test_setup_alert_is_pt_when_configured(tmp_path, fake_tg, clock, pt_br):  # noqa: F811
     c = make_coordinator(tmp_path, clock=clock, veto_hooks=False, telegram=fake_tg, owner_ids={"sponsor": 111})
     c.evaluate(1.0)
-    assert fake_tg.last_text.startswith("⚙️ KANBAN · CONFIGURAÇÃO\n")
+    assert fake_tg.last_text.startswith("[Kanban - Empowered]\n⚙️ KANBAN · CONFIGURAÇÃO\n")
 
 
 # -- §5 item-linked replies ---------------------------------------------------------------
@@ -578,7 +579,7 @@ def test_a_negation_only_comments_and_keeps_waiting(rig3):
     assert rig3.reply("1 — ainda não")["action"] == "skip"
     assert _status(rig3.tids[0]) == "blocked"
     assert "ainda não" in _comments(rig3.tids[0])[-1]
-    assert rig3.tg.last_text == "Noted; the item is still waiting."
+    assert unbranded(rig3.tg.last_text) == "Noted; the item is still waiting."
     assert not any(a["kind"] == "human_done" for a in rig3.store.actions_since(0))
 
 
@@ -590,7 +591,7 @@ def test_negation_forms(rig3, text):
 
 def test_noted_reply_in_pt(rig3, pt_br):  # noqa: F811
     rig3.reply("1 — ainda não")
-    assert rig3.tg.last_text == "Anotado; o item continua esperando."
+    assert unbranded(rig3.tg.last_text) == "Anotado; o item continua esperando."
 
 
 def test_multi_item_message_without_number_asks_which(rig3):
@@ -643,7 +644,7 @@ def test_a_reply_without_text_passes_through(rig1):
 def test_english_negations_keep_the_card_waiting(rig3, text):
     assert rig3.reply(text)["action"] == "skip"
     assert _status(rig3.tids[0]) == "blocked"
-    assert rig3.tg.last_text == "Noted; the item is still waiting."
+    assert unbranded(rig3.tg.last_text) == "Noted; the item is still waiting."
 
 
 def test_portuguese_no_at_the_start_is_not_a_negation(rig3, pt_br):  # noqa: F811

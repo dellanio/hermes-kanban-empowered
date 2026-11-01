@@ -424,7 +424,7 @@ def test_owner_done_unblocks_comments_logs_and_confirms(env):
     send = env.telegram.calls["send"][-1]
     assert send["chat_id"] == int(OWNER) and send.get("reply_to") == 31
     # the board and the action, no ids (message format v2)
-    assert send["text"].startswith("✅ DEFAULT: a") and "1 card" in send["text"]
+    assert send["text"].startswith("[Kanban - Empowered]\n✅ DEFAULT: a") and "1 card" in send["text"]
     assert tid not in send["text"] and env.held not in send["text"]
 
 

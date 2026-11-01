@@ -189,7 +189,7 @@ def test_oversized_batch_splits_at_item_boundaries_and_numbering_restarts():
     assert [d for _, items in chunks for d in items] == dues  # nothing lost, nothing repeated, order kept
     for text, items in chunks:
         assert _tg_len(text) <= 4096
-        assert text.startswith("📋 KANBAN · NEEDS YOU\n")  # every chunk repeats the header
+        assert text.startswith("[Kanban - Empowered]\n📋 KANBAN · NEEDS YOU\n")  # brand, then the header in every chunk
         if len(items) > 1:  # "n — ..." in this message maps to items[n-1] of this message only
             for n, (due, block) in enumerate(zip(items, _blocks(text)), start=1):
                 assert f"{circled(n)} B" in block and f"do {due.task_id}" in block
@@ -207,7 +207,7 @@ def test_single_oversized_item_is_clipped_keeping_head_and_last_line():
     assert [[d.task_id for d in items] for _, items in chunks] == [["t_00"], ["t_ok"]]
     text = chunks[0][0]
     assert _tg_len(text) <= 600 and "…" in text
-    assert text.splitlines()[0] == "📋 KANBAN · NEEDS YOU" and text.splitlines()[-1] == "w"
+    assert text.splitlines()[:2] == ["[Kanban - Empowered]", "📋 KANBAN · NEEDS YOU"] and text.splitlines()[-1] == "w"
 
 
 def test_clip_of_a_huge_ask_is_fast_and_within_the_limit():
@@ -367,7 +367,7 @@ def test_escalated_copy_has_a_follow_up_lead_and_no_role_name(tmp_path, fake_tg,
     coord._deliver_waits(clock.now)
     copy = next(c for c in fake_tg.calls["send"] if c["chat_id"] == 222)
     owner_msg = next(c for c in fake_tg.calls["send"] if c["chat_id"] == 111)
-    assert copy["text"].splitlines()[0] == t("waits.copy.lead")
+    assert copy["text"].splitlines()[:2] == ["[Kanban - Empowered]", t("waits.copy.lead")]
     assert "sponsor" not in copy["text"] and "copy" not in owner_msg["text"].lower()
     blocks = _blocks(copy["text"])
     assert "① B" in blocks[0] and "do t_1" in blocks[0] and "② B" in blocks[1] and "do t_2" in blocks[1]
@@ -379,7 +379,7 @@ def test_escalation_without_escalate_to_is_owner_only_and_not_marked_urgent(tmp_
     coord.pending_dues = [_due("t_1", stage="escalation", age_s=8 * H)]
     coord._deliver_waits(clock.now)
     (call,) = fake_tg.calls["send"]
-    assert call["chat_id"] == 111 and call["text"].startswith("📋 KANBAN · NEEDS YOU") and _no_urgent(call["text"])
+    assert call["chat_id"] == 111 and call["text"].startswith("[Kanban - Empowered]\n📋 KANBAN · NEEDS YOU") and _no_urgent(call["text"])
 
 
 def test_escalate_to_same_as_owner_sends_once(tmp_path, fake_tg, clock):
@@ -403,8 +403,8 @@ def test_mixed_batch_escalations_and_copies_per_owner(tmp_path, fake_tg, clock):
     for c in fake_tg.calls["send"]:
         by_chat.setdefault(c["chat_id"], []).append(c["text"])
     assert all(_no_urgent(m) for msgs in by_chat.values() for m in msgs)
-    assert any("do t_o" in m and not m.startswith(t("waits.copy.lead")) for m in by_chat[222])  # ops' own
-    assert any("do t_s" in m and m.startswith(t("waits.copy.lead")) for m in by_chat[222])  # the copy
+    assert any("do t_o" in m and not m.startswith("[Kanban - Empowered]\n" + t("waits.copy.lead")) for m in by_chat[222])  # ops' own
+    assert any("do t_s" in m and m.startswith("[Kanban - Empowered]\n" + t("waits.copy.lead")) for m in by_chat[222])  # the copy
     assert not any("do t_o" in m for m in by_chat[111])
 
 
@@ -561,7 +561,7 @@ def test_escalation_copy_is_sent_when_the_owner_has_no_chat_id(tmp_path, fake_tg
     coord.pending_dues = [due]
     coord._deliver_waits(clock.now)
     (call,) = fake_tg.calls["send"]
-    assert call["chat_id"] == 222 and call["text"].splitlines()[0] == t("waits.copy.lead")
+    assert call["chat_id"] == 222 and call["text"].splitlines()[:2] == ["[Kanban - Empowered]", t("waits.copy.lead")]
     assert "ghost" not in call["text"]  # role names never reach Telegram
     assert _stage(coord, due) is None  # the owner never got it
     coord.pending_dues = [due]
@@ -717,7 +717,7 @@ def test_veto_warning_is_sent_once_to_default_owner(tmp_path, fake_tg, clock):
     coord.evaluate(1.0)
     coord.evaluate(2.0)
     (call,) = fake_tg.calls["send"]
-    assert call["chat_id"] == 111 and call["text"] == render_config_alert("veto")
+    assert call["chat_id"] == 111 and call["text"] == "[Kanban - Empowered]\n" + render_config_alert("veto")
     assert coord.store.kv_get("veto_hooks_warned") == "1"
     assert coord.store.kv_get("veto_hooks_warn_sent") == "1"
 
@@ -830,7 +830,7 @@ def test_escalated_copy_does_not_tell_the_contact_to_reply_done(tmp_path, fake_t
     coord._deliver_waits(clock.now)
     copy = next(c for c in fake_tg.calls["send"] if c["chat_id"] == 222)["text"]
     owner_msg = next(c for c in fake_tg.calls["send"] if c["chat_id"] == 111)["text"]
-    assert copy.splitlines()[0] == t("waits.copy.lead")
+    assert copy.splitlines()[:2] == ["[Kanban - Empowered]", t("waits.copy.lead")]
     assert "reply" not in copy.lower() and "↩️" not in copy
     # the owner's own reminder keeps its reply instructions
     assert ("Then reply" in owner_msg) if n == 1 else ("↩️ When replying, name the item:" in owner_msg)
@@ -841,5 +841,5 @@ def test_escalated_copy_footer_in_pt_br(tmp_path, fake_tg, clock, kanban_home, p
     coord.pending_dues = [_due("t_1", stage="escalation")]
     coord._deliver_waits(clock.now)
     copy = next(c for c in fake_tg.calls["send"] if c["chat_id"] == 222)["text"]
-    assert copy.splitlines()[0] == "Cópia para acompanhamento"
+    assert copy.splitlines()[:2] == ["[Kanban - Empowered]", "Cópia para acompanhamento"]
     assert "responda" not in copy.lower() and "sponsor" not in copy

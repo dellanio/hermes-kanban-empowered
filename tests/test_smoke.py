@@ -36,19 +36,22 @@ def test_fake_clock_and_fake_tg(clock, fake_tg):
     t0 = clock.now
     clock.advance(60)
     assert clock.now == t0 + 60
-    a = fake_tg.send(1, "oi")
-    b = fake_tg.send(1, "dois")
-    assert b > a and fake_tg.count("send") == 2 and fake_tg.last_text == "dois"
-    fake_tg.edit(1, a, "editado")
-    assert fake_tg.last_text == "editado" and fake_tg.count("edit") == 1
+    B = fake_tg.BRAND_LINE
+    a = fake_tg.send(1, B + "oi")
+    b = fake_tg.send(1, B + "dois")
+    assert b > a and fake_tg.count("send") == 2 and fake_tg.last_text == B + "dois"
+    fake_tg.edit(1, a, B + "editado")
+    assert fake_tg.last_text == B + "editado" and fake_tg.count("edit") == 1
+    with pytest.raises(AssertionError):  # the fake itself refuses an unbranded message
+        fake_tg.send(1, "sem marca")
     fake_tg.fail_next_edit = RuntimeError("message to edit not found")
     with pytest.raises(RuntimeError):
-        fake_tg.edit(1, a, "x")
-    fake_tg.edit(1, a, "ok")
+        fake_tg.edit(1, a, B + "x")
+    fake_tg.edit(1, a, B + "ok")
     assert fake_tg.count("edit") == 2
     fake_tg.fail_next = RuntimeError("boom")
     with pytest.raises(RuntimeError):
-        fake_tg.send(1, "x")
+        fake_tg.send(1, B + "x")
     assert fake_tg.count("send") == 2
     fake_tg.pin(1, a)
     assert fake_tg.count("pin") == 1

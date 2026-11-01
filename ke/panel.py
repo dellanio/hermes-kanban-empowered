@@ -28,6 +28,7 @@ from . import conditions, hermes_api
 from .asks import parse_ask
 from .messages import (
     TELEGRAM_LIMIT,
+    branded,
     _clip_to,
     agent_text,
     _guard_reason_text,
@@ -194,10 +195,10 @@ def _compose(s: Snapshot, shown: list[dict]) -> str:
 def _fit(s: Snapshot) -> tuple[str, list[dict]]:
     ordered = _ordered(s)
     for k in range(min(len(ordered), MAX_ITEMS), -1, -1):
-        text = _compose(s, ordered[:k])
+        text = branded(_compose(s, ordered[:k]))  # the brand line counts toward the limit
         if _tg_len(text) <= TELEGRAM_LIMIT:
             return text, ordered[:k]
-    return _prefix(_compose(s, []), TELEGRAM_LIMIT), []  # pathological: nothing fits
+    return _prefix(branded(_compose(s, [])), TELEGRAM_LIMIT), []  # pathological: nothing fits
 
 
 def shown_waits(s: Snapshot) -> list[dict]:

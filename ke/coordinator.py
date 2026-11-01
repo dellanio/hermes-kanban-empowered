@@ -18,7 +18,7 @@ from typing import Any, Callable, Optional
 from . import hermes_api, panel
 from .guards_watch import GuardWatch
 from .infra import InfraRecovery
-from .messages import render_config_alert, render_guard_chunks, render_infra_alert, render_waits_chunks
+from .messages import branded, render_config_alert, render_guard_chunks, render_infra_alert, render_waits_chunks
 from .leader import LeaderLock
 from .settings import Settings
 from .store import Store
@@ -287,6 +287,8 @@ class Coordinator:
 
     def _tg_call(self, method: str, *args: Any) -> Any:
         """``telegram.edit`` / ``telegram.pin`` that remembers a transport failure (like ``_tg_send``)."""
+        if method == "edit":  # (chat_id, message_id, text): the brand line is on every edit too
+            args = (*args[:2], branded(args[2]), *args[3:])
         try:
             return getattr(self.telegram, method)(*args)
         except Exception as exc:
@@ -308,7 +310,7 @@ class Coordinator:
     def _tg_send(self, chat_id: int, text: str) -> int:
         """``telegram.send`` that remembers a transport failure: Telegram is down for this evaluation."""
         try:
-            return self.telegram.send(chat_id, text)
+            return self.telegram.send(chat_id, branded(text))  # idempotent: chunks arrive branded
         except Exception as exc:
             if getattr(exc, "status", None) is None:  # no HTTP answer: network, DNS, timeout
                 self._transport_failed()

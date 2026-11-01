@@ -55,7 +55,7 @@ from typing import Any, Callable, Optional
 
 from . import panel
 from .asks import CONFIRM_WORDS, parse_ask, reply_words
-from .messages import _clip_to, active_language, board_title, render_answer, short_action, t
+from .messages import _clip_to, active_language, board_title, branded, render_answer, short_action, t
 from .waits import block_version, current_block, display_name, held_behind
 
 log = logging.getLogger(__name__)
@@ -205,7 +205,7 @@ def _reply(telegram: Any, chat_id: int, message_id: int, text: str) -> None:
         log.warning("kanban-empowered: TELEGRAM_BOT_TOKEN is not set; cannot answer a reply")
         return
     try:
-        telegram.send(chat_id, text, reply_to=message_id)
+        telegram.send(chat_id, branded(text), reply_to=message_id)
     except Exception as exc:
         log.warning("kanban-empowered: could not answer a Telegram reply: %s", exc)
 

@@ -110,8 +110,9 @@ def test_render_title_counts_items_and_guards():
     from ke.panel import render_telegram
 
     lines = render_telegram(snapshot_fixture()).splitlines()
-    assert lines[0] == "📋 KANBAN NOW · 14:05"
-    assert lines[1] == "1 running · 1 on hold · 2 pending"
+    assert lines[0] == "[Kanban - Empowered]"
+    assert lines[1] == "📋 KANBAN NOW · 14:05"
+    assert lines[2] == "1 running · 1 on hold · 2 pending"
     text = "\n".join(lines)
     assert "① MATRIX\n⏳ Stalled for 2 hours · blocks 3 cards\n👉 plug the board in" in text
     assert "② SIDE\n⏳ Stalled for 5 min\n👉 approve the deploy" in text

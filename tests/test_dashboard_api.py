@@ -552,3 +552,20 @@ def test_count_is_the_light_needs_you_metric(client):
     body = client.get(PREFIX + "/count").json()
     assert body["needs_you"] == 2 == client.get(PREFIX + "/overview").json()["metrics"]["needs_you"]
     assert set(body) == {"needs_you", "generated_at"}
+
+
+def test_board_filtered_timeline_reaches_older_history(client, store):
+    """Review minor 8: a quiet board next to a busy one still shows its own (older) history."""
+    from hermes_cli import kanban_db_boards as kbb
+
+    kbb.create_board("quiet")
+    now = int(time.time())
+    for i in range(3):
+        store.log_action("quiet", f"t_0000aa0{i}", "human_done", "desktop", now - 10_000 - i)
+    store.add_sent_message(1, 9, "waits", [{"board": "quiet", "task_id": "t_0000aa00", "version": 1}], now - 9_000)
+    for i in range(250):
+        store.log_action("default", f"t_{i:08x}", "human_done", "telegram:1", now - i)
+        store.add_sent_message(100 + i, 9, "waits", [{"board": "default", "task_id": f"t_{i:08x}", "version": 1}], now - i)
+    timeline = client.get(PREFIX + "/overview", params={"board": "quiet"}).json()["timeline"]
+    assert [e["kind"] for e in timeline] == ["reminder_sent", "human_done", "human_done", "human_done"]
+    assert all(e["board"] == "quiet" for e in timeline)

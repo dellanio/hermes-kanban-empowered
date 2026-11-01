@@ -323,7 +323,7 @@ def _titles(api: Any, wanted: set) -> dict:
 
 def _timeline(api: Any, store: Store, boards: list, only: Optional[str]) -> list:
     entries: list[dict] = []
-    for a in store.recent_actions(_ACTION_KINDS, limit=TIMELINE_MAX * 10):
+    for a in store.recent_actions(_ACTION_KINDS, limit=TIMELINE_MAX, board=only):
         if only is not None and a["board"] != only:
             continue
         kind = a["kind"]
@@ -338,7 +338,8 @@ def _timeline(api: Any, store: Store, boards: list, only: Optional[str]) -> list
             text = t("ui.timeline.infra_undo")
         entries.append({"ts": int(a["ts"]), "kind": kind, "board": a["board"], "task_id": a["task_id"],
                         "title": "", "detail": detail, "text": text})
-    for m in store.recent_sent_messages(_SENT_KINDS, limit=TIMELINE_MAX * 10):
+    sent_kinds = _SENT_KINDS if only is None else ("waits",)  # the panel spans every board
+    for m in store.recent_sent_messages(sent_kinds, limit=TIMELINE_MAX, board=only):
         items = [i for i in m["items"] if isinstance(i, dict) and "board" in i and "task_id" in i]
         if m["kind"] == "panel":
             if only is not None:

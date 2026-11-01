@@ -118,17 +118,21 @@ class Store:
             ).fetchall()
         return [dict(r) for r in rows]
 
-    def recent_actions(self, kinds, limit: int = 20) -> list[dict]:
-        """The newest ``limit`` actions whose kind is in ``kinds``, newest first."""
+    def recent_actions(self, kinds, limit: int = 20, board: Optional[str] = None) -> list[dict]:
+        """The newest ``limit`` actions whose kind is in ``kinds`` (of ``board`` only, when given), newest first."""
         kinds = list(kinds)
         if not kinds:
             return []
         marks = ",".join("?" * len(kinds))
+        where, args = f"kind IN ({marks})", list(kinds)
+        if board is not None:
+            where += " AND board = ?"
+            args.append(board)
         with self.lock:
             rows = self.conn.execute(
-                f"SELECT id, ts, board, task_id, kind, detail FROM actions WHERE kind IN ({marks}) "
+                f"SELECT id, ts, board, task_id, kind, detail FROM actions WHERE {where} "
                 "ORDER BY ts DESC, id DESC LIMIT ?",
-                (*kinds, int(limit)),
+                (*args, int(limit)),
             ).fetchall()
         return [dict(r) for r in rows]
 
@@ -243,30 +247,46 @@ class Store:
         out["items"] = json.loads(out.pop("items_json"))
         return out
 
-    def recent_sent_messages(self, kinds, limit: int = 20) -> list[dict]:
+    def recent_sent_messages(self, kinds, limit: int = 20, board: Optional[str] = None) -> list[dict]:
         """The newest ``limit`` sent messages whose kind is in ``kinds`` (by ``created_at``), items parsed.
 
-        A live panel is one row whose ``created_at`` moves to its last update (see ``panel.record_items``).
+        ``board`` keeps only messages with an item of that board (a coarse ``items_json`` match in SQL, then
+        an exact check). A live panel is one row whose ``created_at`` moves to its last update (see
+        ``panel.record_items``).
         """
         kinds = list(kinds)
         if not kinds:
             return []
         marks = ",".join("?" * len(kinds))
-        with self.lock:
-            rows = self.conn.execute(
-                f"SELECT message_id, chat_id, kind, items_json, created_at FROM sent_messages "
-                f"WHERE kind IN ({marks}) ORDER BY created_at DESC, message_id DESC LIMIT ?",
-                (*kinds, int(limit)),
-            ).fetchall()
+        where, args = f"kind IN ({marks})", list(kinds)
+        if board is not None:
+            escaped = board.replace("!", "!!").replace("%", "!%").replace("_", "!_")
+            where += " AND items_json LIKE ? ESCAPE '!'"
+            args.append(f"%{escaped}%")
         out = []
-        for row in rows:
-            item = dict(row)
-            try:
-                item["items"] = json.loads(item.pop("items_json"))
-            except ValueError:
-                item["items"] = []
-            out.append(item)
-        return out
+        offset = 0
+        while len(out) < limit:
+            with self.lock:
+                rows = self.conn.execute(
+                    f"SELECT message_id, chat_id, kind, items_json, created_at FROM sent_messages "
+                    f"WHERE {where} ORDER BY created_at DESC, message_id DESC LIMIT ? OFFSET ?",
+                    (*args, int(limit), offset),
+                ).fetchall()
+            if not rows:
+                break
+            offset += len(rows)
+            for row in rows:
+                item = dict(row)
+                try:
+                    item["items"] = json.loads(item.pop("items_json"))
+                except ValueError:
+                    item["items"] = []
+                if board is not None and not any(
+                    isinstance(i, dict) and i.get("board") == board for i in item["items"]
+                ):
+                    continue
+                out.append(item)
+        return out[:limit]
 
     # -- guard alerts ------------------------------------------------------
     _GUARD_COLS = "board, task_id, reason, first_seen, last_seen, alerted_at"

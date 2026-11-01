@@ -320,9 +320,10 @@ def test_out_of_range_number_asks_which(env2):
     assert [_status(t) for t in env2.tids] == ["blocked", "blocked"]
 
 
-def test_single_item_message_with_wrong_number_asks_which(env):
+def test_single_item_message_with_another_leading_number_is_plain_text(env):
+    # fix round 1, ruling 11: on a one-item reminder "2 done" is the answer text, not item 2
     env.handle(reply_event(user_id=OWNER, reply_to=env.sent_id, text="2 done"))
-    assert _status(env.tids[0]) == "blocked" and "which item" in env.telegram.last_text.lower()
+    assert _status(env.tids[0]) != "blocked" and "2 done" in _comments(env.tids[0])[-1]
 
 
 def test_card_no_longer_blocked_is_reported_as_changed(env):
@@ -356,7 +357,10 @@ def test_any_other_owner_text_is_the_answer(env, text):
     ev = reply_event(user_id=OWNER, reply_to=env.sent_id, text=text, message_id="61")
     assert env.handle(ev)["action"] == "skip"
     assert _status(env.tids[0]) != "blocked"
-    assert " ".join(text.split()) in _comments(env.tids[0])[-1]
+    from ke.inbound import split_reply
+
+    # the comment is the text without its message-local item number (fix round 1)
+    assert _comments(env.tids[0])[-1].endswith(": " + " ".join(split_reply(text)[1].split()))
 
 
 @pytest.mark.parametrize("text", ["não feito", "ainda não", "1 — nao", "negativo", "not yet", "nope", "no."])

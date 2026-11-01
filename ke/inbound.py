@@ -32,6 +32,11 @@ e. any other text -> it is the owner's answer: resolved, the text posted as a co
    so the agent continues with the feedback;
 f. several items and no number -> "which item?" (nothing changes).
 
+A bare confirmation for an item that asks for a choice (it has options) also changes nothing: the
+reply asks for one of the listed letters. Replies to the pinned panel count only with an item
+number (anything else passes through to the agent); on a one-item reminder a leading number other
+than 1 is part of the text.
+
 The same rules apply to replies to the live panel (``sent_messages`` kind "panel"), a message the
 coordinator edits in place. Its numbering changes over time, so the reply is resolved against the
 list that was current at the reply's own date (``panel.view_for_reply``); when the user may have
@@ -49,26 +54,26 @@ import time
 from typing import Any, Callable, Optional
 
 from . import panel
-from .asks import parse_ask, reply_words
-from .messages import _clip_to, board_title, render_answer, short_action, t
+from .asks import CONFIRM_WORDS, parse_ask, reply_words
+from .messages import _clip_to, active_language, board_title, render_answer, short_action, t
 from .waits import block_version, current_block, display_name, held_behind
 
 log = logging.getLogger(__name__)
 
 SKIP = {"action": "skip", "reason": "kanban-empowered"}
 # "<n> — text", "<n> – text", "<n> - text", "<n>: text", "<n>) text", "<n>. text", "<n> text", "<n>"
-ITEM_RE = re.compile(r"^\s*([0-9]{1,4})(?:\s*[—–\-:).]\s*|\s+|\s*$)(.*)$", re.DOTALL)
+# ("." and ")" need a space after them, so "1.5 GB" is not item 1)
+ITEM_RE = re.compile(r"^\s*([0-9]{1,4})(?:\s*[—–\-:]\s*|[.)]\s+|[.)]?\s*$|\s+)(.*)$", re.DOTALL)
 _LETTER_RE = re.compile(r"^([A-Za-z])\s*[.!)]*$")
-# Confirmation words accepted for every item (pt and en), besides the item's own reply words.
-CONFIRM_WORDS = frozenset({
-    "feito", "conectei", "validado", "liguei", "ok", "aprovado", "pronto",
-    "done", "connected", "validated", "approved",
-})
-# An explicit "not done": the card stays blocked. A bare "no" counts only when it stands alone
-# ("no celular..." is Portuguese for "on the phone...").
-NEGATION_RE = re.compile(
-    r"^(?:ainda\s+n[ãa]o|n[ãa]o|negativo|not\s+yet|nope|no(?=\s*(?:$|[,.;:!])))(?!\w)", re.IGNORECASE
-)
+# An explicit "not done": the card stays blocked. In Portuguese a bare "no" counts only when it
+# stands alone ("no celular..." means "on the phone..."); in any other language "no ..." counts.
+_NEGATION_COMMON = r"ainda\s+n[ãa]o|n[ãa]o|negativo|not\s+yet|not|nope|never"
+NEGATION_RE_PT = re.compile(rf"^(?:{_NEGATION_COMMON}|no(?=\s*(?:$|[,.;:!])))(?!\w)", re.IGNORECASE)
+NEGATION_RE_EN = re.compile(rf"^(?:{_NEGATION_COMMON}|no)(?!\w)", re.IGNORECASE)
+
+
+def _negation_re():
+    return NEGATION_RE_PT if active_language().lower().startswith("pt") else NEGATION_RE_EN
 _TRAILING_RE = re.compile(r"[^\w?]+$")  # trailing punctuation and emoji (a "?" makes it a question)
 _ID_RE = re.compile(r"-?[1-9][0-9]{0,19}")
 _COMMENT_TEXT_MAX = 500
@@ -170,6 +175,7 @@ def classify(text: str, ask: Any) -> tuple[str, Any]:
     """What a reply means for an item with ``ask`` (``None`` for an unstructured block).
 
     ``("empty", None)``, ``("option", (letter, label))``, ``("unknown_option", letter)``,
+    ``("need_option", None)`` (a bare confirmation for an item that asks for a choice),
     ``("confirm", None)``, ``("negation", None)`` or ``("answer", None)`` (see the module doc).
     """
     text = (text or "").strip()
@@ -182,8 +188,10 @@ def classify(text: str, ask: Any) -> tuple[str, Any]:
         return ("option", (letter, label)) if label is not None else ("unknown_option", letter)
     word = _TRAILING_RE.sub("", text).strip().lower()
     if word and (word in CONFIRM_WORDS or word in reply_words(ask)):
+        if ask is not None and ask.options:
+            return "need_option", None  # "ok" does not say which option: nothing changes
         return "confirm", None
-    if NEGATION_RE.match(text):
+    if _negation_re().match(text):
         return "negation", None
     return "answer", None
 
@@ -257,7 +265,7 @@ def handle_inbound(event: Any, settings: Any, store: Any, api: Any, telegram: An
     text = getattr(event, "text", None)
     if not isinstance(text, str) or not text.strip():
         return None  # nothing to read (a sticker, a photo without caption): a normal message
-    number, _rest = split_reply(text)
+    number, body = split_reply(text)
     sent = store.get_sent_message(int(chat), int(reply_to))
     if sent is None or sent.get("kind") not in ("waits", "panel"):
         return None
@@ -267,6 +275,12 @@ def handle_inbound(event: Any, settings: Any, store: Any, api: Any, telegram: An
     if not isinstance(items, list) or (not items and sent["kind"] != "panel"):
         return None
     is_panel = sent["kind"] == "panel"
+    if is_panel and number is None:
+        return None  # the pinned panel only takes numbered answers; anything else is for the agent
+    if not is_panel and len(items) == 1 and number is not None and number != 1:
+        number, body = None, text.strip()  # "2 cabos faltando" on a one-item reminder is plain text
+    if number is None:
+        body = text.strip()
     ambiguous = False
     scope_items = None
     if is_panel:
@@ -302,16 +316,21 @@ def handle_inbound(event: Any, settings: Any, store: Any, api: Any, telegram: An
     if not store.mark_update(f"tg:{chat}:{message}", int(now)):
         return _skip()
     try:
-        _act(event, source, settings, store, api, telegram, now, sent, items, selected, chat, sender, message, ambiguous)
+        _act(event, source, settings, store, api, telegram, now, sent, items, selected, chat, sender, message,
+             ambiguous, body)
     except Exception:
         log.exception("kanban-empowered: handling a consumed Telegram reply failed")
     return _skip()
 
 
 def _act(
-    event, source, settings, store, api, telegram, now, sent, items, selected, chat, sender, message, ambiguous=False
+    event, source, settings, store, api, telegram, now, sent, items, selected, chat, sender, message, ambiguous=False,
+    body=None,
 ) -> None:
-    """Everything after the update was consumed; the caller returns skip whatever happens here."""
+    """Everything after the update was consumed; the caller returns skip whatever happens here.
+
+    ``body`` is the reply without its message-local item number (what is classified and commented).
+    """
     # -- 4. the request is still fresh ------------------------------------------------------
     if now - int(sent["created_at"]) >= settings.reply_ttl_s:
         _reply(telegram, int(chat), int(message), t("inbound.expired"))
@@ -323,7 +342,7 @@ def _act(
         _reply(telegram, int(chat), int(message), t("inbound.which_item", n=len(items), word=t("waits.default_word")))
         return
     board, task_id, version = str(selected["board"]), str(selected["task_id"]), int(selected["version"])
-    number, rest = split_reply(event.text)
+    body = (event.text or "").strip() if body is None else body
     try:
         live, ask, reason = _item_ask(api, board, task_id, version)
     except Exception:
@@ -333,7 +352,7 @@ def _act(
     if not live:
         _reply(telegram, int(chat), int(message), t("inbound.changed"))
         return
-    kind, value = classify(rest if number is not None else event.text, ask)
+    kind, value = classify(body, ask)
     if kind == "empty":
         _reply(telegram, int(chat), int(message), t("reply.empty", word=t("waits.default_word")))
         return
@@ -344,9 +363,13 @@ def _act(
             text = t("reply.option_none")
         _reply(telegram, int(chat), int(message), text)
         return
+    if kind == "need_option":
+        options = ", ".join(k for k, _ in ask.options)
+        _reply(telegram, int(chat), int(message), t("reply.option_needed", options=options))
+        return
     name = _clip(getattr(source, "user_name", None) or getattr(event, "user_name", None) or sender)
     if kind == "negation":
-        note = t("inbound.comment.note", name=name, user_id=sender, text=_clip(event.text, _ANSWER_TEXT_MAX))
+        note = t("inbound.comment.note", name=name, user_id=sender, text=_clip(body, _ANSWER_TEXT_MAX))
         try:
             noted = note_wait(api, store, board, task_id, version, note, now, f"telegram:{sender}")
         except Exception:
@@ -358,9 +381,9 @@ def _act(
     if kind == "option":
         said = t("inbound.comment.choice", letter=value[0], label=_clip(value[1]))
     elif kind == "answer":
-        said = _clip(event.text, _ANSWER_TEXT_MAX)
+        said = _clip(body, _ANSWER_TEXT_MAX)
     else:
-        said = _clip(event.text)
+        said = _clip(body)
     comment = t("inbound.comment.telegram", name=name, user_id=sender, text=said)
     try:
         done, held = resolve_wait(api, store, board, task_id, version, comment, now, f"telegram:{sender}")

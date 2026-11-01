@@ -9,11 +9,16 @@ log = logging.getLogger(__name__)
 
 
 def _apply_language(settings) -> None:
-    """``settings.language`` overrides the Hermes language for the plugin's messages."""
+    """``settings.language`` overrides the Hermes language for the plugin's messages, and the
+    configured role names (never shown on Telegram) are handed to the message layer."""
     try:
         from .ke import messages
 
         messages.set_language(settings.language)
+        roles = set(settings.owner_ids)
+        if settings.escalate_to:
+            roles.add(settings.escalate_to)
+        messages.set_roles(roles)
     except Exception:
         log.exception("kanban-empowered: could not apply the language setting")
 

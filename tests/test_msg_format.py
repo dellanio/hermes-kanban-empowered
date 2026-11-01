@@ -636,3 +636,117 @@ def test_free_text_reply_to_an_unknown_message_passes_through(rig3):
 def test_a_reply_without_text_passes_through(rig1):
     assert rig1.reply("   ") is None
     assert _status(rig1.tids[0]) == "blocked"
+
+
+# -- fix round 1 ----------------------------------------------------------------------------
+@pytest.mark.parametrize("text", ["1 — No it still fails", "1 no I couldn't", "1 — not done yet", "1 — never"])
+def test_english_negations_keep_the_card_waiting(rig3, text):
+    assert rig3.reply(text)["action"] == "skip"
+    assert _status(rig3.tids[0]) == "blocked"
+    assert rig3.tg.last_text == "Noted; the item is still waiting."
+
+
+def test_portuguese_no_at_the_start_is_not_a_negation(rig3, pt_br):  # noqa: F811
+    rig3.reply("1 — no celular funcionou")
+    assert _status(rig3.tids[0]) != "blocked"  # "no celular" = "on the phone": an answer
+    assert "no celular funcionou" in _comments(rig3.tids[0])[-1]
+
+
+def test_the_comment_has_no_item_number(rig3):
+    rig3.reply("2 — o campo ficou pequeno")
+    body = _comments(rig3.tids[1])[-1]
+    assert body.endswith(": o campo ficou pequeno") and "2 —" not in body
+
+
+def test_a_bare_confirmation_on_an_option_item_asks_for_a_letter(rig3):
+    assert rig3.reply("3 — ok")["action"] == "skip"
+    assert _status(rig3.tids[2]) == "blocked"
+    assert "A, B, C" in rig3.tg.last_text
+
+
+def test_a_decimal_is_not_an_item_number(rig3):
+    assert rig3.reply("1.5 GB faltam")["action"] == "skip"
+    assert [_status(t) for t in rig3.tids] == ["blocked"] * 3
+    assert "which item" in rig3.tg.last_text.lower()
+
+
+def test_a_single_item_reminder_takes_other_leading_numbers_as_text(rig1):
+    rig1.reply("2 cabos faltando")
+    assert _status(rig1.tids[0]) != "blocked"
+    assert "2 cabos faltando" in _comments(rig1.tids[0])[-1]
+
+
+def test_cli_stripping_leaves_prose_alone():
+    from ke.messages import strip_ids
+
+    assert strip_ids("Abra o Hermes Kanban e aprove o card.") == "Abra o Hermes Kanban e aprove o card."
+    assert strip_ids("Aprove; rode hermes kanban-empowered done t_deadbeef. Depois avise.") == "Aprove. Depois avise."
+    assert strip_ids("veja hermes kanban show t_deadbeef") == "veja"
+
+
+def test_a_need_that_was_only_a_command_falls_back_to_no_reason():
+    from ke.messages import render_waits
+
+    due = _due("t_0000000a", "b", H, None, reason="hermes kanban-empowered explain t_deadbeef")
+    assert "👉 (no reason given)" in render_waits("s", [due])
+
+
+def test_uppercase_hashes_and_uuids_are_stripped_plain_words_kept():
+    from ke.messages import strip_ids
+
+    assert strip_ids("build 9F8E7D6C5B ok") == "build ok"
+    assert strip_ids("run 123e4567-e89b-12d3-a456-426614174000 failed") == "run failed"
+    assert strip_ids("defaced effaced DEADBEEF 1234567") == "defaced effaced DEADBEEF 1234567"
+
+
+def test_role_names_in_agent_text_become_you(pt_br):  # noqa: F811
+    from ke import messages
+
+    messages.set_roles(["sponsor", "ops"])
+    try:
+        ask = _ask("Aguardando o sponsor aprovar.", "OPS pediu isso.", "responda feito", next_step="avisar o Sponsor")
+        txt = messages.render_waits("sponsor", [_due("t_0000000a", "b", H, ask)])
+        assert "sponsor" not in txt.lower() and "ops" not in txt.lower()
+        assert "👉 Aguardando você aprovar." in txt and "Próximo passo: avisar você" in txt
+    finally:
+        messages.set_roles(())
+
+
+def test_register_hands_the_role_names_over(kanban_home, tmp_path, load_plugin):
+    import sys
+
+    from test_doctor import _Ctx
+
+    mod = load_plugin()
+    mod.register(_Ctx(tmp_path / "state", config={"telegram.owner_ids": {"ana": 1}, "waits.escalate_to": "bob"}))
+    messages = sys.modules[mod.__name__ + ".ke.messages"]
+    assert messages._ROLES == {"ana", "bob"}
+
+
+@pytest.mark.parametrize("reply,words", [("responda com a letra", []), ("diga o que achou", []),
+                                         ("liguei e testei", ["liguei"])])
+def test_reply_words_fallback_needs_a_plausible_word(reply, words):
+    from ke.asks import reply_words
+
+    assert reply_words(_ask("n", "w", reply)) == words
+
+
+def test_rich_reply_without_a_word_is_rendered_as_written():
+    from ke.messages import render_waits
+
+    txt = render_waits("s", [_due("t_0000000a", "b", H, _ask("Olhe o layout.", "w", "diga o que achou"))])
+    assert "Diga o que achou." in txt and "“1 —" not in txt
+
+
+def test_unsupported_language_setting_follows_hermes(kanban_home, caplog):
+    from ke import messages
+
+    with caplog.at_level("WARNING"):
+        messages.set_language("klingon")
+    try:
+        assert messages._LANG is None
+        assert any("klingon" in r.getMessage() for r in caplog.records)
+        messages.set_language("pt-BR")
+        assert messages._LANG in ("pt", "pt-br")
+    finally:
+        messages.set_language(None)

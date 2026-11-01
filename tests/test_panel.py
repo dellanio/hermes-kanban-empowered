@@ -121,6 +121,26 @@ def test_render_title_counts_items_and_guards():
     assert lines[-3:] == ["↩️ When replying, name the item:", "“1 — done”", "“2 — done”"]
 
 
+def test_option_items_hint_lists_the_declared_letters(kanban_home):
+    from ke import hermes_api
+    from ke.panel import _enrich_one
+
+    reason = "Preciso: escolha\nPor quê: x\nComo responder: a letra\nOpções:\nA — um\nB — dois\nC — três"
+    with hermes_api.connect("default") as conn:
+        tid, _ = make_human_block(conn, reason=reason, title="choice")
+        w = _enrich_one(hermes_api, conn, {"board": "default", "task_id": tid, "age_s": 60})
+    assert w["hint"] == "A/B/C"
+
+
+def test_title_fallback_strips_ids():
+    from ke.panel import render_telegram
+
+    item = _item(1, need="", held=0)
+    item["title"] = "deploy t_0badcafe 9f8e7d6c5b"
+    text = render_telegram(snapshot_fixture(human_waits=[item]))
+    assert "👉 deploy" in text and "t_0badcafe" not in text and "9f8e7d6c5b" not in text
+
+
 def test_render_reply_hint_uses_each_items_word_or_option():
     from ke.panel import render_telegram
 
@@ -501,20 +521,23 @@ def test_numbered_done_on_the_panel_unblocks_that_item(rig, fake_tg, clock):
     assert fake_tg.calls["send"][-1]["reply_to"] == rig.msg or "✅" in fake_tg.last_text
 
 
-def test_bare_done_on_a_single_item_panel(rig, clock):
+def test_bare_reply_on_a_single_item_panel_passes_through(rig, fake_tg, clock):
+    # fix round 1, ruling 1: the panel only takes numbered answers; anything else is for the agent
     t1, _ = _block(title="one")
     rig.c.update_panel(clock.now)
-    assert rig.handle(str(OWNER), "done", clock.now + 1)["action"] == "skip"
-    assert rig.status(t1) != "blocked"
+    sends = fake_tg.count("send")
+    assert rig.handle(str(OWNER), "done", clock.now + 1, message_id="501") is None
+    assert rig.status(t1) == "blocked" and fake_tg.count("send") == sends
+    assert rig.c.store.mark_update(f"tg:{OWNER}:501", int(clock.now)) is True  # not consumed
 
 
-def test_bare_done_on_a_multi_item_panel_asks_which(rig, fake_tg, clock):
+def test_bare_reply_on_a_multi_item_panel_passes_through(rig, fake_tg, clock):
     t1, _ = _block(title="one")
     t2, _ = _block(title="two")
     rig.c.update_panel(clock.now)
-    assert rig.handle(str(OWNER), "done", clock.now + 1)["action"] == "skip"
-    assert rig.status(t1) == "blocked" and rig.status(t2) == "blocked"
-    assert "which item" in fake_tg.last_text.lower()
+    sends = fake_tg.count("send")
+    assert rig.handle(str(OWNER), "what is going on?", clock.now + 1) is None
+    assert rig.status(t1) == "blocked" and rig.status(t2) == "blocked" and fake_tg.count("send") == sends
 
 
 def test_stranger_and_non_owner_cannot_resolve_from_the_panel(kanban_home, tmp_path, clock, fake_tg):
@@ -924,7 +947,10 @@ def test_reply_to_an_empty_panel_says_the_panel_changed(rig, fake_tg, clock):
     assert fake_tg.count("send") == sends
     assert rig.handle(str(OWNER), "1 done", clock.now + 1)["action"] == "skip"
     assert "panel changed" in fake_tg.last_text.lower()
-    assert rig.handle(str(OWNER), "done", clock.now + 1)["action"] == "skip"
+    sends = fake_tg.count("send")
+    assert rig.handle(str(OWNER), "done", clock.now + 1) is None  # unnumbered: for the agent
+    assert rig.handle(str(OWNER), "thanks, all good", clock.now + 1) is None
+    assert fake_tg.count("send") == sends
 
 
 def test_panel_and_a_due_reminder_in_the_same_evaluation(coord, fake_tg, clock):

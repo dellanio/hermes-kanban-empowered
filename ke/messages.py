@@ -11,6 +11,7 @@ the YAML catalogs and Hermes use.
 """
 from __future__ import annotations
 
+import logging
 import re
 import time
 
@@ -98,6 +99,7 @@ EN: dict[str, str] = {
     "waits.footer.example": "“{n} — {word}”",
     "waits.copy.lead": "Copy for follow-up",
     "waits.default_word": "done",
+    "waits.you": "you",
     "waits.no_reason": "(no reason given)",
     # inbound replies (Telegram) and the done command
     "inbound.which_item": "Which item? Start your reply with its number, from 1 to {n} (e.g. “1 — {word}”).",
@@ -120,6 +122,7 @@ EN: dict[str, str] = {
     "reply.noted": "Noted; the item is still waiting.",
     "reply.option_unknown": "{letter} is not one of this item's options; reply with one of: {options}.",
     "reply.option_none": "This item has no options; reply with a word or a sentence.",
+    "reply.option_needed": "This item asks for a choice; reply with one of: {options}.",
     "reply.empty": "Write your answer after the item number, e.g. “1 — {word}”.",
     "done.no_wait": "card {card} on board {board} has no open human wait; nothing was changed",
     # guards: alert about cards held by a respawn guard, and the release command
@@ -194,12 +197,49 @@ EN: dict[str, str] = {
 
 # Language override (``settings.language``): None follows the Hermes language.
 _LANG = None
+# Configured role names (owner_ids keys, escalate_to): replaced by "you" in agent-written text.
+_ROLES: frozenset = frozenset()
+_log = logging.getLogger(__name__)
 
 
 def set_language(lang) -> None:
-    """Force the language of the plugin's messages (``"pt"``, ``"en"``...); ``None`` follows Hermes."""
+    """Force the language of the plugin's messages (``"pt"``, ``"en"``...); ``None`` follows Hermes.
+
+    The value is checked with Hermes (``resolve_language_id``): a language Hermes does not support
+    is logged once and ignored (the messages follow Hermes). When Hermes cannot be asked, the value
+    is kept as given.
+    """
     global _LANG
-    _LANG = (str(lang).strip() or None) if lang else None
+    value = (str(lang).strip() or None) if lang else None
+    if value is not None:
+        try:
+            from . import hermes_api
+
+            resolved = hermes_api.resolve_language(value)
+        except Exception:
+            resolved = value
+        if not resolved:
+            _log.warning("kanban-empowered: language %r is not supported by Hermes; following Hermes", value)
+        value = resolved or None
+    _LANG = value
+
+
+def active_language() -> str:
+    """The language the plugin's messages are in: the override, else Hermes', else ``en``."""
+    if _LANG:
+        return _LANG
+    try:
+        from . import hermes_api
+
+        return hermes_api.language() or "en"
+    except Exception:
+        return "en"
+
+
+def set_roles(names) -> None:
+    """The configured role names that must never reach Telegram (owner_ids keys, escalate_to)."""
+    global _ROLES
+    _ROLES = frozenset(str(n).strip() for n in (names or ()) if n and str(n).strip())
 
 
 def _translate(full_key: str, **kw):
@@ -264,10 +304,18 @@ def natural_age(seconds: int) -> str:
 
 # -- Telegram text hygiene: no card ids, hashes or CLI commands ---------------------------
 _CARD_ID_RE = re.compile(r"\bt_[0-9a-f]{8}\b")
-# a standalone lower-case hex run of 7+ characters with at least one digit and one letter (a hash)
-_HASH_RE = re.compile(r"(?<![\w/.\-])(?=[0-9a-f]*[0-9])(?=[0-9a-f]*[a-f])[0-9a-f]{7,}(?![\w/\-])")
-_CODE_CLI_RE = re.compile(r"`[^`\n]*\bhermes\b[^`\n]*`")
-_CLI_RE = re.compile(r"(?:\b(?:run|rode|execute|use)\s*:?\s*)?\bhermes\s+kanban[\w\-]*\b[^.;\n]*", re.IGNORECASE)
+_UUID_RE = re.compile(r"\b[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\b")
+# a standalone hex run of 7+ characters (either case) with at least one digit and one a-f letter (a hash)
+_HASH_RE = re.compile(
+    r"(?<![\w/.\-])(?=[0-9a-fA-F]*[0-9])(?=[0-9a-fA-F]*[a-fA-F])[0-9a-fA-F]{7,}(?![\w/\-])"
+)
+_CODE_CLI_RE = re.compile(r"`[^`\n]*\bhermes\s+kanban[^`\n]*`")
+# "hermes kanban-empowered done …", "hermes kanban show …": case-sensitive, a lower-case subcommand
+# must follow, so prose such as "Abra o Hermes Kanban e aprove o card" is left alone
+_CLI_RE = re.compile(
+    r"(?:\b(?:[Rr]un|[Rr]ode|[Ee]xecute|[Uu]se)\s*:?\s*)?\bhermes\s+kanban(?:-empowered)?\s+[a-z][a-z\-]*\b[^.;\n]*"
+)
+_LETTER_RE = re.compile(r"[^\W\d_]")
 _SENTENCE_RE = re.compile(r"(?<=[.!?…])\s+(?=\S)")
 
 
@@ -277,6 +325,7 @@ def strip_ids(text) -> str:
     text = _CODE_CLI_RE.sub("", text)
     text = _CLI_RE.sub("", text)
     text = _CARD_ID_RE.sub("", text)
+    text = _UUID_RE.sub("", text)
     text = _HASH_RE.sub("", text)
     # tidy what the removals left behind
     text = re.sub(r"\(\s*[,;]?\s*\)|\[\s*\]", "", text)
@@ -286,6 +335,23 @@ def strip_ids(text) -> str:
     text = re.sub(r"([,;])(?:\s*[,;])+", r"\1", text)
     text = re.sub(r"\s{2,}", " ", text).strip()
     return text.strip(" ,;")
+
+
+def replace_roles(text) -> str:
+    """Configured role names in agent-written text become the reader ("você"/"you", whole word, any
+    case); a leading article ("o sponsor", "the sponsor") goes with the name."""
+    text = str(text or "")
+    if not _ROLES:
+        return text
+    names = "|".join(re.escape(r) for r in sorted(_ROLES, key=len, reverse=True))
+    you = t("waits.you")
+    return re.sub(rf"(?:\b(?:o|a|os|as|the)\s+)?\b(?:{names})\b", you, text, flags=re.IGNORECASE)
+
+
+def agent_text(text) -> str:
+    """Agent-written text as Telegram may show it: role names replaced, ids/hashes/commands removed."""
+    out = strip_ids(replace_roles(text))
+    return out if _LETTER_RE.search(out) else ""
 
 
 def sentences(text: str, n: int = 2) -> str:
@@ -305,7 +371,7 @@ def circled(n: int) -> str:
 def board_title(board: str, name: str = "", subject: str = "") -> str:
     """``VOZ HERMES`` (the display name, else the slug, upper-cased, ``-``/``_`` as spaces) [`` · SUBJECT``]."""
     base = _clip_to(str(name or board).replace("-", " ").replace("_", " "), _NAME_MAX).upper()
-    subject = _clip_to(strip_ids(subject), _NAME_MAX)
+    subject = _clip_to(strip_ids(replace_roles(subject)), _NAME_MAX)
     return f"{base} · {subject.upper()}" if subject else base
 
 
@@ -333,7 +399,7 @@ def _sentence_end(text: str) -> str:
 def short_action(ask, reason: str = "") -> str:
     """The request in at most two sentences, without ids (the raw reason for an unstructured block)."""
     raw = ask.need if ask is not None else reason
-    text = _clip_to(sentences(strip_ids(raw)), _ACTION_MAX)
+    text = _clip_to(sentences(agent_text(raw)), _ACTION_MAX)
     return text or t("waits.no_reason")
 
 
@@ -349,18 +415,20 @@ def reply_hint(ask) -> str:
 def _reply_line(ask) -> str:
     from .asks import primary_word, reply_is_plain
 
-    if ask is None or reply_is_plain(ask) or not primary_word(ask):
+    if ask is None or (reply_is_plain(ask) and primary_word(ask)):
         return t("waits.reply.word", word=reply_hint(ask))
-    text = _clip_to(sentences(strip_ids(ask.reply)), _ACTION_MAX)
+    text = _clip_to(sentences(agent_text(ask.reply)), _ACTION_MAX)
+    if not text:
+        return t("waits.reply.word", word=reply_hint(ask))
     return _sentence_end(text[:1].upper() + text[1:])
 
 
 def _context_line(ask) -> str:
     if ask is None:
         return ""
-    if ask.next_step and strip_ids(ask.next_step):
-        return _clip_to(t("waits.next_step", text=strip_ids(ask.next_step)), _CONTEXT_MAX)
-    return _clip_to(strip_ids(ask.why), _CONTEXT_MAX)
+    if ask.next_step and agent_text(ask.next_step):
+        return _clip_to(t("waits.next_step", text=agent_text(ask.next_step)), _CONTEXT_MAX)
+    return _clip_to(agent_text(ask.why), _CONTEXT_MAX)
 
 
 def _wait_item(due, number: int, copy: bool = False) -> list[str]:
@@ -380,7 +448,8 @@ def _wait_item(due, number: int, copy: bool = False) -> list[str]:
         if action[-1:] != "?":
             action += ":"
         lines += [t("waits.action", text=action), ""]
-        lines += [t("waits.option", letter=k, label=_clip_to(strip_ids(v), _OPTION_MAX)) for k, v in ask.options]
+        lines += [t("waits.option", letter=k, label=_clip_to(strip_ids(replace_roles(v)), _OPTION_MAX))
+                  for k, v in ask.options]
     else:
         lines.append(t("waits.action", text=action))
         if not copy:

@@ -143,15 +143,17 @@ coordinator process (the same bot the gateway already uses). The plugin only cal
 
 Reply (with Telegram's "reply" function) to a reminder or to the pinned panel and name the item:
 `1 — conectei`, `2 — o campo ficou pequeno`, `3 — A` (also `1 – …`, `1 - …`, `1: …`, `1) …`,
-`1. …`, `1 …`). A message with a single item also takes the bare text. The text after the number:
+`1. …`, `1 …`). A reminder with a single item also takes the bare text; the pinned panel only takes
+numbered replies (anything else is a normal message for the agent). The text after the number:
 
 - a letter the item lists as an option (`3 — A`) picks that option and unblocks the card (the choice
-  is commented); a letter it does not list changes nothing and the plugin asks for a listed one;
+  is commented); a letter it does not list, or a bare `ok` on an item with options, changes nothing
+  and the plugin asks for a listed letter;
 - a confirmation word unblocks the card: the item's own reply words (from its `How to reply:`) or
   `feito`, `conectei`, `validado`, `liguei`, `ok`, `aprovado`, `pronto`, `done`, `connected`,
   `validated`, `approved` (any case, trailing punctuation/emoji allowed);
-- an explicit "not done" (`não`, `ainda não`, `negativo`, `no`, `not yet`, `nope`) only adds a
-  comment; the card keeps waiting;
+- an explicit "not done" (`não`, `ainda não`, `negativo`, `not yet`, `not`, `nope`, `never`, and `no`:
+  at the start in English, only on its own in Portuguese) only adds a comment; the card keeps waiting;
 - any other text is your answer: the card is unblocked and the text is posted as a comment, so the
   agent continues with it;
 - several items and no number: the plugin asks which item.

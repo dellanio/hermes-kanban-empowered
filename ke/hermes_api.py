@@ -147,6 +147,24 @@ def translate(full_key: str, lang: str | None = None, **kw) -> str | None:
     return None if not isinstance(out, str) or out == full_key else out
 
 
+def resolve_language(value: str) -> str | None:
+    """Hermes' canonical id for a language value (``agent.i18n.resolve_language_id``), ``None`` when
+    Hermes does not support it. Raises when Hermes cannot be asked (the caller keeps the value)."""
+    from agent.i18n import resolve_language_id
+
+    return resolve_language_id(value)
+
+
+def language() -> str | None:
+    """The user's Hermes language id (``agent.i18n.get_language``), ``None`` when it cannot be read."""
+    try:
+        from agent.i18n import get_language
+
+        return get_language()
+    except Exception:
+        return None
+
+
 # -- environment -------------------------------------------------------------
 def hermes_home() -> Path:
     """The active Hermes home directory."""

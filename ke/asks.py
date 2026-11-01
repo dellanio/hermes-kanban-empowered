@@ -109,6 +109,11 @@ def _add_option(options: list, m) -> None:
 
 
 # -- reply words ------------------------------------------------------------------
+# Confirmation words accepted for every item (pt and en), besides the item's own reply words.
+CONFIRM_WORDS = frozenset({
+    "feito", "conectei", "validado", "liguei", "ok", "aprovado", "pronto",
+    "done", "connected", "validated", "approved",
+})
 # Leading instruction verbs in a "How to reply" text ("responda feito", "reply done"): not the word.
 _INSTRUCTION = re.compile(
     r"^\s*(?:responda|responder|responde|reply|answer|diga|say|digite|type|escreva|write|envie|send)\b\s*:?\s*",
@@ -146,9 +151,9 @@ def reply_words(ask: Ask | None) -> list[str]:
         tokens = [tok for tok in part.split() if tok.strip(_STRIP)]
         if len(tokens) == 1:
             add(tokens[0])
-    if not words:  # nothing single-word: the first word after the instruction verb
+    if not words:  # nothing single-word: the first word after the verb, if it is a plausible reply
         tokens = _INSTRUCTION.sub("", text.strip()).split()
-        if tokens:
+        if tokens and tokens[0].strip(_STRIP).lower() in CONFIRM_WORDS:
             add(tokens[0])
     return words
 

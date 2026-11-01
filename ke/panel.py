@@ -29,6 +29,7 @@ from .asks import parse_ask
 from .messages import (
     TELEGRAM_LIMIT,
     _clip_to,
+    agent_text,
     _guard_reason_text,
     _prefix,
     _tg_len,
@@ -96,7 +97,7 @@ def _enrich_one(api: Any, conn: Any, w: dict) -> dict:
         "version": block.version if block is not None else 0,
         "need": _clip_to(short_action(ask, reason) if (ask is not None or reason.strip()) else "", NEED_MAX),
         "held": len(held_behind(api, conn, w["task_id"])),
-        "hint": reply_hint(ask),
+        "hint": "/".join(k for k, _ in ask.options) if ask is not None and ask.options else reply_hint(ask),
         "display": board_title(w["board"], display_name(api, w["board"]), ask.subject if ask is not None else ""),
     }
 
@@ -158,7 +159,7 @@ def _needs(shown: list[dict], total: int) -> list[str]:
         held = int(w.get("held", 0))
         age = natural_age(w.get("age_s", 0))
         title = w.get("display") or board_title(w["board"])
-        need = _clip_to(w.get("need") or w.get("title") or "", NEED_MAX)  # one line, no fake numbered lines
+        need = _clip_to(agent_text(w.get("need") or w.get("title") or ""), NEED_MAX)  # one line, no ids
         lines += ["", f"{circled(n)} {title}"]
         lines.append(
             t("waits.status.blocks", age=age, cards=plural("waits.cards", held)) if held

@@ -455,6 +455,7 @@ class Coordinator:
                     self._send_group(
                         target, origin, group, now, counts, urgent=False,
                         lead=t("waits.copy_of", owner=origin), on_sent=copy_sent, on_failed=copy_failed,
+                        copy=True,
                     )
         except Exception:
             log.exception("kanban-empowered: delivering reminders failed")
@@ -484,6 +485,7 @@ class Coordinator:
         lead: str = "",
         on_sent: Optional[Callable[[Due], Any]] = None,
         on_failed: Optional[Callable[[list[Due], Exception, bool], Any]] = None,
+        copy: bool = False,
     ) -> list[Due]:
         """Send ``group`` to ``recipient`` split to the Telegram limit; returns the dues sent.
 
@@ -499,7 +501,7 @@ class Coordinator:
         if chat_id is None:
             return []
         sent: list[Due] = []
-        chunks = render_waits_chunks(label, group, urgent_escalation=urgent, lead=lead)
+        chunks = render_waits_chunks(label, group, urgent_escalation=urgent, lead=lead, copy=copy)
         for index, (text, items) in enumerate(chunks):
             if self._tg_down or counts.get(recipient, 0) >= MAX_MESSAGES_PER_PASS:
                 break  # the rest goes out on a later evaluation

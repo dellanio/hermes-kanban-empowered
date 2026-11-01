@@ -87,6 +87,7 @@ EN: dict[str, str] = {
     "waits.how.single": "How to reply: reply \"done\" to this message or run: hermes kanban-empowered done {id}",
     "waits.how.group": "How to reply: reply \"{n} done\" to this message or run: hermes kanban-empowered done <id>",
     "waits.copy_of": "Escalated copy: this was sent to {owner}.",
+    "waits.how.copy": "For your information: only {owner} can resolve this, from their own reminder.",
     "waits.urgent": "🚨 URGENT: no escalation contact is configured, so only you received this.",
     # inbound replies (Telegram) and the done command
     "inbound.which_item": 'Which item? Reply "<n> done" with a number from 1 to {n}.',
@@ -227,8 +228,12 @@ def _wait_body(due) -> list[str]:
     return lines
 
 
-def render_waits(owner: str, dues: list) -> str:
-    """The reminder message for ``owner``: one item as-is, several numbered and grouped."""
+def render_waits(owner: str, dues: list, copy: bool = False) -> str:
+    """The reminder message for ``owner``: one item as-is, several numbered and grouped.
+
+    ``copy`` renders the escalated copy for the ``escalate_to`` contact: same items, but the footer
+    says that only ``owner`` can resolve them (a reply from the contact is never accepted).
+    """
     if not dues:
         return ""
     if len(dues) == 1:
@@ -239,14 +244,15 @@ def render_waits(owner: str, dues: list) -> str:
             board=due.board,
             age=human_age(due.age_s),
         )
-        return "\n".join([head, *_wait_body(due), t("waits.how.single", id=due.task_id)])
+        how = t("waits.how.copy", owner=owner) if copy else t("waits.how.single", id=due.task_id)
+        return "\n".join([head, *_wait_body(due), how])
     urgent = any(d.stage in ("escalation", "digest") for d in dues)
     lead = _wait_head("digest" if any(d.stage == "digest" for d in dues) else "escalation" if urgent else "reminder1")
     lines = [t("waits.group.line", head=lead, n=len(dues), owner=owner)]
     for n, due in enumerate(dues, start=1):
         lines.append(t("waits.item.line", n=n, board=due.board, id=due.task_id, age=human_age(due.age_s)))
         lines.extend("   " + body for body in _wait_body(due))
-    lines.append(t("waits.how.group", n=1))
+    lines.append(t("waits.how.copy", owner=owner) if copy else t("waits.how.group", n=1))
     return "\n".join(lines)
 
 
@@ -302,6 +308,7 @@ def render_waits_chunks(
     urgent_escalation: bool = False,
     limit: int = TELEGRAM_LIMIT,
     lead: str = "",
+    copy: bool = False,
 ) -> list[tuple[str, list]]:
     """Reminder messages for ``owner``, each within the Telegram limit, as ``(text, dues)`` pairs.
 
@@ -310,12 +317,13 @@ def render_waits_chunks(
     in every message and ``dues`` is that message's item list, in numbering order, so a reply
     to a message maps "n done" to ``dues[n - 1]`` of that message and no other.
     ``urgent_escalation`` marks the messages that carry an escalation (nobody else will hear of
-    it); ``lead`` is a line put first in every message (e.g. who an escalated copy is from).
+    it); ``lead`` is a line put first in every message (e.g. who an escalated copy is from) and
+    ``copy`` renders the escalated copy's footer (see :func:`render_waits`).
     """
     def render(chunk: list, clip: bool = False) -> str:
         urgent = urgent_escalation and any(d.stage == "escalation" for d in chunk)
         marker = (lead + "\n" if lead else "") + (t("waits.urgent") + "\n" if urgent else "")
-        text = render_waits(owner, chunk)
+        text = render_waits(owner, chunk, copy=copy)
         return marker + (_clip_item(text, limit - _tg_len(marker)) if clip else text)
 
     out: list[tuple[str, list]] = []

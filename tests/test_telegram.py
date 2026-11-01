@@ -6,7 +6,7 @@ import urllib.error
 import pytest
 
 from conftest import make_coordinator
-from test_waits import _start, make_human_block
+from test_waits import _start, make_human_block, pt_br  # noqa: F401 (pt_br is a fixture)
 
 H = 3600
 
@@ -804,3 +804,26 @@ def test_an_http_error_does_not_back_off_the_next_evaluation(kanban_home, clock,
     clock.advance(30)
     coord.evaluate(clock.now)  # Telegram answered: it is reachable, retried on the next evaluation
     assert attempts == [111, 111] and coord.store.latest_wait("default", tid)["stage"] == "reminder1"
+
+
+# -- the escalated copy is not resolvable by its reader (final review M-3) ----------------------
+@pytest.mark.parametrize("n", [1, 2])
+def test_escalated_copy_does_not_tell_the_contact_to_reply_done(tmp_path, fake_tg, clock, n):
+    from ke.messages import t
+
+    coord = _coord(tmp_path, fake_tg, clock, escalate_to="ops")
+    coord.pending_dues = [_due(f"t_{i}", stage="escalation") for i in range(1, n + 1)]
+    coord._deliver_waits(clock.now)
+    copy = next(c for c in fake_tg.calls["send"] if c["chat_id"] == 222)["text"]
+    owner_msg = next(c for c in fake_tg.calls["send"] if c["chat_id"] == 111)["text"]
+    assert "done" not in copy.lower() and "How to reply" not in copy
+    assert copy.splitlines()[-1] == t("waits.how.copy", owner="sponsor")
+    assert owner_msg.splitlines()[-1].startswith("How to reply")  # the owner's own reminder keeps it
+
+
+def test_escalated_copy_footer_in_pt_br(tmp_path, fake_tg, clock, kanban_home, pt_br):  # noqa: F811
+    coord = _coord(tmp_path, fake_tg, clock, escalate_to="ops")
+    coord.pending_dues = [_due("t_1", stage="escalation")]
+    coord._deliver_waits(clock.now)
+    copy = next(c for c in fake_tg.calls["send"] if c["chat_id"] == 222)["text"]
+    assert "feito" not in copy and "só sponsor pode resolver" in copy

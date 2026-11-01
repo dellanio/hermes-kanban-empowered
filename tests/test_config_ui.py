@@ -142,3 +142,17 @@ def test_desktop_save_then_plugin_read_roundtrip(kanban_home):
     assert s.default_owner == "ana" and s.reminders_s == (600, 3600) and s.owner_ids == {"ana": 424242}
     assert s.mode == "cooperative-only" and s.infra_undo_count == 4 and s.infra_undo_window_s == 43200
     assert s.pin_live_panel is False and s.language == "en" and s.digest_every_s == 3600 and s.escalate_to == "bob"
+
+
+def test_catalog_entry_example_parses_with_hermes_catalog_rules(caplog):
+    import hermes_yaml as yaml
+    from hermes_cli.plugin_catalog import entry_from_mapping
+
+    data = yaml.safe_load((REPO / "docs" / "catalog-entry.example.yaml").read_text(encoding="utf-8"))
+    with caplog.at_level(logging.WARNING):
+        entry = entry_from_mapping(data, "kanban-empowered")
+    assert entry is not None and not caplog.records
+    assert entry.image.endswith("/docs/assets/banner.jpg") and entry.tier == "community"
+    assert entry.requires_hermes == _manifest()["requires_hermes"] and entry.version == _manifest()["version"]
+    assert entry.capabilities.provides_hooks == _manifest()["provides_hooks"]
+    assert (REPO / "docs" / "assets" / "banner.jpg").is_file()

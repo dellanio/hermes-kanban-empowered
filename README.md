@@ -1,5 +1,7 @@
 # kanban-empowered
 
+![Kanban Empowered](docs/assets/banner.jpg)
+
 A plugin for [Hermes Agent](https://github.com/NousResearch/hermes-agent) that extends the native
 kanban for a fleet of agent profiles:
 
@@ -128,6 +130,44 @@ Durations accept `s`, `m`, `h`, `d` (`30m`, `2h`, `7d`) or plain seconds.
 The Telegram bot token is read from the `TELEGRAM_BOT_TOKEN` environment variable of the
 coordinator process (the same bot the gateway already uses). The plugin only calls `sendMessage`,
 `editMessageText` and `pinChatMessage`; it never polls the bot.
+
+## Settings screen
+
+In Hermes Desktop the plugin has a settings form (Capabilities, plugin gear, or Settings > Plugins),
+generated from the `config_schema` in [`plugin.yaml`](plugin.yaml). It edits the common keys:
+
+| Form field | Same as in `config.yaml` |
+|---|---|
+| Message language | `language` |
+| Mode | `mode` |
+| Owner Telegram id | `telegram.owner_ids.<default owner>` |
+| Default owner | `waits.default_owner` |
+| Reminders (`30m,2h`) | `waits.reminders` |
+| Escalate after | `waits.escalate_after` |
+| Digest every | `waits.digest` |
+| Escalate to | `waits.escalate_to` |
+| Require structured ask | `waits.require_structured_ask` |
+| Pin live panel | `telegram.pin_live_panel` |
+| Stuck-card alert after | `guards.alert_after` |
+| Infra undo budget / window | `infra_failures.undo_budget.count` / `.window` |
+
+The form stores each value as a flat key (`plugins.entries.kanban-empowered.settings.default_owner`,
+not `...settings.waits.default_owner`), because that is how Hermes Desktop reads and writes plugin
+settings. The plugin folds those flat keys onto the nested ones, with this precedence:
+
+1. A non-blank flat key (what the form wrote) wins over the nested key it stands for.
+2. A blank flat value (`""`) counts as unset and falls through to the nested key, then the default.
+3. `telegram_owner_id` becomes `owner_ids: {<default owner>: <id>}` only when `telegram.owner_ids`
+   is not set; an explicit `owner_ids` mapping always wins.
+
+Hand-written nested config keeps working unchanged. A form field shows the schema default until it is
+saved, even when `config.yaml` sets the nested key; the nested value still applies until the form
+writes that field. Keys the form cannot express stay in `config.yaml`: `coordinator_profile`,
+`shared_state_dir`, `telegram.owner_ids` (several owners), `telegram.reply_ttl`, `boards`,
+`waits.human_kinds` and `infra_failures.alert_count` / `alert_window` / `patterns`.
+
+[`docs/catalog-entry.example.yaml`](docs/catalog-entry.example.yaml) shows the entry a curated
+Hermes plugin catalog would carry (the card image comes from there, not from `plugin.yaml`).
 
 ## Commands
 

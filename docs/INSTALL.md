@@ -55,7 +55,7 @@ plugins:
 ```
 
 Equivalent nested form: `telegram.owner_ids: { sponsor: 123456789 }` and `waits.default_owner`.
-The coordinator process also needs `TELEGRAM_BOT_TOKEN` in its environment (the gateway's bot).
+The coordinator profile also needs `TELEGRAM_BOT_TOKEN` (the gateway's bot), as Hermes already has it for its Telegram adapter; the plugin reads it only through Hermes' secret scope.
 Every profile must agree on `coordinator_profile` and `shared_state_dir`; leaving both at their
 defaults everywhere is consistent. Full key list: [README](../README.md#configuration).
 

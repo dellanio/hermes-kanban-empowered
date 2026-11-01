@@ -59,6 +59,45 @@ gave_up, crashed, review or block_loop_detected messages.
   warns once (log and Telegram).
 - Python standard library only (no extra dependencies).
 
+## Disclosures
+
+What the plugin does beyond its own data, for review before installing:
+
+- **Network.** Only the Telegram Bot API at `api.telegram.org` (`sendMessage`, `editMessageText`,
+  `pinChatMessage`; it never polls the bot or calls `getUpdates`). When that host is unreachable it uses
+  Hermes' own IPv4 fallback path (`plugins.platforms.telegram.telegram_network`), as Hermes' Telegram
+  adapter does: IPv4 literals of `api.telegram.org` with Host/SNI kept, discovered (unless
+  `TELEGRAM_FALLBACK_IPS` is set) with DNS-over-HTTPS lookups of `api.telegram.org` at `dns.google` and
+  `cloudflare-dns.com`, and the proxy Hermes resolves (`TELEGRAM_PROXY` / system proxy). Nothing else; no
+  telemetry or usage reporting.
+- **Long-running work.** No extra process and no daemon. The coordinator runs inside the gateway's kanban
+  dispatch tick (`on_kanban_dispatch_tick`, evaluating at most every 30 s), in the coordinator profile only,
+  behind a leader lock in `shared_state_dir`; short-lived helper threads bound each Telegram call and DNS lookup.
+- **Reads outside its own data.** Every live board's kanban database and board metadata, through Hermes'
+  kanban functions (read-only except the writes below); the Telegram bot token, through Hermes' secret scope
+  (`agent.secret_scope.get_secret`; see "Configuration"); for `doctor` only, each profile's `config.yaml`
+  (is the plugin enabled there) and the Hermes checkout's git `HEAD` files (installed revision).
+- **Writes.** On kanban cards, only through Hermes' kanban domain functions, never by writing `kanban.db`:
+  comments, unblocking a card waiting on a person when its owner answers (Telegram, Desktop or the `done`
+  command), undoing a park caused by an infrastructure failure (within the per-card budget), and reassigning
+  a guard-held card when you run `release`. Its own SQLite store and leader lock under
+  `plugin-data/kanban-empowered` (`shared_state_dir`). Telegram messages to the configured owner chats only,
+  with one pinned live panel in the default owner's chat.
+- **No shell commands**, no subprocesses, no stored credentials (it never writes or caches the token).
+- **Private core imports** (all in `ke/hermes_api.py`, the plugin's only adapter to Hermes; `hermes plugins
+  validate` lists them as a rule 9 warning): `hermes_cli.kanban_db`, `kanban_db_boards` and
+  `kanban_db_connect` (board and card reads and writes), `agent.i18n` and `agent.i18n_layers` (the Hermes
+  language and the plugin's locale packs), `plugins.platforms.telegram.telegram_network` and
+  `agent.ssl_verify` (the Telegram fallback path and its trust store), `tui_gateway.launch_profile_policy`
+  (the launch profile's secret scope inside the gateway tick), `hermes_cli.profiles` (profile names and
+  homes), `hermes_cli.plugins` (veto-hook detection), `hermes_yaml` (reading `config.yaml` for `doctor`) and
+  `hermes_cli` itself (locating the checkout for `doctor`). A seam request for these will be filed upstream.
+- **Optional core patch.** [`patches/0001-kanban-veto-hooks.patch`](patches/README.md) is never applied by
+  the plugin; applying it is a manual step. The plugin registers `kanban_pre_claim` only when the running
+  Hermes exposes that hook, so on a stock build it is not registered, and on a patched build `hermes plugins
+  validate` reports it as an undeclared hook, by design (it is not in `provides_hooks` because a stock build
+  does not know it).
+
 ## Install
 
 Step-by-step guide with verification and rollback: [`docs/INSTALL.md`](docs/INSTALL.md). Live acceptance results of v0.1: [`docs/ACCEPTANCE-v0.1.md`](docs/ACCEPTANCE-v0.1.md).
@@ -155,9 +194,12 @@ plugins:
 
 Durations accept `s`, `m`, `h`, `d` (`30m`, `2h`, `7d`) or plain seconds.
 
-The Telegram bot token is read from the `TELEGRAM_BOT_TOKEN` environment variable of the
-coordinator process (the same bot the gateway already uses). The plugin only calls `sendMessage`,
-`editMessageText` and `pinChatMessage`; it never polls the bot.
+The Telegram bot token is `TELEGRAM_BOT_TOKEN` of the coordinator profile (the same bot the gateway
+already uses), read only through Hermes' secret scope (`agent.secret_scope.get_secret`), never from a bare
+`os.environ` read or a file. On a multi-profile (multiplexed) gateway the dispatch tick has no profile bound;
+there the plugin takes the launch profile's own value from Hermes' launch-profile scope, and in a context
+serving another profile it gets no token (one warning) rather than borrowing one. The plugin only calls
+`sendMessage`, `editMessageText` and `pinChatMessage`; it never polls the bot.
 
 ## Settings screen
 
@@ -215,8 +257,8 @@ Keys the form cannot express stay in `config.yaml`: `coordinator_profile`,
 `shared_state_dir`, `telegram.owner_ids` (several owners), `telegram.reply_ttl`, `boards`,
 `waits.human_kinds` and `infra_failures.alert_count` / `alert_window` / `patterns`.
 
-[`docs/catalog-entry.example.yaml`](docs/catalog-entry.example.yaml) shows the entry a curated
-Hermes plugin catalog would carry (the card image comes from there, not from `plugin.yaml`).
+[`docs/catalog/kanban-empowered.yaml`](docs/catalog/kanban-empowered.yaml) is the draft entry for the
+Hermes plugin catalog (the card image comes from there, not from `plugin.yaml`).
 
 ## Desktop dashboard (Empowered)
 
@@ -326,7 +368,7 @@ with its author.
 | `coordinator_profile` | Configured coordinator profile. |
 | `shared_state_dir` | Resolved state directory. |
 | `profiles_with_plugin` | Profiles where the plugin directory exists and `config.yaml` enables it (`plugins.enabled`, not in `plugins.disabled`) or has a `plugins.entries.kanban-empowered` section. |
-| `telegram_token` | `present` / `missing`: `TELEGRAM_BOT_TOKEN` in **this** process (the token itself is never printed). |
+| `telegram_token` | `present` / `missing`: whether Hermes' secret scope resolves `TELEGRAM_BOT_TOKEN` in **this** process (the token itself is never printed). |
 | `owner_chats` | Number of entries in `telegram.owner_ids`. |
 | `boards_suspended` | Boards whose project status is Suspended or Done (`slug`, `slug (Done)`), or `none`. Read-only. |
 | `boards_hold_scope` | What a Suspended/Done board holds: new claims, except review-lane claims (not hooked by the current core patch; needs a core patch update), or nothing when the veto hooks are missing. |

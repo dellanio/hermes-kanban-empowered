@@ -133,7 +133,8 @@ def _needs(shown: list[dict], total: int) -> list[str]:
         return ["", t("panel.nothing")]
     lines = ["", t("panel.needs")]
     for n, w in enumerate(shown, start=1):
-        lines.append(t("panel.item.line", n=n, board=w["board"], need=w.get("need") or w.get("title") or w["task_id"]))
+        need = _clip_to(w.get("need") or w.get("title") or w["task_id"], NEED_MAX)  # one line, no fake numbered lines
+        lines.append(t("panel.item.line", n=n, board=w["board"], need=need))
         lines.append(t("panel.item.detail", id=w["task_id"], age=human_age(w.get("age_s", 0)), held=w.get("held", 0)))
     if total > len(shown):
         lines.append(t("panel.more", n=total - len(shown)))
@@ -218,22 +219,33 @@ def load_history(store: Store, chat_id: int, message_id: int) -> dict:
     return {"entries": data["entries"], "truncated": bool(data.get("truncated"))}
 
 
-def record_items(store: Store, chat_id: int, message_id: int, items: list, now: float) -> None:
+def record_items(
+    store: Store, chat_id: int, message_id: int, items: list, now: float, certain: bool = True
+) -> None:
     """Make ``items`` the current numbered list of the panel message (and its reply-validity clock).
 
-    The list joins the history only when it differs from the current one; ``sent_messages`` always
-    gets the current list, with ``created_at`` = now (the TTL of a live panel runs from its last update).
+    The list joins the history only when it differs from the current one; ``sent_messages`` gets the
+    current list, with ``created_at`` = now (the TTL of a live panel runs from its last update).
+    ``certain=False`` records an edit whose outcome is unknown (timeout, 5xx: Telegram may have applied
+    it): the list joins the history flagged ``uncertain`` (replies stay checked against the list before
+    it) and ``sent_messages`` is left alone; a later certain record of the same list clears the flag.
     """
     with store.lock:
         hist = load_history(store, chat_id, message_id)
         entries = hist["entries"]
         if not entries or entries[-1]["items"] != items:
-            entries.append({"ts": int(now), "items": items})
+            entry = {"ts": int(now), "items": items}
+            if not certain:
+                entry["uncertain"] = True
+            entries.append(entry)
             if len(entries) > HISTORY_LEN:
                 del entries[: len(entries) - HISTORY_LEN]
                 hist["truncated"] = True
             store.kv_set(_hist_key(chat_id, message_id), json.dumps(hist))
-        store.add_sent_message(message_id, chat_id, "panel", items, int(now))
+        elif certain and entries[-1].pop("uncertain", None):
+            store.kv_set(_hist_key(chat_id, message_id), json.dumps(hist))
+        if certain:
+            store.add_sent_message(message_id, chat_id, "panel", items, int(now))
 
 
 def _pick(items: list, number: Optional[int]) -> Optional[dict]:
@@ -261,32 +273,39 @@ def view_for_reply(
 ) -> ReplyView:
     """Resolve a reply to a panel message against the list that was current at ``reply_ts``.
 
-    ``current`` is the list recorded in ``sent_messages``. A reply dated before the latest edit uses
-    the previous list; one sent less than ``SEE_GRACE_S`` after a list became current may still have
-    been written against the one before it, so when the two disagree on the selected item (or the
-    one before was already forgotten) it is ambiguous. A panel without history uses ``current``.
+    ``current`` is the list recorded in ``sent_messages`` (used only for a panel without history).
+    The reply's date is compared with the times the lists became current, with a grace of
+    ``SEE_GRACE_S`` on BOTH sides, because neither clock is exact (the host's against Telegram's, and
+    an edit whose answer was lost may have been applied earlier than recorded): the list before the
+    chosen one is a candidate when the reply is dated soon after the chosen list became current (or
+    the chosen list is of unknown outcome), the list after it when the reply is dated soon before it
+    did. The reply is ambiguous when a candidate selects a different item than the chosen list, or when
+    the list before the oldest one kept would be a candidate.
     """
     hist = load_history(store, chat_id, message_id)
     entries = hist["entries"]
     if not entries:
         return ReplyView(current, False, current)
     j = max((i for i, e in enumerate(entries) if e["ts"] <= reply_ts), default=None)
-    unknown_older = False
     if j is None:  # older than everything we kept
         if hist["truncated"]:
-            return ReplyView(entries[0]["items"], True, _scope(entries[0]["items"], None, number))
+            return ReplyView(entries[0]["items"], True, _scope(entries[0]["items"], [], number))
         j = 0
-    chosen = entries[j]["items"]
-    other: Optional[list] = None
-    if reply_ts - entries[j]["ts"] < SEE_GRACE_S:  # the user may not have seen this list yet
+    chosen = entries[j]
+    others: list = []
+    unknown_older = False
+    if reply_ts - chosen["ts"] < SEE_GRACE_S or chosen.get("uncertain"):  # may not have seen it yet
         if j > 0:
-            other = entries[j - 1]["items"]
+            others.append(entries[j - 1]["items"])
         elif hist["truncated"]:
             unknown_older = True
-    ambiguous = unknown_older or (other is not None and not _same(_pick(chosen, number), _pick(other, number)))
-    return ReplyView(chosen, ambiguous, _scope(chosen, other, number) if ambiguous else chosen)
+    if j + 1 < len(entries) and entries[j + 1]["ts"] - reply_ts < SEE_GRACE_S:  # may already have seen the next
+        others.append(entries[j + 1]["items"])
+    pick = _pick(chosen["items"], number)
+    ambiguous = unknown_older or any(not _same(pick, _pick(o, number)) for o in others)
+    return ReplyView(chosen["items"], ambiguous, _scope(chosen["items"], others, number) if ambiguous else chosen["items"])
 
 
-def _scope(chosen: list, other: Optional[list], number: Optional[int]) -> list:
-    picks = [p for p in (_pick(chosen, number), _pick(other, number) if other is not None else None) if p is not None]
+def _scope(chosen: list, others: list, number: Optional[int]) -> list:
+    picks = [p for p in (_pick(x, number) for x in [chosen, *others]) if p is not None]
     return picks or chosen

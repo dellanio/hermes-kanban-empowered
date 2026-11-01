@@ -210,7 +210,7 @@ def _clear_screen() -> None:
     if os.name == "nt":
         os.system("cls")
     else:
-        print("[2J[H", end="", flush=True)
+        print("\033[2J\033[H", end="", flush=True)
 
 
 def run_status_watch(

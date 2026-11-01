@@ -212,7 +212,7 @@ def handle_inbound(event: Any, settings: Any, store: Any, api: Any, telegram: An
     if not _replied_to_our_bot(event, telegram):
         return None  # same chat and message id, but a message of another bot (DM ids are per bot)
     items = sent.get("items")
-    if not isinstance(items, list) or not items:
+    if not isinstance(items, list) or (not items and sent["kind"] != "panel"):
         return None
     number = int(match.group(1)) if match.group(1) else None
     is_panel = sent["kind"] == "panel"
@@ -223,8 +223,8 @@ def handle_inbound(event: Any, settings: Any, store: Any, api: Any, telegram: An
             store, int(chat), int(reply_to), items, _reply_ts(event, now), number
         )
         items, ambiguous, scope_items = view.items, view.ambiguous, view.scope
-        if not items:
-            return None
+        if not items:  # nothing was numbered then: only "the panel changed" can be said
+            ambiguous = True
     if number is not None:
         selected = items[number - 1] if 1 <= number <= len(items) else None
     else:
@@ -236,7 +236,10 @@ def handle_inbound(event: Any, settings: Any, store: Any, api: Any, telegram: An
     else:
         scope = [selected] if selected is not None else items
     if is_panel:  # mixed owners: the sender must own every item the reply could mean
-        if not all(_owner_chat(settings, item) == sender for item in scope):
+        if not scope:  # an empty panel: only the one it is sent to (the default owner)
+            if _canonical_id(settings.owner_ids.get(settings.default_owner)) != sender:
+                return None
+        elif not all(_owner_chat(settings, item) == sender for item in scope):
             return None
     else:
         owners = {settings.owner_for(str(item["board"])) for item in scope}

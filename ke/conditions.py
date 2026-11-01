@@ -46,8 +46,8 @@ def _age(now: float, ts: Optional[int]) -> int:
     return max(0, int(now - ts)) if ts else 0
 
 
-def _events(conn: Any, tid: str) -> list:
-    return sorted(hermes_api.events(conn, tid), key=lambda e: e.id)
+def _events(conn: Any, tid: str, api: Any = None) -> list:
+    return sorted((api if api is not None else hermes_api).events(conn, tid), key=lambda e: e.id)
 
 
 def _last_event_ts(events: list, kinds: Optional[frozenset] = None) -> Optional[int]:
@@ -302,7 +302,7 @@ def fleet_status(store: Store, now: float, settings: Optional[Settings] = None, 
                         continue
                     wait = store.latest_wait(board, task.id)
                     since = (wait or {}).get("started_at") or _last_event_ts(
-                        _events(conn, task.id), frozenset({"blocked"})
+                        _events(conn, task.id, api), frozenset({"blocked"})
                     ) or task.created_at
                     human_waits.append(
                         {
@@ -314,7 +314,7 @@ def fleet_status(store: Store, now: float, settings: Optional[Settings] = None, 
                         }
                     )
                 for task in api.list_tasks(conn, status="ready"):
-                    hits, reason = _guard_hits(_events(conn, task.id))
+                    hits, reason = _guard_hits(_events(conn, task.id, api))
                     if not hits:
                         continue
                     guarded.append(

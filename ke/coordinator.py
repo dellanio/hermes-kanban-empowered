@@ -210,11 +210,16 @@ class Coordinator:
                 elif "message to edit not found" in reason or "message can't be edited" in reason:
                     message_id = None  # gone: fall through to a new message
                 else:
+                    status = getattr(exc, "status", None)
+                    if status is None or status >= 500:
+                        # Telegram may have applied the edit before the answer was lost: replies
+                        # must stay checked against both the old and the attempted list
+                        self._panel_record(chat_id, message_id, items, now, certain=False)
                     self._log_send_failure(owner, chat_id, exc)
                     return
             if message_id is not None:
-                self.store.kv_set("panel_hash", digest)
-                self._panel_record(chat_id, message_id, items, now)
+                if self._panel_record(chat_id, message_id, items, now):
+                    self.store.kv_set("panel_hash", digest)  # only once the items are recorded
                 self._ensure_pinned(owner, chat_id, message_id)
                 return
         try:
@@ -224,9 +229,10 @@ class Coordinator:
             return
         self.store.kv_set("panel_message_id", str(message_id))
         self.store.kv_set("panel_chat_id", str(chat_id))
-        self.store.kv_set("panel_hash", digest)
+        self.store.kv_set("panel_hash", "")
         self.store.kv_set("panel_pin_done", "")
-        self._panel_record(chat_id, message_id, items, now)
+        if self._panel_record(chat_id, message_id, items, now):
+            self.store.kv_set("panel_hash", digest)
         self._ensure_pinned(owner, chat_id, message_id)
 
     def _panel_message_id(self, chat_id: int) -> Optional[int]:
@@ -239,11 +245,16 @@ class Coordinator:
             pass
         return None
 
-    def _panel_record(self, chat_id: int, message_id: int, items: list, now: float) -> None:
+    def _panel_record(
+        self, chat_id: int, message_id: int, items: list, now: float, certain: bool = True
+    ) -> bool:
+        """Record the numbered items of the panel message; False (logged) when that failed."""
         try:
-            panel.record_items(self.store, chat_id, message_id, items, now)
+            panel.record_items(self.store, chat_id, message_id, items, now, certain=certain)
+            return True
         except Exception:
             log.exception("kanban-empowered: could not record the panel items of message %s", message_id)
+            return False
 
     def _panel_sync_items(self, chat_id: int, message_id: int, items: list, now: float) -> None:
         """Same text, but maybe other versions: replies are validated against what is current."""

@@ -777,3 +777,147 @@ def test_fleet_status_accepts_an_api(tmp_path):
 
     fs = conditions.fleet_status(Store(tmp_path / "s.db"), time.time(), api=NoBoards())
     assert fs["boards"] == [] and fs["running"] == []
+
+
+# -- fix round 1 ---------------------------------------------------------------------------
+def _waiting(title, age_s, clock):
+    """A human block that has been waiting ``age_s`` (the wait row decides the display order)."""
+    tid, ver = _block(title=title, reason=f"Preciso: {title}\nPor quê: x\nComo responder: y")
+    return tid, ver, int(clock.now) - age_s
+
+
+def _add(rig, clock, title, age_s):
+    tid, ver, since = _waiting(title, age_s, clock)
+    rig.c.store.upsert_wait("default", tid, ver, "sponsor", since)
+    return tid
+
+
+def test_reply_dated_just_before_an_insertion_edit_is_ambiguous(rig, fake_tg, clock):
+    a = _add(rig, clock, "aaa", 600)
+    t0 = clock.now
+    rig.c.update_panel(t0)  # [A]
+    c = _add(rig, clock, "ccc", 7200)  # older than A: becomes item 1
+    clock.now = t0 + 60
+    rig.c.update_panel(clock.now)  # [C, A]
+    clock.now = t0 + 70
+    # dated 2 s before the edit (host clock ahead of Telegram's): "1" may have meant A or C
+    assert rig.handle(str(OWNER), "1 done", t0 + 58)["action"] == "skip"
+    assert rig.status(a) == "blocked" and rig.status(c) == "blocked"
+    assert "panel changed" in fake_tg.last_text.lower()
+    # far enough before the edit, the old list is simply what the user saw
+    assert rig.handle(str(OWNER), "1 done", t0 + 20)["action"] == "skip"
+    assert rig.status(a) != "blocked" and rig.status(c) == "blocked"
+
+
+@pytest.mark.parametrize("error", [None, 502])
+def test_unknown_outcome_edit_keeps_both_lists_in_play(rig, fake_tg, clock, error):
+    from ke.panel import load_history
+    from ke.telegram import TelegramError
+
+    a = _add(rig, clock, "aaa", 600)
+    t0 = clock.now
+    rig.c.update_panel(t0)  # [A]
+    msg = rig.msg
+    c = _add(rig, clock, "ccc", 7200)
+    fake_tg.fail_next_edit = TelegramError(error, "timed out after telegram may have applied it")
+    clock.now = t0 + 60
+    rig.c.update_panel(clock.now)  # the edit's outcome is unknown: [C, A] may be on screen
+    hist = load_history(rig.c.store, OWNER, msg)
+    assert [len(e["items"]) for e in hist["entries"]] == [1, 2] and hist["entries"][1].get("uncertain")
+    assert rig.c.store.get_sent_message(OWNER, msg)["items"][0]["task_id"] == a  # sent_messages untouched
+    # long after: still checked against both lists, they disagree on item 1
+    clock.now = t0 + 200
+    assert rig.handle(str(OWNER), "1 done", t0 + 200)["action"] == "skip"
+    assert rig.status(a) == "blocked" and rig.status(c) == "blocked"
+    assert "panel changed" in fake_tg.last_text.lower()
+    # the retry lands: the list is certain now and replies resolve against it alone
+    rig.c._tg_down = False
+    rig.c.update_panel(clock.now)
+    assert "uncertain" not in load_history(rig.c.store, OWNER, msg)["entries"][1]
+    assert rig.handle(str(OWNER), "1 done", t0 + 210)["action"] == "skip"
+    assert rig.status(c) != "blocked" and rig.status(a) == "blocked"
+
+
+def test_rejected_edit_is_not_an_unknown_outcome(rig, fake_tg, clock):
+    from ke.panel import load_history
+    from ke.telegram import TelegramError
+
+    _add(rig, clock, "aaa", 600)
+    rig.c.update_panel(clock.now)
+    _add(rig, clock, "ccc", 7200)
+    fake_tg.fail_next_edit = TelegramError(429, "Too Many Requests")
+    rig.c.update_panel(clock.now + 60)
+    assert len(load_history(rig.c.store, OWNER, rig.msg)["entries"]) == 1
+
+
+def test_panel_hash_is_stored_only_after_the_items_are_recorded(coord, fake_tg, clock, monkeypatch):
+    from ke import panel
+
+    _block(title="one")
+    real = panel.record_items
+    monkeypatch.setattr(panel, "record_items", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("db locked")))
+    coord.update_panel(clock.now)
+    assert _kv(coord, "panel_message_id") and not _kv(coord, "panel_hash")
+    monkeypatch.setattr(panel, "record_items", real)
+    coord.update_panel(clock.now)  # nothing recorded the hash, so the edit is tried again
+    assert _kv(coord, "panel_hash") and fake_tg.count("edit") == 1
+    msg = fake_tg.calls["send"][0]["message_id"]
+    assert len(coord.store.get_sent_message(OWNER, msg)["items"]) == 1
+
+
+def test_title_fallback_is_one_clipped_line():
+    from ke.panel import render_telegram
+
+    item = _item(1, need="", held=0)
+    item["title"] = "real title\n9. fake numbered line\n   " + "x" * 400
+    text = render_telegram(snapshot_fixture(human_waits=[item]))
+    assert "\n9. fake" not in text and "real title 9. fake numbered line" in text
+    line = next(l for l in text.splitlines() if l.startswith("1. matrix:"))
+    assert len(line) < 200 and line.endswith("…")
+
+
+def test_fleet_status_reads_events_through_the_injected_api(kanban_home, tmp_path):
+    from ke import conditions, hermes_api
+    from ke.store import Store
+
+    class Spy(PanelApi):
+        def __init__(self):
+            super().__init__()
+            self.event_calls = 0
+
+        def events(self, conn, tid):
+            self.event_calls += 1
+            return self._api.events(conn, tid)
+
+    _block(title="blocked one")
+    spy = Spy()
+    conditions.fleet_status(Store(tmp_path / "s.db"), time.time(), api=spy)
+    assert spy.event_calls > 0 and hermes_api  # the blocked card's events went through the adapter
+
+
+def test_reply_to_an_empty_panel_says_the_panel_changed(rig, fake_tg, clock):
+    rig.c.update_panel(clock.now)  # nothing needs anyone: no numbered items
+    assert rig.c.store.get_sent_message(OWNER, rig.msg)["items"] == []
+    sends = fake_tg.count("send")
+    assert rig.handle("999", "1 done", clock.now + 1) is None  # a stranger gets nothing
+    assert fake_tg.count("send") == sends
+    assert rig.handle(str(OWNER), "1 done", clock.now + 1)["action"] == "skip"
+    assert "panel changed" in fake_tg.last_text.lower()
+    assert rig.handle(str(OWNER), "done", clock.now + 1)["action"] == "skip"
+
+
+def test_panel_and_a_due_reminder_in_the_same_evaluation(coord, fake_tg, clock):
+    from test_waits import _last_blocked
+    from ke import hermes_api
+
+    tid, _ = _block(title="needs you")
+    with hermes_api.connect("default") as conn:
+        ev = _last_blocked(conn, tid)
+    clock.now = float(ev.created_at) + 1800  # the 30 min reminder is due
+    coord.evaluate(clock.now)
+    assert fake_tg.count("send") == 2 and fake_tg.count("pin") == 1
+    kinds = {coord.store.get_sent_message(OWNER, c["message_id"])["kind"]: c["message_id"] for c in fake_tg.calls["send"]}
+    assert set(kinds) == {"waits", "panel"}
+    r = Rig(coord, fake_tg, clock)
+    assert r.handle(str(OWNER), "done", clock.now, number_reply_to=kinds["waits"])["action"] == "skip"
+    assert r.status(tid) != "blocked"

@@ -40,14 +40,18 @@ def _register_worker_guard(ctx, settings) -> None:
         log.exception("kanban-empowered: failed to register the worker guard")
 
 
-def _telegram_from_env():
-    """A Bot API client from ``TELEGRAM_BOT_TOKEN`` of this process, or ``None`` without a token."""
+def _telegram_from_env(settings=None):
+    """A Bot API client from ``TELEGRAM_BOT_TOKEN`` of this process, or ``None`` without a token.
+
+    With ``settings`` the client records its last-good network path in ``<shared_state_dir>/telegram_path``
+    (read by ``doctor``)."""
     token = (os.environ.get("TELEGRAM_BOT_TOKEN") or "").strip()
     if not token:
         return None
     from .ke.telegram import TelegramClient
 
-    return TelegramClient(token)
+    path_file = settings.shared_state_dir / "telegram_path" if settings is not None else None
+    return TelegramClient(token, path_file=path_file)
 
 
 def _register_inbound(ctx, settings, store, telegram) -> None:
@@ -123,7 +127,7 @@ def _start_coordinator(ctx, settings) -> None:
         from .ke.store import Store
 
         store = Store(settings.shared_state_dir / "state.db")
-        coordinator = Coordinator(settings, store, telegram=_telegram_from_env())
+        coordinator = Coordinator(settings, store, telegram=_telegram_from_env(settings))
         atexit.register(coordinator.leader.release)
 
         def on_tick(board=None, dry_run=False, result=None, **kw):

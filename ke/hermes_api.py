@@ -165,6 +165,79 @@ def language() -> str | None:
         return None
 
 
+# -- Telegram network --------------------------------------------------------
+class TelegramNet:
+    """Hermes' Telegram network helpers behind plain, synchronous methods.
+
+    Wraps ``plugins.platforms.telegram.telegram_network`` (the module Hermes' own Telegram adapter uses to
+    survive a broken path to ``api.telegram.org``): fallback-IP parsing and discovery, the seed IPv4 list,
+    proxy resolution, TCP keepalive options and the "retryable connect error" test. Attributes of the Hermes
+    module are looked up at call time, so a Hermes upgrade that renames one degrades only that call.
+    """
+
+    def __init__(self, module) -> None:
+        self._tn = module
+        self.seed_ips: list[str] = list(module.SEED_FALLBACK_IPS)
+
+    def parse_ips(self, value: str | None) -> list[str]:
+        """Valid public IPv4 literals out of a comma-separated list (Hermes' ``TELEGRAM_FALLBACK_IPS`` rules)."""
+        return list(self._tn.parse_fallback_ip_env(value))
+
+    def discover(self, timeout_s: float) -> list[str] | None:
+        """Fallback IPs via Hermes' DNS-over-HTTPS discovery, or ``None`` on failure / after ``timeout_s``.
+
+        Hermes' discovery is a coroutine; it runs on a private event loop in a helper thread, so this is safe
+        to call from the coordinator's worker thread and even from inside a running loop.
+        """
+        import asyncio
+        import threading
+
+        box: list = []
+
+        def run() -> None:
+            try:
+                box.append(asyncio.run(self._tn.discover_fallback_ips()))
+            except Exception:
+                pass
+
+        worker = threading.Thread(target=run, name="ke-telegram-discover", daemon=True)
+        worker.start()
+        worker.join(max(0.0, timeout_s))
+        return list(box[0]) if box and box[0] else None
+
+    def proxy_url(self, hosts) -> str | None:
+        """The proxy Hermes would use for ``hosts`` (``TELEGRAM_PROXY`` / system proxy), ``None`` when none."""
+        try:
+            return self._tn._resolve_proxy_url(target_hosts=list(hosts))
+        except Exception:
+            return None
+
+    def keepalive(self) -> list:
+        """``socket_options`` for httpx: SO_KEEPALIVE plus the idle/interval/count knobs the OS exposes."""
+        return list(self._tn.tcp_keepalive_socket_options())
+
+    def retryable(self, exc: Exception) -> bool:
+        """Hermes' test for a connect-phase failure worth retrying on another path."""
+        return bool(self._tn._is_retryable_connect_error(exc))
+
+    @property
+    def verify(self):
+        """The platform trust store Hermes verifies Telegram TLS with (``True`` if it cannot be built)."""
+        try:
+            from agent.ssl_verify import platform_ssl_context
+
+            return platform_ssl_context()
+        except Exception:
+            return True
+
+
+def telegram_net() -> TelegramNet:
+    """The Hermes Telegram network helpers; raises (ImportError, AttributeError...) when Hermes has none."""
+    from plugins.platforms.telegram import telegram_network as module
+
+    return TelegramNet(module)
+
+
 # -- environment -------------------------------------------------------------
 def hermes_home() -> Path:
     """The active Hermes home directory."""

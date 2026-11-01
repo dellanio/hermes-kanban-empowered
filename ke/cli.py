@@ -5,7 +5,7 @@ import os
 import time
 from typing import Any, Optional
 
-from . import conditions, guards_watch, hermes_api, inbound, panel
+from . import conditions, guards_watch, hermes_api, inbound, panel, telegram
 from .leader import LeaderLock
 from .messages import render_done, t
 from .settings import Settings
@@ -285,6 +285,10 @@ def run_doctor(settings: Settings, config_error: Optional[str] = None) -> None:
         ("telegram_token", t("doctor.token.present") if token else t("doctor.token.missing")),
         ("owner_chats", t("doctor.owner_chats", n=len(settings.owner_ids))),
     ]
+    path = telegram.read_path_file(settings.shared_state_dir / "telegram_path")
+    if path is not None:  # only once a client has recorded one; opens no Store
+        kind = telegram.classify_path(path)
+        rows.append(("telegram_path", t(f"doctor.telegram_path.{kind}", path=path) if kind != "unknown" else t("doctor.unknown")))
     if config_error:
         rows.append(("config", t("doctor.config_invalid", error=config_error)))
     for kind, _flat, nested, form_value, config_value in settings.conflicts:

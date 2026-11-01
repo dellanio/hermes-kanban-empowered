@@ -3,7 +3,27 @@
 ![Kanban Empowered](docs/assets/banner.jpg)
 
 A plugin for [Hermes Agent](https://github.com/NousResearch/hermes-agent) that extends the native
-kanban for a fleet of agent profiles:
+kanban for a fleet of agent profiles. Its job is that no card stays silently stuck: when a card
+waits on a person, the person hears about it with a clear ask and can answer in one line; when a
+card is stuck for a technical reason, the plugin either fixes what is safe to fix or says exactly why.
+
+## Features at a glance
+
+| Area | What you get |
+|---|---|
+| **One coordinator** | A single process (leader lock) watches every board on Hermes' dispatch tick and owns one shared state, so a fleet of profiles never sends the same reminder twice. |
+| **Clear asks** | A worker that blocks a card on a person must write a structured ask (need, why, how to reply, optional options); a vague block is sent back to the agent to redo. |
+| **Reminders that escalate** | 30 min → 2 h → escalation at 8 h → daily digest, with no quiet hours. Ask-less cards are worded from their title, never from technical markers. |
+| **Telegram, done properly** | Branded `[Kanban - Empowered]` messages, action-first layout, numbered items, replies tied to the item (`1 — feito`, `2 — A`, free text), a pinned live panel kept up to date, and a transport that survives a flaky route to `api.telegram.org` (IPv4 fallback with SNI, sticky last-good path, bounded time). |
+| **Stuck-card recovery** | Respawn-guard holds reported with a one-line hand-off command; host-only failures parked by Hermes' breaker undone within a budget; a burst of infrastructure exits raises one systemic alert. |
+| **Explain everything** | `explain <card>` lists the conditions that keep a card from moving; `status` / `status --watch` show the fleet; `doctor` checks the whole setup. |
+| **Empowered dashboard** | A Hermes Desktop page (sidebar menu and Kanban header button): counters, *Needs you* sorted by impact, *Running now*, the coordinator's timeline, infrastructure health, and a drawer to read the ask and **answer it from the desktop**. |
+| **Project status** | Mark a board Active, Suspended or Done: suspended projects leave the dashboard's main list, stop getting reminders and have new claims held (via the core veto hook). |
+| **Settings screen** | Every setting editable from Hermes Desktop (Capabilities / Settings > Plugins). |
+| **Languages** | English, `pt` and `pt-br` catalogs (parity-tested); follows the Hermes language or a plugin-only override. |
+| **Plays nice** | Coexists with Hermes' own notifier and never repeats its native messages. |
+
+Details:
 
 - **Human waits (Telegram).** A card blocked on a person gets a reminder after 30 min and 2 h, an
   escalation after 8 h and a daily digest after that. The owner answers the reminder on Telegram,
@@ -320,16 +340,28 @@ messages only. Telegram messages never show card ids, hashes or role names; the 
 
 ## What v0.1 does not do yet
 
-- It does not use the veto hooks: no refusal at claim or completion time, no resource locks or
-  quota groups (`quota`, `held` commands), no gate verdicts or four-eyes review.
+- The veto hooks are used only to hold claims on Suspended/Done projects. There is no refusal at
+  completion time, no resource locks or quota groups (`quota`, `held` commands), no gate verdicts
+  or four-eyes review.
+- Review-lane claims on a Suspended/Done project are not held yet (needs a core patch update, see
+  "Project status").
 - No agent tools (`kanban_true_state`, `kanban_verdict`); the only agent-facing check is the
   structured ask on `kanban_block`.
 - Breaker parks are not tracked as human waits (no reminders for them): the infrastructure
   recovery and its alerts handle them, and Hermes' own notifier announces the `gave_up`.
 - No quiet hours. Reminders follow the wall clock; while the gateway is down they wait, then go
   out condensed into one message per owner.
-- No dashboard tab or desktop side panel; the live panel is the pinned Telegram message and
-  `status --watch`.
+- Telegram is the only messaging channel; the Desktop dashboard is the other way to answer.
+- The Desktop dashboard does not check per-board owners (see "Desktop dashboard").
+
+## Roadmap
+
+- **v0.2 — gates and flow.** Review rounds and gate verdicts through `kanban_pre_complete`
+  (evidence before a card can complete, four-eyes review), resource locks for cards that share a
+  scarce resource, a *Flow* view in the dashboard, and the core patch update (hook review-lane
+  claims, pass the claiming board to the hook) proposed upstream.
+- **v0.3 — quota awareness.** A provider/quota breaker: pause dispatch when a provider is out of
+  quota, detect when it comes back and resume with evidence, shown in the dashboard.
 
 ## License
 

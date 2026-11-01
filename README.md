@@ -4,8 +4,9 @@ A plugin for [Hermes Agent](https://github.com/NousResearch/hermes-agent) that e
 kanban for a fleet of agent profiles:
 
 - **Human waits (Telegram).** A card blocked on a person gets a reminder after 30 min and 2 h, an
-  escalation after 8 h and a daily digest after that. The owner answers `done` to the reminder on
-  Telegram (or runs `hermes kanban-empowered done <card>`) and the card is unblocked.
+  escalation after 8 h and a daily digest after that. The owner answers the reminder on Telegram,
+  naming the item (`1 — conectei`, `3 — A`, or free text), or runs
+  `hermes kanban-empowered done <card>`, and the card is unblocked.
 - **Stuck cards.** Cards held by Hermes' respawn guard (`active_pr`, `blocker_auth`) for more than
   30 min are reported to the owner, with a one-line command to hand them to another profile.
 - **Infrastructure failures.** When Hermes' failure breaker parks a card only because the host
@@ -54,6 +55,8 @@ What runs where:
 - **Every profile** registers the worker guard (`pre_tool_call`): a `kanban_block` that waits on a
   person must carry a structured ask (`Need:` / `Why:` / `How to reply:`, or the pt-BR labels
   `Preciso:` / `Por quê:` / `Como responder:`), otherwise the agent is asked to redo the block.
+  Optional lines: `Subject:` / `Assunto:`, `Next step:` / `Próximo passo:` and `Options:` /
+  `Opções:` followed by one `A — choice` line per option.
   Worker profiles open no plugin state.
 - **The coordinator profile** (only) opens the shared state, evaluates the boards on Hermes'
   dispatch tick (at most every 30 s), sends Telegram messages, reads the Telegram replies and
@@ -70,6 +73,7 @@ plugins:
     kanban-empowered:
       settings:
         mode: enforce                 # enforce | cooperative-only
+        # language: pt                # plugin messages' language; default: follow Hermes
         coordinator_profile: default  # the profile whose gateway is the coordinator
         # shared_state_dir: C:/Users/me/AppData/Local/hermes/plugin-data/kanban-empowered
         telegram:
@@ -100,6 +104,7 @@ plugins:
 | Key | Default | Meaning |
 |---|---|---|
 | `mode` | `enforce` | `enforce` or `cooperative-only`. Validated, but without effect in v0.1 (it is for the veto hooks). |
+| `language` | none | Language of the plugin's messages (`pt`, `en`, ...). None follows the Hermes language. |
 | `coordinator_profile` | `default` | The profile whose process acts as the coordinator. |
 | `shared_state_dir` | the coordinator profile's `plugin-data/kanban-empowered` | The plugin's SQLite state and leader lock, shared by all profiles. Default: `<hermes root>/plugin-data/kanban-empowered` when `coordinator_profile` is `default`, else `<hermes root>/profiles/<coordinator_profile>/plugin-data/kanban-empowered`. **Must be on a local NTFS (or other local) disk**: the leader lock relies on hard links and atomic renames, which network shares and some sync folders do not provide. |
 | `telegram.owner_ids` | `{}` | Owner name to Telegram id. **Each value is BOTH the person's Telegram user id and the id of their private chat with the bot** (in a Telegram DM they are the same number): messages go to that chat, and a reply is accepted only from that user. |
@@ -136,13 +141,20 @@ coordinator process (the same bot the gateway already uses). The plugin only cal
 
 ### Telegram replies
 
-Reply (with Telegram's "reply" function) to a reminder or to the pinned panel. The whole message
-must be the confirmation, optionally numbered and with trailing punctuation:
+Reply (with Telegram's "reply" function) to a reminder or to the pinned panel and name the item:
+`1 — conectei`, `2 — o campo ficou pequeno`, `3 — A` (also `1 – …`, `1 - …`, `1: …`, `1) …`,
+`1. …`, `1 …`). A message with a single item also takes the bare text. The text after the number:
 
-- words: `done`, `ok`, `approved`, `feito`, `liguei`, `aprovado` (any case);
-- one item: `done`; one of several items in a message: `2 done` (also `2. done`, `2) done`,
-  `2 - done`);
-- anything else (`ok, but not yet`, `done?`) is a normal message for the agent and passes through.
+- a letter the item lists as an option (`3 — A`) picks that option and unblocks the card (the choice
+  is commented); a letter it does not list changes nothing and the plugin asks for a listed one;
+- a confirmation word unblocks the card: the item's own reply words (from its `How to reply:`) or
+  `feito`, `conectei`, `validado`, `liguei`, `ok`, `aprovado`, `pronto`, `done`, `connected`,
+  `validated`, `approved` (any case, trailing punctuation/emoji allowed);
+- an explicit "not done" (`não`, `ainda não`, `negativo`, `no`, `not yet`, `nope`) only adds a
+  comment; the card keeps waiting;
+- any other text is your answer: the card is unblocked and the text is posted as a comment, so the
+  agent continues with it;
+- several items and no number: the plugin asks which item.
 
 A reply is acted on only when it comes from the configured owner of that item, in the owner's own
 chat, to a message the plugin sent, before `reply_ttl`, and while the card is still blocked on the
@@ -167,7 +179,9 @@ with its author.
 | `owner_chats` | Number of entries in `telegram.owner_ids`. |
 | `config` | Only when the settings are invalid: the error. The plugin then runs the worker guard on defaults and does not start the coordinator. |
 
-Human-facing text follows the Hermes language (English by default, pt-BR included).
+Human-facing text follows the Hermes language (English by default; `pt` and `pt-br` included).
+The optional top-level setting `language` (e.g. `language: pt`) overrides it for this plugin's
+messages only. Telegram messages never show card ids, hashes or role names; the CLI keeps the ids.
 
 ## What v0.1 does not do yet
 

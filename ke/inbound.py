@@ -18,7 +18,7 @@ run in this fixed order and nothing about a card is read before all of them pass
 From step 3 on the message is consumed: any later failure still returns skip.
 
 Only then is the card read: it must still be ``blocked`` with the same block version as
-the item in the message (the live latest ``blocked`` event id, and the tracked wait row
+the item in the message (the live newest ``blocked``/``gave_up`` event id, and the tracked wait row
 when there is one), so a "done" answered to an old reminder can never resolve a newer block.
 
 The same rules apply to replies to the live panel (``sent_messages`` kind "panel"), a message the

@@ -14,6 +14,7 @@ from . import hermes_api
 from .messages import human_age, t
 from .settings import Settings
 from .store import Store
+from .waits import human_block
 
 _CLOSED = frozenset({"done", "archived"})
 # Events that carry no news about the card itself.
@@ -60,8 +61,6 @@ def _last_event_ts(events: list, kinds: Optional[frozenset] = None) -> Optional[
     return None
 
 
-def _is_human_block(task: Any, settings: Settings) -> bool:
-    return task.status == "blocked" and (task.block_kind is None or task.block_kind in settings.human_kinds)
 
 
 def _count(n: int, key: str) -> str:
@@ -119,11 +118,12 @@ def _dependencies(conn, board, task, store, now, settings) -> Condition:
         label = root.status
         if root.block_kind and root.status in _KIND_SHOWN_IN:
             label += f" {root.block_kind}"
-        since = _last_event_ts(_events(conn, root.id)) or root.created_at
+        root_events = _events(conn, root.id)
+        since = _last_event_ts(root_events) or root.created_at
         wait = store.latest_wait(board, root.id)
         if wait and wait.get("owner"):
             owner = wait["owner"]
-        elif _is_human_block(root, settings):
+        elif human_block(root, root_events, settings) is not None:
             owner = settings.owner_for(board)
         else:
             owner = root.assignee or t("explain.dependencies.no_owner")
@@ -217,6 +217,10 @@ def _next_reminder_in(age: int, settings: Settings) -> int:
 
 def _wait(conn, board, task, store, now, settings) -> Condition:
     row = store.latest_wait(board, task.id) if task.status == "blocked" else None
+    if row is not None:
+        block = human_block(task, _events(conn, task.id), settings)
+        if block is None or block.version != int(row["version"]):
+            row = None  # the card's block changed since the tracker last synced: not that wait any more
     if row is None:
         return Condition("wait", True, t("explain.wait.none"))
     age = _age(now, row["started_at"])
@@ -298,12 +302,13 @@ def fleet_status(store: Store, now: float, settings: Optional[Settings] = None, 
                         }
                     )
                 for task in api.list_tasks(conn, status="blocked"):
-                    if not _is_human_block(task, settings):
+                    block = human_block(task, _events(conn, task.id, api), settings)
+                    if block is None:  # the one definition of a human wait (shared with WaitTracker)
                         continue
                     wait = store.latest_wait(board, task.id)
-                    since = (wait or {}).get("started_at") or _last_event_ts(
-                        _events(conn, task.id, api), frozenset({"blocked"})
-                    ) or task.created_at
+                    if wait is not None and int(wait["version"]) != block.version:
+                        wait = None  # a row of an older block (the tracker has not synced yet)
+                    since = (wait or {}).get("started_at") or block.started_at
                     human_waits.append(
                         {
                             "board": board,

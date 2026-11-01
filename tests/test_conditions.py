@@ -291,10 +291,11 @@ def test_wait_with_row_shows_owner_age_and_next_reminder(kanban_home, tmp_path):
         tid = create_task(conn, title="t", assignee="dev")
         _claim(conn, tid)
         block_task(conn, tid, reason="Preciso: x", kind="needs_input")
+        version = max(e.id for e in h.events(conn, tid) if e.kind == "blocked")
     store.conn.execute(
         "INSERT INTO waits (board, task_id, version, owner, started_at, stage, last_sent_at) "
-        "VALUES ('default', ?, 5, 'sponsor', ?, NULL, NULL)",
-        (tid, int(now - 600)),
+        "VALUES ('default', ?, ?, 'sponsor', ?, NULL, NULL)",
+        (tid, version, int(now - 600)),
     )
     w = _cond(_explain("default", tid, store, now=now), "wait")
     assert w.ok is False

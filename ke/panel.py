@@ -28,7 +28,7 @@ from .asks import parse_ask
 from .messages import TELEGRAM_LIMIT, _clip_to, _guard_reason_text, _prefix, _tg_len, human_age, t
 from .settings import Settings
 from .store import Store
-from .waits import _latest_blocked, _payload, block_version, held_behind
+from .waits import current_block, held_behind
 
 MAX_ITEMS = 10  # "Needs you" items shown (more are summarized as "and N more")
 NEED_MAX = 120  # characters of the request shown per item
@@ -70,15 +70,13 @@ def _enrich_waits(store: Store, api: Any, waits: list[dict]) -> list[dict]:
 
 
 def _enrich_one(api: Any, conn: Any, w: dict) -> dict:
-    events = api.events(conn, w["task_id"])
-    ev = _latest_blocked(events)
-    reason = _payload(ev).get("reason") if ev is not None else None
-    reason = reason if isinstance(reason, str) else ""
+    block = current_block(api.task(conn, w["task_id"]), api.events(conn, w["task_id"]))
+    reason = block.reason if block is not None else ""
     ask = parse_ask(reason)
     need = ask.need if ask is not None else reason
     return {
         **w,
-        "version": block_version(events),
+        "version": block.version if block is not None else 0,
         "need": _clip_to(need, NEED_MAX),
         "held": len(held_behind(api, conn, w["task_id"])),
     }

@@ -1,9 +1,17 @@
 """Human wait tracker: owner, deadlines and condensed reminders for cards blocked on a person.
 
-A *wait* is one blocked card whose latest ``blocked`` event has a human kind (one of
-``Settings.human_kinds`` or none). Its ``version`` is that event's id and its start time
-the event's ``created_at``, so re-blocking a card opens a new version and a reminder
-answered for the old one can never act on the new block.
+A card's *current block* is its newest ``blocked`` or ``gave_up`` event (:func:`current_block`):
+its ``version`` is that event's id and its start time the event's ``created_at``, so every new
+block (a re-block, or a park by Hermes' failure breaker) opens a new version and a reminder
+answered for an old block can never act on the new one.
+
+A *wait* is a blocked card whose current block is a ``blocked`` event with a human kind (one of
+``Settings.human_kinds`` or none): :func:`human_block` is the single definition, shared by the
+tracker, ``conditions.fleet_status`` and the panel. A breaker park (newest event ``gave_up``) is
+NOT a human wait, whatever ``block_kind`` the card still carries from an earlier block (Hermes
+keeps it across an unblock): infrastructure recovery and its alerts handle it, and Hermes' own
+notifier announces the ``gave_up``. Once somebody classifies the park as a human block (Hermes
+appends a ``blocked`` event), it becomes a wait counted from that event.
 
 Deadlines, counted from the start of the wait: one reminder per ``Settings.reminders_s``
 entry (30 min, 2 h), the escalation at ``escalate_after_s`` (8 h), then a digest every
@@ -51,15 +59,62 @@ def _payload(event: Any) -> dict:
     return p if isinstance(p, dict) else {}
 
 
-def _latest_blocked(events: list) -> Any:
-    blocked = [e for e in events if e.kind == "blocked"]
-    return max(blocked, key=lambda e: e.id) if blocked else None
+BLOCK_EVENTS = frozenset({"blocked", "gave_up"})
+
+
+@dataclass(frozen=True)
+class Block:
+    """A card's current block: the newest ``blocked`` / ``gave_up`` event."""
+
+    version: int  # the event id
+    started_at: int  # the event's created_at
+    kind: Optional[str]  # the block kind of a ``blocked`` event; None for a breaker park
+    breaker: bool  # True when the newest event is the failure breaker's ``gave_up``
+    reason: str  # the block reason, or the breaker's error
+
+
+def _latest_block_event(events: list) -> Any:
+    found = [e for e in events if e.kind in BLOCK_EVENTS]
+    return max(found, key=lambda e: e.id) if found else None
 
 
 def block_version(events: list) -> int:
-    """Version of a card's current block: its latest ``blocked`` event id, 0 when it has none."""
-    ev = _latest_blocked(events)
+    """Version of a card's current block: its newest ``blocked``/``gave_up`` event id, 0 when none."""
+    ev = _latest_block_event(events)
     return int(ev.id) if ev is not None else 0
+
+
+def current_block(task: Any, events: list) -> Optional[Block]:
+    """The card's current block (see the module doc), or ``None`` when it never was blocked."""
+    ev = _latest_block_event(events)
+    if ev is None:
+        return None
+    payload = _payload(ev)
+    if ev.kind == "gave_up":
+        reason = payload.get("error") or getattr(task, "last_failure_error", None) or ""
+        return Block(int(ev.id), int(ev.created_at), None, True, reason if isinstance(reason, str) else "")
+    kind = payload.get("kind")
+    reason = payload.get("reason")
+    return Block(
+        int(ev.id), int(ev.created_at), kind if isinstance(kind, str) else None, False,
+        reason if isinstance(reason, str) else "",
+    )
+
+
+def human_block(task: Any, events: list, settings: Settings) -> Optional[Block]:
+    """The block ``task`` waits on a person for, or ``None``: THE definition of a human wait.
+
+    The card is ``blocked`` and its current block is a ``blocked`` event whose kind is human
+    (in ``settings.human_kinds``, or none). Breaker parks and cards with no block event are not.
+    """
+    if task is None or task.status != "blocked":
+        return None
+    block = current_block(task, events)
+    if block is None or block.breaker:
+        return None
+    if block.kind is not None and block.kind not in settings.human_kinds:
+        return None
+    return block
 
 
 def held_behind(api: Any, conn: Any, tid: str) -> list[str]:
@@ -148,22 +203,11 @@ class WaitTracker:
 
     def _human_blocks(self, board: str) -> list[tuple[str, int, int]]:
         found: list[tuple[str, int, int]] = []
-        kinds = self.settings.human_kinds
         with self.api.connect(board) as conn:
             for task in self.api.list_tasks(conn, status="blocked"):
-                events = self.api.events(conn, task.id)
-                ev = _latest_blocked(events)
-                if ev is not None:
-                    kind = _payload(ev).get("kind")
-                    version, started_at = int(ev.id), int(ev.created_at)
-                else:  # parked by the failure breaker: no blocked event, only the card's own kind
-                    kind = getattr(task, "block_kind", None)
-                    last = max(events, key=lambda e: e.id) if events else None
-                    version = 0
-                    started_at = int(last.created_at if last is not None else task.created_at)
-                if kind is not None and kind not in kinds:
-                    continue
-                found.append((task.id, version, started_at))
+                block = human_block(task, self.api.events(conn, task.id), self.settings)
+                if block is not None:
+                    found.append((task.id, block.version, block.started_at))
         return found
 
     # -- due -----------------------------------------------------------------
@@ -199,11 +243,10 @@ class WaitTracker:
             task = self.api.task(conn, tid)
             if task is None or task.status != "blocked":
                 return None  # resolved since the last sync; the next sync removes the row
-            ev = _latest_blocked(self.api.events(conn, tid))
-            if (int(ev.id) if ev is not None else 0) != version:
+            block = human_block(task, self.api.events(conn, tid), self.settings)
+            if block is None or block.version != version:
                 return None  # re-blocked since the last sync: the new version is not tracked yet
-            reason = _payload(ev).get("reason") if ev is not None else None
-            reason = reason if isinstance(reason, str) else ""
+            reason = block.reason
             held = held_behind(self.api, conn, tid)
         return Due(
             board=board,

@@ -446,3 +446,139 @@ def test_conditions_wait_reads_tracker_rows(kanban_home, clock, tmp_path):
         cc = conditions.explain(conn, "default", tid, store, clock.now + 600, settings)
     w = next(c for c in cc.conditions if c.name == "wait")
     assert w.ok is False and "sponsor" in w.text and "40 min" in w.text and "next reminder in 1 h 20 min" in w.text
+
+
+# -- breaker parks are not human waits (final review I-1 / M-5) ------------------
+def breaker_park(tid, board="default", error="AssertionError in tests"):
+    """Unblock ``tid`` if needed, fail one run and trip Hermes' breaker; returns the ``gave_up`` event.
+
+    ``block_kind`` deliberately survives the unblock in Hermes, so a card that was human-blocked
+    before keeps ``needs_input`` on the breaker park.
+    """
+    from hermes_cli import kanban_db as kb
+    from hermes_cli import kanban_db_dispatch as kd
+    from ke import hermes_api
+
+    with hermes_api.connect(board) as conn:
+        if hermes_api.task(conn, tid).status == "blocked":
+            assert hermes_api.unblock(conn, tid)
+        assert kb.claim_task(conn, tid) is not None
+        with kb.write_txn(conn):
+            kb._end_run(conn, tid, outcome="crashed", status="crashed", error=error,
+                        metadata={"exit_kind": "nonzero_exit"})
+            conn.execute(
+                "UPDATE tasks SET status='ready', claim_lock=NULL, claim_expires=NULL, worker_pid=NULL WHERE id=?",
+                (tid,),
+            )
+        assert kd._record_task_failure(
+            conn, tid, error=error, outcome="crashed", failure_limit=1, release_claim=False, end_run=False,
+        )
+        assert hermes_api.task(conn, tid).status == "blocked"
+        return max((e for e in hermes_api.events(conn, tid) if e.kind == "gave_up"), key=lambda e: e.id)
+
+
+def _fleet_waits(store, settings, now):
+    from ke import conditions, hermes_api
+
+    return sorted(w["task_id"] for w in conditions.fleet_status(store, now, settings=settings, api=hermes_api)["human_waits"])
+
+
+def test_a_breaker_park_is_not_a_human_wait(kanban_home, clock, tmp_path):
+    from ke import hermes_api
+
+    wt, store, settings = _tracker(tmp_path)
+    with hermes_api.connect("default") as conn:
+        tid = create_task(conn, title="crashy", assignee="dev")
+    gu = breaker_park(tid)
+    clock.now = float(gu.created_at)
+    wt.sync(clock.now)
+    assert store.latest_wait("default", tid) is None
+    assert _fleet_waits(store, settings, clock.now) == []
+
+
+def test_block_version_counts_the_breaker_gave_up(kanban_home, clock, tmp_path):
+    from ke import hermes_api
+    from ke.waits import block_version
+
+    with hermes_api.connect("default") as conn:
+        tid, ev = make_human_block(conn)
+    gu = breaker_park(tid)
+    with hermes_api.connect("default") as conn:
+        assert hermes_api.task(conn, tid).block_kind == "needs_input"  # survived the unblock
+        assert block_version(hermes_api.events(conn, tid)) == gu.id > ev.id
+
+
+def test_a_breaker_repark_after_a_human_block_is_dropped_and_never_escalates(kanban_home, clock, tmp_path):
+    from ke import hermes_api
+
+    wt, store, settings = _tracker(tmp_path)
+    with hermes_api.connect("default") as conn:
+        tid, ev = make_human_block(conn)
+    _start(clock, ev)
+    wt.sync(clock.now)
+    clock.advance(1800)
+    (due,) = wt.collect_due(clock.now)
+    wt.mark_sent(due, clock.now)
+    breaker_park(tid)
+    from ke import conditions
+
+    with hermes_api.connect("default") as conn:  # before the next sync the old row is not shown as a wait
+        cc = conditions.explain(conn, "default", tid, store, clock.now, settings)
+    assert next(c for c in cc.conditions if c.name == "wait").ok is True
+    clock.now = float(ev.created_at) + 9 * H  # past the escalation of the OLD block
+    wt.sync(clock.now)
+    assert store.latest_wait("default", tid) is None
+    assert wt.collect_due(clock.now) == []
+    assert _fleet_waits(store, settings, clock.now) == []
+
+
+def test_a_classified_breaker_park_is_a_new_wait_counted_from_its_own_time(kanban_home, clock, tmp_path):
+    from ke import hermes_api
+
+    wt, store, settings = _tracker(tmp_path)
+    with hermes_api.connect("default") as conn:
+        tid = create_task(conn, title="crashy", assignee="dev")
+    breaker_park(tid)
+    with hermes_api.connect("default") as conn:  # somebody classifies the park as a human wait
+        assert block_task(conn, tid, reason="Preciso: a\nPor quê: b\nComo responder: c", kind="needs_input")
+        ev = _last_blocked(conn, tid)
+    clock.now = float(ev.created_at) + 60
+    wt.sync(clock.now)
+    row = store.latest_wait("default", tid)
+    assert row["version"] == ev.id and row["started_at"] == ev.created_at
+    assert wt.collect_due(clock.now) == []  # no immediate escalation
+    clock.now = float(ev.created_at) + 1800
+    assert _stages(wt.collect_due(clock.now)) == ["reminder1"]
+    assert _fleet_waits(store, settings, clock.now) == [tid]
+
+
+def test_fleet_status_and_the_tracker_share_one_definition_of_a_human_wait(kanban_home, clock, tmp_path):
+    from ke import hermes_api
+
+    wt, store, settings = _tracker(tmp_path)
+    with hermes_api.connect("default") as conn:
+        human, ev = make_human_block(conn, title="human")
+        untyped, _ = make_human_block(conn, title="untyped", kind=None)
+        transient, _ = make_human_block(conn, title="transient", kind="transient")
+        stale, _ = make_human_block(conn, title="stale")
+        crashy = create_task(conn, title="crashy", assignee="dev")
+    breaker_park(stale)
+    breaker_park(crashy)
+    clock.now = float(ev.created_at) + 60
+    wt.sync(clock.now)
+    tracked = sorted(r["task_id"] for r in store.all_waits())
+    assert tracked == sorted([human, untyped])
+    assert _fleet_waits(store, settings, clock.now) == tracked
+
+
+def test_current_block_of_a_breaker_park_carries_the_breaker_error(kanban_home, clock, tmp_path):
+    from ke import hermes_api
+    from ke.waits import current_block
+
+    with hermes_api.connect("default") as conn:
+        tid = create_task(conn, title="crashy", assignee="dev")
+    gu = breaker_park(tid, error="Gateway connection failed")
+    with hermes_api.connect("default") as conn:
+        block = current_block(hermes_api.task(conn, tid), hermes_api.events(conn, tid))
+    assert block.breaker and block.version == gu.id and block.started_at == gu.created_at
+    assert block.reason == "Gateway connection failed" and block.kind is None

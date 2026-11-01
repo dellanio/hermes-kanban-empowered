@@ -537,3 +537,18 @@ def test_cli_done_is_wired_in_the_parser(env, monkeypatch):
     cli.setup(parser)
     assert cli.run(parser.parse_args(["done", "t_1", "--board", "b"])) == 0
     assert seen == {"card": "t_1", "board": "b"}
+
+
+# -- a breaker re-park is a new block (final review I-1) ------------------------------
+@pytest.mark.parametrize("synced", [False, True])
+def test_done_to_an_old_reminder_cannot_resolve_a_breaker_repark(env, synced):
+    from ke.waits import WaitTracker
+    from test_waits import breaker_park
+
+    breaker_park(env.tids[0])  # unblocked, then parked by the failure breaker (block_kind survives)
+    if synced:
+        WaitTracker(env.settings, env.store, env.api).sync(env.clock.now)
+    ev = reply_event(user_id=OWNER, reply_to=env.sent_id, text="done")
+    assert env.handle(ev)["action"] == "skip"
+    assert _status(env.tids[0]) == "blocked"
+    assert "changed" in env.telegram.last_text

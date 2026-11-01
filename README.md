@@ -234,7 +234,7 @@ with its author.
 | `active_profile` | Profile of the process running `doctor`. |
 | `coordinator_profile` | Configured coordinator profile. |
 | `shared_state_dir` | Resolved state directory. |
-| `profiles_with_plugin` | Profiles whose `config.yaml` has `plugins.entries.kanban-empowered`. |
+| `profiles_with_plugin` | Profiles where the plugin directory exists and `config.yaml` enables it (`plugins.enabled`, not in `plugins.disabled`) or has a `plugins.entries.kanban-empowered` section. |
 | `telegram_token` | `present` / `missing`: `TELEGRAM_BOT_TOKEN` in **this** process (the token itself is never printed). |
 | `owner_chats` | Number of entries in `telegram.owner_ids`. |
 | `telegram_path` | Only once a Telegram client has recorded one: how the Bot API was reached last, `<host> (hostname)` or `<ip> (IPv4 fallback)`. |

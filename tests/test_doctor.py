@@ -61,23 +61,64 @@ def test_doctor_reports_coordinator_pid(kanban_home, capsys, tmp_path):
     assert _out(capsys)["coordinator"] == str(os.getpid())
 
 
+def _profile(root, name, config, plugin_dir=True):
+    """A fake profile home under ``root`` (``root`` itself for ``default``)."""
+    home = root if name == "default" else root / "profiles" / name
+    home.mkdir(parents=True, exist_ok=True)
+    if config is not None:
+        (home / "config.yaml").write_text(config, encoding="utf-8")
+    if plugin_dir:
+        (home / "plugins" / "kanban-empowered").mkdir(parents=True)
+    return home
+
+
 def test_doctor_profiles_with_plugin(kanban_home, capsys, tmp_path):
     from ke import cli
 
-    (kanban_home / "config.yaml").write_text(
-        "plugins:\n  entries:\n    kanban-empowered:\n      enabled: true\n", encoding="utf-8"
-    )
-    for name, body in (
-        ("alice", "plugins:\n  entries:\n    kanban-empowered: {}\n"),
-        ("bob", "plugins:\n  entries:\n    other: {}\n"),
-        ("carol", ""),
-    ):
-        d = kanban_home / "profiles" / name
-        d.mkdir(parents=True)
-        (d / "config.yaml").write_text(body, encoding="utf-8")
+    _profile(kanban_home, "default", "plugins:\n  entries:\n    kanban-empowered:\n      enabled: true\n")
+    _profile(kanban_home, "alice", "plugins:\n  entries:\n    kanban-empowered: {}\n")
+    _profile(kanban_home, "bob", "plugins:\n  entries:\n    other: {}\n")
+    _profile(kanban_home, "carol", "")
     (kanban_home / "profiles" / "dave").mkdir()  # no config.yaml
     cli.run_doctor(settings_for_test(tmp_path))
     assert _out(capsys)["profiles_with_plugin"] == "default, alice"
+
+
+def test_profiles_with_plugin_reads_the_enabled_list(kanban_home):
+    from ke import hermes_api as h
+
+    enabled = "plugins:\n  enabled:\n    - orca-status\n    - kanban-empowered\n  disabled: []\n  entries: {}\n"
+    _profile(kanban_home, "default", enabled)
+    _profile(kanban_home, "builder", enabled)
+    _profile(kanban_home, "other", "plugins:\n  enabled:\n    - orca-status\n")
+    assert h.profiles_with_plugin() == ["default", "builder"]
+
+
+def test_profiles_with_plugin_skips_disabled_and_missing_dir(kanban_home):
+    from ke import hermes_api as h
+
+    both = "plugins:\n  enabled: [kanban-empowered]\n  disabled: [kanban-empowered]\n"
+    _profile(kanban_home, "off", both)
+    _profile(kanban_home, "nodir", "plugins:\n  enabled: [kanban-empowered]\n", plugin_dir=False)
+    _profile(kanban_home, "entries_nodir", "plugins:\n  entries:\n    kanban-empowered: {}\n", plugin_dir=False)
+    _profile(kanban_home, "ok", "plugins:\n  enabled: [kanban-empowered]\n")
+    assert h.profiles_with_plugin() == ["ok"]
+
+
+def test_profiles_with_plugin_entries_only_counts(kanban_home):
+    from ke import hermes_api as h
+
+    _profile(kanban_home, "e", "plugins:\n  entries:\n    kanban-empowered:\n      settings: {}\n")
+    assert h.profiles_with_plugin() == ["e"]
+
+
+def test_profiles_with_plugin_tolerates_malformed_plugins_section(kanban_home):
+    from ke import hermes_api as h
+
+    _profile(kanban_home, "a", "plugins: nope\n")
+    _profile(kanban_home, "b", "plugins:\n  enabled: kanban-empowered\n  disabled: null\n")
+    _profile(kanban_home, "c", "plugins: [x\n")
+    assert h.profiles_with_plugin() == []
 
 
 def test_hermes_head_is_short_sha_or_none():

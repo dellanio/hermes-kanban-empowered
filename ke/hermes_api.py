@@ -354,8 +354,18 @@ def hermes_head() -> str | None:
     return sha[:10] if sha else None
 
 
+def _names(value) -> list:
+    """``value`` as a list of names (a bare string or anything else that is not a list counts as empty)."""
+    return list(value) if isinstance(value, (list, tuple)) else []
+
+
 def profiles_with_plugin(plugin: str = "kanban-empowered") -> list[str]:
-    """Profiles whose ``config.yaml`` has ``plugins.entries.<plugin>`` (``default`` first)."""
+    """Profiles that have ``plugin`` installed and enabled (``default`` first).
+
+    A profile counts when ``<profile home>/plugins/<plugin>`` exists and its ``config.yaml`` either lists
+    the plugin in ``plugins.enabled`` (and not in ``plugins.disabled``; this is how Hermes records
+    enablement) or has a ``plugins.entries.<plugin>`` section.
+    """
     from hermes_constants import get_default_hermes_root
 
     try:
@@ -366,12 +376,18 @@ def profiles_with_plugin(plugin: str = "kanban-empowered") -> list[str]:
     root = Path(get_default_hermes_root())
     found: list[str] = []
     for name in profiles():
-        cfg = (root / "config.yaml") if name == "default" else (root / "profiles" / name / "config.yaml")
+        home = root if name == "default" else root / "profiles" / name
+        if not (home / "plugins" / plugin).is_dir():
+            continue
         try:
-            data = yaml.safe_load(cfg.read_text(encoding="utf-8"))
+            data = yaml.safe_load((home / "config.yaml").read_text(encoding="utf-8"))
         except Exception:
             continue
-        entries = ((data or {}).get("plugins") or {}).get("entries") if isinstance(data, dict) else None
-        if isinstance(entries, dict) and plugin in entries:
+        section = data.get("plugins") if isinstance(data, dict) else None
+        if not isinstance(section, dict):
+            continue
+        entries = section.get("entries")
+        listed = plugin in _names(section.get("enabled")) and plugin not in _names(section.get("disabled"))
+        if listed or (isinstance(entries, dict) and plugin in entries):
             found.append(name)
     return found

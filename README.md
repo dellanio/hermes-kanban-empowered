@@ -36,6 +36,8 @@ gave_up, crashed, review or block_loop_detected messages.
 
 ## Install
 
+Step-by-step guide with verification and rollback: [`docs/INSTALL.md`](docs/INSTALL.md). Live acceptance results of v0.1: [`docs/ACCEPTANCE-v0.1.md`](docs/ACCEPTANCE-v0.1.md).
+
 Plugins, their state and their settings are per Hermes profile. Install and enable the plugin in
 **every profile that runs kanban workers** (builder, devops, reviewer, ...) and in the profile of
 the gateway that acts as the coordinator (by default `default`).

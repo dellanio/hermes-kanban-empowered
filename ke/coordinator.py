@@ -119,7 +119,7 @@ class Coordinator:
             return
         due_now = {(d.board, d.task_id, d.version): d for d in self.pending_dues}
         todo = []
-        for row in self.store.all_waits():
+        for row in self.waits.active_rows():  # a suspended/done board's waits are not re-sent
             key = (row["board"], row["task_id"], row["version"])
             if (
                 row["stage"] is None or key in due_now
@@ -190,7 +190,7 @@ class Coordinator:
         if self.settings.escalate_to is not None or self.store.kv_get("setup_escalation_no_target_sent"):
             return
         after = self.settings.escalate_after_s
-        if not any(now - row["started_at"] >= after for row in self.store.all_waits()):
+        if not any(now - row["anchor"] >= after for row in self.waits.active_rows()):
             return
         self._send_setup_alert(
             "escalation_no_target", now,

@@ -22,6 +22,13 @@ sent state: it reports the highest stage already due and not yet sent, at most o
 wait, and only :meth:`WaitTracker.mark_sent` advances it. After a gateway outage every
 overdue stage therefore collapses into a single message, and a wait first seen when it is
 already old gets one message at once (its highest stage) and the digest cadence from then on.
+
+Board status (``ke.board_status``): the waits of a suspended or done board are still tracked but
+never due, so no reminder, escalation, digest or layout re-send goes out for them. Reactivating the
+board resets their sent stage (``Store.set_board_status``) and the ladder counts from the reactivation
+time (:func:`ladder_anchor`), not from the start of the wait: the first reminder comes one first stage
+after the reactivation, with no burst of the stages missed while the board was off. The message still
+tells the real age of the request.
 """
 from __future__ import annotations
 
@@ -121,6 +128,22 @@ def human_block(task: Any, events: list, settings: Settings) -> Optional[Block]:
     if block.kind is not None and block.kind not in settings.human_kinds:
         return None
     return block
+
+
+def board_active(board: str, statuses: dict) -> bool:
+    """True unless ``statuses`` (``Store.board_statuses()``) records ``board`` as suspended or done."""
+    row = statuses.get(board)
+    return row is None or row.get("status") == "active"
+
+
+def ladder_anchor(row: dict, statuses: dict) -> int:
+    """When the reminder ladder of the wait ``row`` starts: its ``started_at``, or the board's reactivation
+    time when that is later (an ``active`` status row only exists after a reactivation)."""
+    anchor = int(row["started_at"])
+    st = statuses.get(row["board"])
+    if st is not None and st.get("status") == "active" and st.get("changed_at"):
+        anchor = max(anchor, int(st["changed_at"]))
+    return anchor
 
 
 def display_name(api: Any, board: str) -> str:
@@ -244,14 +267,28 @@ class WaitTracker:
         return found
 
     # -- due -----------------------------------------------------------------
+    def active_rows(self) -> list[dict]:
+        """The wait rows of active boards, each with ``anchor`` (:func:`ladder_anchor`): the only waits the
+        ladder applies to. The waits of a suspended or done board are left out."""
+        statuses = self.store.board_statuses()
+        return [
+            {**row, "anchor": ladder_anchor(row, statuses)}
+            for row in self.store.all_waits()
+            if board_active(row["board"], statuses)
+        ]
+
     def collect_due(self, now: float) -> list[Due]:
-        """At most one :class:`Due` per wait: the highest overdue stage not yet sent."""
+        """At most one :class:`Due` per wait of an active board: the highest overdue stage not yet sent.
+
+        Stages are counted from the ladder anchor; the ``Due`` carries the real age of the wait.
+        """
         out: list[Due] = []
-        for row in self.store.all_waits():
+        for row in self.active_rows():
             try:
                 age = max(0, int(now - row["started_at"]))
-                digest = self._digest_period(row, age)
-                hit = self._highest_due_stage(age, digest)
+                ladder = max(0, int(now - row["anchor"]))
+                digest = self._digest_period(row, ladder)
+                hit = self._highest_due_stage(ladder, digest)
                 if hit is None:
                     continue
                 stage, offset, rank = hit

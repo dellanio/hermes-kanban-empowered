@@ -45,7 +45,7 @@ from .messages import (
 )
 from .settings import Settings
 from .store import Store
-from .waits import current_block, display_name, held_behind
+from .waits import board_active, current_block, display_name, held_behind
 
 MAX_ITEMS = 10  # "Needs you" items shown (more are summarized as "and N more")
 NEED_MAX = 120  # characters of the request shown per item
@@ -63,6 +63,7 @@ class Snapshot:
     resolved_today: int = 0
     last_resolved: Optional[dict] = None
     long_guards: int = 0
+    suspended_boards: int = 0  # live boards whose status is suspended or done (left out of everything above)
 
 
 # -- building ----------------------------------------------------------------------
@@ -108,12 +109,24 @@ def _enrich_one(api: Any, conn: Any, w: dict) -> dict:
 def build_snapshot(store: Store, api: Any, now: float, settings: Optional[Settings] = None) -> Snapshot:
     """The fleet right now. ``held`` comes only from the tracked respawn guards (``guard_alerts``).
 
+    Suspended and done boards are left out of the running, held and pending lists; ``suspended_boards``
+    counts them (the panel shows one line for them instead).
+
     ``resolved_today`` counts the ``human_done``, ``guard_release`` and ``infra_undo`` actions
     since local midnight; ``long_guards`` the held cards past ``guard_alert_after_s``.
     """
     settings = settings if settings is not None else Settings.from_mapping({})
     fs = conditions.fleet_status(store, now, settings=settings, api=api)
-    held = [{**row, "age_s": max(0, int(now - row["first_seen"]))} for row in store.guard_alerts()]
+    statuses = store.board_statuses()
+
+    def active(rows: list) -> list:
+        return [r for r in rows if board_active(r["board"], statuses)]
+
+    try:
+        suspended = sum(1 for b in api.boards() if not board_active(b, statuses))
+    except Exception:
+        suspended = 0
+    held = [{**row, "age_s": max(0, int(now - row["first_seen"]))} for row in active(store.guard_alerts())]
     resolved = [
         a for a in store.actions_since(conditions._local_midnight(now)) if a["kind"] in conditions._RESOLVED_ACTIONS
     ]
@@ -126,12 +139,13 @@ def build_snapshot(store: Store, api: Any, now: float, settings: Optional[Settin
         }
     return Snapshot(
         ts=now,
-        running=fs["running"],
+        running=active(fs["running"]),
         held=held,
-        human_waits=_enrich_waits(store, api, fs["human_waits"]),
+        human_waits=_enrich_waits(store, api, active(fs["human_waits"])),
         resolved_today=len(resolved),
         last_resolved=last,
         long_guards=sum(1 for h in held if h["age_s"] >= settings.guard_alert_after_s),
+        suspended_boards=suspended,
     )
 
 
@@ -182,6 +196,8 @@ def _tail(s: Snapshot) -> list[str]:
         lines.append(t("panel.resolved.last", board=lr.get("display") or board_title(lr["board"]), time=_clock(lr["ts"])))
     if s.long_guards:
         lines.append(t("panel.guards", n=s.long_guards))
+    if s.suspended_boards:
+        lines.append(plural("panel.suspended", s.suspended_boards))
     return lines
 
 
@@ -249,6 +265,8 @@ def render_terminal(s: Snapshot) -> str:
         lines.append(t("panel.term.resolved.last", board=lr["board"], id=lr["task_id"], time=_clock(lr["ts"])))
     if s.long_guards:
         lines.append(t("panel.guards", n=s.long_guards))
+    if s.suspended_boards:
+        lines.append(plural("panel.suspended", s.suspended_boards))
     if ordered:
         lines += ["", t("panel.term.how")]
     return "\n".join(lines)

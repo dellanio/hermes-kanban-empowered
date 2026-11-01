@@ -11,10 +11,11 @@ from dataclasses import dataclass, field
 from typing import Any, Optional
 
 from . import hermes_api
+from .board_status import label as status_label
 from .messages import human_age, t
 from .settings import Settings
 from .store import Store
-from .waits import held_behind, human_block
+from .waits import board_active, held_behind, human_block, ladder_anchor
 
 _CLOSED = frozenset({"done", "archived"})
 # Events that carry no news about the card itself.
@@ -242,12 +243,17 @@ def _wait(conn, board, task, store, now, settings) -> Condition:
         return Condition("wait", True, t("explain.wait.none"))
     age = _age(now, row["started_at"])
     owner = row.get("owner") or settings.owner_for(board)
+    statuses = store.board_statuses()
+    if not board_active(board, statuses):
+        status = status_label(statuses[board]["status"]).lower()
+        return Condition("wait", False, t("explain.wait.paused", owner=owner, age=human_age(age), status=status))
+    ladder = _age(now, ladder_anchor(row, statuses))  # the ladder restarts at a reactivation
     return Condition(
         "wait",
         False,
         t(
             "explain.wait.active", owner=owner, age=human_age(age),
-            next=human_age(_next_reminder_in(age, settings, row, now, _digest_period(conn, task, settings))),
+            next=human_age(_next_reminder_in(ladder, settings, row, now, _digest_period(conn, task, settings))),
         ),
     )
 

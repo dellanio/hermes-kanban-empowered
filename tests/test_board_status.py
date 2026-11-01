@@ -373,3 +373,241 @@ def test_hook_refusal_keeps_a_real_card_ready(kanban_home, tmp_path):
             assert refused and "Kanban Empowered" in str(refused[-1].payload)
     finally:
         manager._hooks["kanban_pre_claim"].remove(hook)
+
+
+# -- reminders: no ladder on a non-active board, restart on reactivation ----------------------------
+H = 3600
+D = 86400
+
+
+def _tracker(tmp_path):
+    from ke import hermes_api
+    from ke.store import Store
+    from ke.waits import WaitTracker
+
+    settings = settings_for_test(tmp_path)
+    store = Store(settings.shared_state_dir / "state.db")
+    return WaitTracker(settings, store, hermes_api), store
+
+
+def _blocked(board="default", **kw):
+    from ke import hermes_api
+    from test_waits import make_human_block
+
+    with hermes_api.connect(board) as conn:
+        tid, ev = make_human_block(conn, **kw)
+    return tid, ev
+
+
+@pytest.mark.parametrize("status", ["suspended", "done"])
+def test_tracker_sends_nothing_for_a_non_active_board(kanban_home, clock, tmp_path, status):
+    wt, store = _tracker(tmp_path)
+    tid, ev = _blocked()
+    clock.now = float(ev.created_at)
+    wt.sync(clock.now)
+    store.set_board_status("default", status, int(clock.now), "cli")
+    for offset in (1800, 9 * H, 3 * D):
+        clock.now = ev.created_at + offset
+        wt.sync(clock.now)
+        assert wt.collect_due(clock.now) == [], offset
+    assert store.latest_wait("default", tid) is not None  # still tracked, only silent
+
+
+def test_reactivation_restarts_the_ladder_from_the_reactivation_time(kanban_home, clock, tmp_path):
+    wt, store = _tracker(tmp_path)
+    tid, ev = _blocked()
+    t0 = ev.created_at
+    wt.sync(float(t0))
+    (due,) = wt.collect_due(float(t0 + 9 * H))
+    assert due.stage == "escalation"
+    wt.mark_sent(due, float(t0 + 9 * H))
+    store.set_board_status("default", "suspended", t0 + 10 * H, "desktop")
+    assert wt.collect_due(float(t0 + 3 * D)) == []
+    back = t0 + 4 * D
+    store.set_board_status("default", "active", back, "desktop")
+
+    def stages(at):
+        wt.sync(float(at))
+        return [d.stage for d in wt.collect_due(float(at))]
+
+    assert stages(back) == []  # no instant flood of the old stages
+    assert stages(back + 1799) == []
+    (first,) = wt.collect_due(float(back + 1800))
+    assert first.stage == "reminder1"
+    assert first.age_s == back + 1800 - t0  # the message still tells the real age of the request
+    wt.mark_sent(first, float(back + 1800))
+    assert stages(back + 7199) == []
+    assert stages(back + 7200) == ["reminder2"]
+    wt.mark_sent(wt.collect_due(float(back + 7200))[0], float(back + 7200))
+    assert stages(back + 8 * H) == ["escalation"]
+
+
+def test_a_block_newer_than_the_reactivation_keeps_its_own_clock(kanban_home, clock, tmp_path):
+    wt, store = _tracker(tmp_path)
+    store.set_board_status("default", "suspended", 1, "cli")
+    store.set_board_status("default", "active", 2, "cli")
+    tid, ev = _blocked()
+    wt.sync(float(ev.created_at))
+    assert [d.stage for d in wt.collect_due(float(ev.created_at + 1800))] == ["reminder1"]
+
+
+def test_other_boards_keep_their_reminders(kanban_home, clock, tmp_path):
+    from hermes_cli import kanban_db_boards as kbb
+
+    kbb.create_board("side")
+    wt, store = _tracker(tmp_path)
+    frozen, ev1 = _blocked("side")
+    live, ev2 = _blocked("default")
+    store.set_board_status("side", "suspended", 1, "cli")
+    start = max(ev1.created_at, ev2.created_at)
+    wt.sync(float(start))
+    assert [(d.board, d.task_id) for d in wt.collect_due(float(start + 1800))] == [("default", live)]
+
+
+OWNER_CHAT = 111
+
+
+class _Api:
+    """The real adapter, with the veto hooks reported present (no setup alert in the way)."""
+
+    def __init__(self):
+        from ke import hermes_api
+
+        self._api = hermes_api
+
+    def veto_hooks_available(self):
+        return True
+
+    def __getattr__(self, name):
+        return getattr(self._api, name)
+
+
+def _coordinator(tmp_path, clock, fake_tg, **kw):
+    from conftest import make_coordinator
+
+    kw.setdefault("owner_ids", {"sponsor": OWNER_CHAT})
+    return make_coordinator(tmp_path, clock=clock, telegram=fake_tg, api=_Api(), **kw)
+
+
+def test_coordinator_sends_no_reminder_for_a_suspended_board_then_resumes(kanban_home, clock, tmp_path, fake_tg):
+    coord = _coordinator(tmp_path, clock, fake_tg)
+    tid, ev = _blocked()
+    clock.now = float(ev.created_at)
+    coord.evaluate(clock.now)
+    coord.store.set_board_status("default", "suspended", int(clock.now), "desktop")
+    for hours in (1, 3, 9, 30):
+        clock.now = float(ev.created_at + hours * H)
+        coord.evaluate(clock.now)
+    assert fake_tg.count("send") == 0  # no reminder, escalation or digest
+    back = ev.created_at + 31 * H
+    coord.store.set_board_status("default", "active", back, "desktop")
+    clock.now = float(back + 60)
+    coord.evaluate(clock.now)
+    assert fake_tg.count("send") == 0
+    clock.now = float(back + 1800)
+    coord.evaluate(clock.now)
+    assert fake_tg.count("send") == 1
+    assert coord.store.latest_wait("default", tid)["stage"] == "reminder1"
+
+
+def test_no_escalation_setup_alert_for_a_suspended_boards_old_wait(kanban_home, clock, tmp_path, fake_tg):
+    coord = _coordinator(tmp_path, clock, fake_tg, escalate_to=None)
+    tid, ev = _blocked()
+    coord.store.set_board_status("default", "suspended", 1, "cli")
+    clock.now = float(ev.created_at)
+    coord.evaluate(clock.now)
+    clock.now = float(ev.created_at + 9 * H)
+    coord.evaluate(clock.now)
+    assert fake_tg.count("send") == 0
+    assert coord.store.kv_get("setup_escalation_no_target_sent") is None
+
+
+def test_no_layout_resend_for_a_suspended_board(kanban_home, clock, tmp_path, fake_tg):
+    coord = _coordinator(tmp_path, clock, fake_tg)
+    tid, ev = _blocked()
+    clock.now = float(ev.created_at)
+    coord.waits.sync(clock.now)
+    coord.store.mark_wait_sent("default", tid, int(ev.id), "reminder1", int(clock.now))
+    coord.store.set_board_status("default", "suspended", int(clock.now), "cli")
+    coord.store.kv_set("template_version", "0")  # an older layout: open waits would be re-sent once
+    clock.now += 60
+    coord.evaluate(clock.now)
+    assert fake_tg.count("send") == 0
+
+
+def test_explain_says_the_reminders_are_paused(kanban_home, clock, tmp_path):
+    from ke import conditions, hermes_api
+
+    wt, store = _tracker(tmp_path)
+    tid, ev = _blocked()
+    wt.sync(float(ev.created_at))
+    store.set_board_status("default", "suspended", 1, "cli")
+    with hermes_api.connect("default") as conn:
+        cc = conditions.explain(conn, "default", tid, store, ev.created_at + 600, settings_for_test(tmp_path))
+    wait = next(c for c in cc.conditions if c.name == "wait")
+    assert "reminders paused (project suspended)" in wait.text and "next reminder" not in wait.text
+
+
+def test_explain_next_reminder_is_anchored_to_the_reactivation(kanban_home, clock, tmp_path):
+    from ke import conditions, hermes_api
+
+    wt, store = _tracker(tmp_path)
+    tid, ev = _blocked()
+    wt.sync(float(ev.created_at))
+    back = ev.created_at + 2 * D
+    store.set_board_status("default", "suspended", ev.created_at + 1, "cli")
+    store.set_board_status("default", "active", back, "cli")
+    with hermes_api.connect("default") as conn:
+        cc = conditions.explain(conn, "default", tid, store, back + 600, settings_for_test(tmp_path))
+    wait = next(c for c in cc.conditions if c.name == "wait")
+    assert "next reminder in 20 min" in wait.text, wait.text
+
+
+# -- live panel ---------------------------------------------------------------------------------------
+def test_panel_snapshot_excludes_non_active_boards_and_counts_them(kanban_home, tmp_path):
+    from hermes_cli import kanban_db_boards as kbb
+    from ke import hermes_api as h
+    from ke.panel import build_snapshot
+    from test_conditions import _claim
+    from conftest import create_task
+
+    kbb.create_board("voz-hermes")
+    kbb.create_board("portal")
+    store = _store(tmp_path)
+    live, _ = _blocked("default", title="live wait")
+    _blocked("voz-hermes", title="frozen wait")
+    with h.connect("voz-hermes") as conn:
+        run_t = create_task(conn, title="still running", assignee="dev")
+        _claim(conn, run_t)
+    now = time.time()
+    store.upsert_guard_alert("voz-hermes", "t_guard", "active_pr", int(now) - 4000)
+    store.upsert_guard_alert("default", "t_guard2", "active_pr", int(now) - 4000)
+    store.set_board_status("voz-hermes", "suspended", 1, "cli")
+    store.set_board_status("portal", "done", 1, "cli")
+    store.set_board_status("archived-or-gone", "suspended", 1, "cli")  # not a live board: not counted
+    snap = build_snapshot(store, h, now + 1)
+    assert [w["task_id"] for w in snap.human_waits] == [live]
+    assert snap.running == []
+    assert [g["task_id"] for g in snap.held] == ["t_guard2"]
+    assert snap.suspended_boards == 2
+    store.close()
+
+
+def test_panel_text_ends_with_the_suspended_projects_line():
+    from ke.panel import render_telegram, render_terminal
+    from test_panel import snapshot_fixture
+
+    assert "suspended project" not in render_telegram(snapshot_fixture())
+    text = render_telegram(snapshot_fixture(suspended_boards=2))
+    assert "⏸ 2 suspended projects" in text
+    quiet = render_telegram(snapshot_fixture(suspended_boards=1, human_waits=[]))
+    assert quiet.rstrip().splitlines()[-1] == "⏸ 1 suspended project"  # the very last line when no reply hint
+    assert "⏸ 2 suspended projects" in render_terminal(snapshot_fixture(suspended_boards=2))
+
+
+def test_panel_suspended_line_in_pt_br(pt_br):  # noqa: F811
+    from ke.panel import render_telegram
+    from test_panel import snapshot_fixture
+
+    assert "⏸ 2 projetos suspensos" in render_telegram(snapshot_fixture(suspended_boards=2))
+    assert "⏸ 1 projeto suspenso" in render_telegram(snapshot_fixture(suspended_boards=1))

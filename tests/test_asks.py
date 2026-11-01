@@ -52,4 +52,8 @@ def test_the_template_in_every_language_is_parseable(pt_br):  # noqa: F811
 
     for template in (messages.EN["guard.template"], ask_template()):
         filled = "\n".join(line.split("<")[0] + "x" for line in template.splitlines()[1:])
-        assert parse_ask(filled) == Ask("x", "x", "x"), template
+        a = parse_ask(filled)
+        assert (a.need, a.why, a.reply) == ("x", "x", "x"), template
+        # the template also shows the optional fields, and they parse too
+        assert (a.subject, a.next_step) == ("x", "x"), template
+        assert a.options == (("A", "x"), ("B", "x")), template

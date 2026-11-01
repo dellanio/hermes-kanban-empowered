@@ -11,10 +11,15 @@ from .asks import ask_template, parse_ask
 # Used only if the i18n layer itself fails: the guard must always explain what it wants.
 _FALLBACK_MESSAGE = (
     "kanban-empowered: a block that waits on a person needs a structured ask.\n"
-    "Use exactly these three lines in the block reason:\n"
-    "Need: <what you need the person to do or tell you>\n"
-    "Why: <why the work cannot move without it>\n"
-    "How to reply: <how the person should answer, e.g. reply \"done\">"
+    "Use these lines in the block reason; the first three are required:\n"
+    "Need: <the action you need from the person, at most two sentences, no card ids>\n"
+    "Why: <why the work cannot move without it, one short sentence>\n"
+    "How to reply: <the word the person should reply, e.g. reply \"done\">\n"
+    "Subject: <optional: a short topic shown next to the board name>\n"
+    "Next step: <optional: what you will do once answered>\n"
+    "Options: <optional: one choice per line below>\n"
+    "A — <first choice>\n"
+    "B — <second choice>"
 )
 
 

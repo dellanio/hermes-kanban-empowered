@@ -33,9 +33,10 @@ gave_up, crashed, review or block_loop_detected messages.
   against; `doctor` prints both `hermes_compat` and the installed `hermes_head`), with the kanban
   enabled.
 - Optional: the core patch [`patches/0001-kanban-veto-hooks.patch`](patches/README.md). It adds the
-  `kanban_pre_claim` and `kanban_pre_complete` veto hooks. **v0.1 does not use them yet**: the
-  patch is inert and the plugin behaves the same with or without it. Without the patch, `doctor`
-  reports `veto_hooks: missing` and the coordinator warns once (log and Telegram).
+  `kanban_pre_claim` and `kanban_pre_complete` veto hooks. v0.1 uses only `kanban_pre_claim`, to hold
+  new claims on a Suspended or Done project (see "Project status"); everything else behaves the same
+  with or without the patch. Without it, `doctor` reports `veto_hooks: missing` and the coordinator
+  warns once (log and Telegram).
 - Python standard library only (no extra dependencies).
 
 ## Install
@@ -229,6 +230,26 @@ the Desktop half enabled in **Capabilities > Plugins**.
 
 Texts follow the plugin language (`language`, else Hermes'); the product name is not translated.
 
+### Project status (Active / Suspended / Done)
+
+Hermes boards have no lifecycle status, so the plugin keeps one per board in its own state
+(`state.db`; `board.json` is never touched). A board without a status is **Active**. Set it from
+the **Projects** button of the dashboard or with `hermes kanban-empowered board-status`.
+
+A **Suspended** or **Done** board:
+
+- leaves **Needs you** and the four counters; its items go to the collapsed **Suspended projects (N)**
+  section, tagged with the status, and can still be opened and answered;
+- gets no Telegram reminders, escalations or digests for its waits, and the pinned panel leaves it out
+  (one line "N suspended projects" at the end). Infrastructure alerts are unaffected;
+- has its new claims held through the core veto hook `kanban_pre_claim` (the card stays *ready*, with a
+  `claim_refused` event "Project suspended in Kanban Empowered — reactivate it to continue."); workers
+  already running finish normally. Without the veto hooks patch (`doctor`: `veto_hooks: missing`) claims
+  are not held; the rest still applies.
+
+Back to **Active**, claims flow again and the open waits restart their reminder ladder from that moment
+(first reminder one first stage later, no burst of the stages missed meanwhile).
+
 ## Commands
 
 | Command | What it does |
@@ -238,6 +259,7 @@ Texts follow the plugin language (`language`, else Hermes'); the product name is
 | `hermes kanban-empowered status [--watch]` | Running cards, human waits, guarded cards, resolved today. `--watch` redraws the live panel every 5 s until Ctrl+C. |
 | `hermes kanban-empowered done <card> [--board B]` | Resolve a card's open human wait, exactly like a `done` reply on Telegram (same version checks). |
 | `hermes kanban-empowered release <card> --to <profile> [--board B]` | Hand a card held by a respawn guard (`active_pr`, `blocker_auth`) to another profile. |
+| `hermes kanban-empowered board-status [<board> [active\|suspended\|done]]` | Without arguments, every board with its project status; with a board, its status; with a status (also `ativo`, `suspenso`, `concluido`), set it. |
 
 ### Telegram replies
 
@@ -271,7 +293,7 @@ with its author.
 |---|---|
 | `hermes_compat` | Hermes revision this plugin version targets. |
 | `hermes_head` | Installed Hermes revision (`unknown` if it cannot be read). |
-| `veto_hooks` | `present` / `missing` (the core patch; inert in v0.1). |
+| `veto_hooks` | `present` / `missing` (the core patch; v0.1 uses `kanban_pre_claim` to hold claims on suspended/done projects). |
 | `coordinator` | PID of the process holding the leader lock, or `none`. |
 | `active_profile` | Profile of the process running `doctor`. |
 | `coordinator_profile` | Configured coordinator profile. |
@@ -279,6 +301,7 @@ with its author.
 | `profiles_with_plugin` | Profiles where the plugin directory exists and `config.yaml` enables it (`plugins.enabled`, not in `plugins.disabled`) or has a `plugins.entries.kanban-empowered` section. |
 | `telegram_token` | `present` / `missing`: `TELEGRAM_BOT_TOKEN` in **this** process (the token itself is never printed). |
 | `owner_chats` | Number of entries in `telegram.owner_ids`. |
+| `boards_suspended` | Boards whose project status is Suspended or Done (`slug`, `slug (Done)`), or `none`. Read-only. |
 | `telegram_path` | Only once a Telegram client has recorded one: how the Bot API was reached last, `<host> (hostname)` or `<ip> (IPv4 fallback)`. |
 | `config_conflict` | One row per settings-form value that shadows a different `config.yaml` value, or a `telegram_owner_id` that `telegram.owner_ids` leaves unused. |
 | `config` | Only when the settings are invalid: the error. The plugin then runs the worker guard on defaults and does not start the coordinator. |

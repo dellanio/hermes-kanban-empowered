@@ -34,7 +34,8 @@ router = APIRouter()
 
 _ROOT = Path(__file__).resolve().parent.parent  # the plugin package (plugin.yaml, ke/, locales/)
 _PRIVATE_PKG = "kanban_empowered_dashboard_pkg"
-_lock = threading.Lock()
+_lock = threading.Lock()  # the Store cache
+_load_lock = threading.Lock()  # the private package import (never taken while _lock is held by this module)
 _stores: dict[str, Any] = {}
 
 
@@ -51,7 +52,7 @@ def _ke_package() -> str:
                 return name
         except OSError:
             continue
-    with _lock:
+    with _load_lock:
         if _PRIVATE_PKG not in sys.modules:
             spec = importlib.util.spec_from_file_location(
                 _PRIVATE_PKG, _ROOT / "__init__.py", submodule_search_locations=[str(_ROOT)]
@@ -78,10 +79,11 @@ def _context():
     _ke("hermes_api").ensure_locales(_ROOT / "locales")
     settings = dashboard.load_settings()
     path = str(Path(settings.shared_state_dir) / "state.db")
+    store_cls = _ke("store").Store  # resolved before taking the cache lock
     with _lock:
         store = _stores.get(path)
         if store is None:
-            store = _ke("store").Store(Path(path))
+            store = store_cls(Path(path))
             _stores[path] = store
     return dashboard, settings, store
 

@@ -493,3 +493,21 @@ def test_answer_classification_matches_telegram_exactly(client):
         assert expected[classify(text, parse_ask(ASK_OPTIONS))[0]] == outcome
         tid, version = _waiting(ASK_OPTIONS)
         assert _answer(client, tid, version, text=text).json()["result"] == outcome, text
+
+
+def test_private_package_path_without_the_agent_half(client, api_mod, monkeypatch):
+    """No ``ke`` loaded in the process (the dashboard on its own): the router imports a private copy
+    and keeps answering (regression: the Store cache lock was re-taken while importing)."""
+    import threading
+
+    for name in [n for n in sys.modules if n == "ke" or n.startswith("ke.")]:
+        monkeypatch.delitem(sys.modules, name)
+    results = []
+    worker = threading.Thread(target=lambda: results.extend(client.get(PREFIX + "/settings").status_code
+                                                            for _ in range(2)), daemon=True)
+    worker.start()
+    worker.join(60)
+    assert results == [200, 200], "the private-package path deadlocked or failed"
+    assert api_mod._ke_package() == api_mod._PRIVATE_PKG + ".ke"
+    for name in [n for n in sys.modules if n == api_mod._PRIVATE_PKG or n.startswith(api_mod._PRIVATE_PKG + ".")]:
+        sys.modules.pop(name, None)

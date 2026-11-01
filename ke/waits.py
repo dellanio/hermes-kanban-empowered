@@ -15,10 +15,13 @@ appends a ``blocked`` event), it becomes a wait counted from that event.
 
 Deadlines, counted from the start of the wait: one reminder per ``Settings.reminders_s``
 entry (30 min, 2 h), the escalation at ``escalate_after_s`` (8 h), then a digest every
-``digest_every_s`` (daily). :meth:`WaitTracker.collect_due` is pure with respect to the
+``digest_every_s`` (daily; ``blocking_digest_s`` for a wait that holds other cards back). The
+first digest is due ``digest`` after the escalation, each later one ``digest`` after the previous
+digest was sent. :meth:`WaitTracker.collect_due` is pure with respect to the
 sent state: it reports the highest stage already due and not yet sent, at most one per
 wait, and only :meth:`WaitTracker.mark_sent` advances it. After a gateway outage every
-overdue stage therefore collapses into a single message.
+overdue stage therefore collapses into a single message, and a wait first seen when it is
+already old gets one message at once (its highest stage) and the digest cadence from then on.
 """
 from __future__ import annotations
 
@@ -161,11 +164,11 @@ class WaitTracker:
         stages.sort(key=lambda p: p[0])  # stable: an escalation tied with a reminder stays last
         return stages
 
-    def _highest_due_stage(self, age: int) -> Optional[tuple[str, int, int]]:
+    def _highest_due_stage(self, age: int, digest: Optional[int] = None) -> Optional[tuple[str, int, int]]:
         """``(stage, offset, rank)`` of the latest deadline at or before ``age``, or ``None``."""
         fixed = self._fixed_stages()
         s = self.settings
-        digest = max(1, s.digest_every_s)
+        digest = max(1, s.digest_every_s if digest is None else digest)
         if age >= s.escalate_after_s + digest:
             k = (age - s.escalate_after_s) // digest
             return "digest", s.escalate_after_s + k * digest, len(fixed)
@@ -186,6 +189,24 @@ class WaitTracker:
             if name == stage:
                 return rank
         return -1
+
+    def _digest_period(self, row: dict, age: int) -> int:
+        """Digest period of a wait: ``blocking_digest_s`` when it holds other cards back, else ``digest_every_s``.
+
+        The cards held are only looked up when the two periods differ and a digest could be due.
+        """
+        s = self.settings
+        plain, blocking = max(1, s.digest_every_s), max(1, s.blocking_digest_s)
+        if plain == blocking or age < s.escalate_after_s + min(plain, blocking):
+            return plain
+        try:
+            with self.api.connect(row["board"]) as conn:
+                return blocking if held_behind(self.api, conn, row["task_id"]) else plain
+        except Exception:
+            log.exception(
+                "kanban-empowered: could not count the cards held by %s/%s", row["board"], row["task_id"]
+            )
+            return plain
 
     # -- sync ----------------------------------------------------------------
     def sync(self, now: float) -> None:
@@ -229,17 +250,19 @@ class WaitTracker:
         for row in self.store.all_waits():
             try:
                 age = max(0, int(now - row["started_at"]))
-                hit = self._highest_due_stage(age)
+                digest = self._digest_period(row, age)
+                hit = self._highest_due_stage(age, digest)
                 if hit is None:
                     continue
                 stage, offset, rank = hit
                 sent = self._rank(row["stage"])
                 if sent > rank:
                     continue
-                if sent == rank and not (
-                    stage == "digest" and (row["last_sent_at"] or 0) < row["started_at"] + offset
-                ):
-                    continue
+                if sent == rank:
+                    # only a digest repeats, one period after the previous one was sent
+                    last = row["last_sent_at"]
+                    if stage != "digest" or (last is not None and now - last < digest):
+                        continue
                 due = self._build(row, stage, age)
                 if due is not None:
                     out.append(due)
@@ -248,6 +271,12 @@ class WaitTracker:
                     "kanban-empowered: could not evaluate wait %s/%s", row["board"], row["task_id"]
                 )
         return out
+
+    def due_for(self, row: dict, now: float) -> Optional[Due]:
+        """A :class:`Due` for ``row`` as it stands now (its current stage), for a re-send in the current
+        message format; ``None`` when the card is not that human wait any more."""
+        age = max(0, int(now - row["started_at"]))
+        return self._build(row, row["stage"] or "reminder1", age)
 
     def _build(self, row: dict, stage: str, age: int) -> Optional[Due]:
         board, tid, version = row["board"], row["task_id"], row["version"]

@@ -151,3 +151,4 @@ kanban_empowered.guard.template: "Use these lines in the block reason; the first
 kanban_empowered.config.head: "⚙️ KANBAN · SETUP"
 kanban_empowered.config.veto: "👉 Re-apply the kanban veto hooks patch to this Hermes build, then check with: hermes kanban-empowered doctor\nUntil then the guards run in cooperative mode only."
 kanban_empowered.config.escalation_no_chat: "👉 Add a Telegram chat id for the escalation contact (telegram.owner_ids).\nIt is configured but has no chat id, so escalations reach nobody else."
+kanban_empowered.config.escalation_no_target: "👉 A request has been waiting past the escalation time, but no escalation contact is set, so it reaches only you.\nSet escalate_to (and its chat id in telegram.owner_ids) in the plugin settings."

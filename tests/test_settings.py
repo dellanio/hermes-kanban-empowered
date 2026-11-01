@@ -100,7 +100,8 @@ SECTION_8 = {
     "telegram": {"owner_ids": {"ana": 111, "bob": 222}, "pin_live_panel": False,
                  "quiet_hours": None, "reply_ttl": "2d"},
     "waits": {"default_owner": "ana", "reminders": ["10m", "1h"], "escalate_after": "4h",
-              "escalate_to": "bob", "digest": "weekly", "require_structured_ask": False,
+              "escalate_to": "bob", "digest": "weekly", "blocking_digest_every": "6h",
+              "require_structured_ask": False,
               "human_kinds": ["needs_input", "approval"]},
     "guards": {"alert_after": "15m"},
     "infra_failures": {"undo_budget": {"count": 5, "window": "12h"},
@@ -120,7 +121,7 @@ def _assert_section8(s):
     assert s.owner_for("projeto-x") == "bob"
     assert s.owner_for("outro") == "ana" and s.owner_for("desconhecido") == "ana"
     assert s.reminders_s == (600, 3600) and s.escalate_after_s == 14400
-    assert s.escalate_to == "bob" and s.digest_every_s == 604800
+    assert s.escalate_to == "bob" and s.digest_every_s == 604800 and s.blocking_digest_s == 21600
     assert s.require_structured_ask is False and s.human_kinds == ("needs_input", "approval")
     assert s.guard_alert_after_s == 900
     assert s.infra_undo_count == 5 and s.infra_undo_window_s == 43200

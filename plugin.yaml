@@ -64,6 +64,11 @@ config_schema:
     label: "Digest every"
     default: daily
     description: "Summary of open waits after the escalation: daily, hourly, weekly or a duration like 12h."
+  blocking_digest_every:
+    type: str
+    label: "Digest every (waits that block cards)"
+    default: ""
+    description: "Digest interval for waits that hold other cards back: daily, hourly, weekly or a duration like 6h. Empty = same as Digest every."
   escalate_to:
     type: str
     label: "Escalate to"

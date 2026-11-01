@@ -16,6 +16,7 @@ import time
 from typing import Any, Callable, Optional
 
 from . import hermes_api, panel
+from . import messages as msgs
 from .guards_watch import GuardWatch
 from .infra import InfraRecovery
 from .messages import branded, render_config_alert, render_guard_chunks, render_infra_alert, render_waits_chunks
@@ -29,6 +30,7 @@ log = logging.getLogger(__name__)
 EVAL_INTERVAL_S = 30
 STEP_ORDER = ("waits", "guards", "infra", "panel")
 MAX_MESSAGES_PER_PASS = 3  # Telegram messages per recipient per evaluation (tick time is bounded)
+TEMPLATE_KEY = "template_version"  # kv: the reminder layout version (messages.MESSAGE_TEMPLATE_VERSION) in use
 VETO_RETRY_S = 600  # back-off between failed attempts to send a setup alert (veto hooks, escalation contact)
 COPY_RETRY_S = 600  # back-off between failed attempts to send one escalation copy
 TERMINAL_HTTP = (400, 403)  # chat not found, bot blocked: retrying cannot help
@@ -85,7 +87,82 @@ class Coordinator:
     def _waits_step(self, now: float) -> None:
         self.waits.sync(now)
         self.pending_dues = self.waits.collect_due(now)
-        self._deliver_waits(now)
+        counts: dict[str, int] = {}  # messages per recipient this pass, shared by the re-send and the reminders
+        self._resend_template(now, counts)
+        self._deliver_waits(now, counts)
+        self._check_escalation_setup(now)
+
+    # -- reminder layout version -----------------------------------------------------
+    @staticmethod
+    def _template_marker(board: str, task_id: str, version: int) -> str:
+        return f"tmpl:{msgs.MESSAGE_TEMPLATE_VERSION}:{board}:{task_id}:{version}"
+
+    def _resend_template(self, now: float, counts: dict[str, int]) -> None:
+        """After a change of the reminder layout, send each open wait once more in the current one.
+
+        A wait already messaged (``stage`` set) was last shown in the layout of its time: the owner may
+        have missed the news (or only ever seen an old-format message). Waits that are due now are left
+        to the normal reminder (the current layout). The re-send is grouped per owner, recorded as
+        ``sent_messages`` (so replies resolve) and does NOT touch ``waits.stage``/``last_sent_at``: it is
+        not a stage. One kv marker per wait and layout version makes it idempotent across passes;
+        ``kv template_version`` is written only once every wait has been delivered, so a failed send is
+        retried and a delivered one never repeated.
+        """
+        current = str(msgs.MESSAGE_TEMPLATE_VERSION)
+        if self.store.kv_get(TEMPLATE_KEY) == current:
+            return
+        due_now = {(d.board, d.task_id, d.version) for d in self.pending_dues}
+        todo = []
+        for row in self.store.all_waits():
+            key = (row["board"], row["task_id"], row["version"])
+            if row["stage"] is None or key in due_now or self.store.kv_get(self._template_marker(*key)):
+                continue
+            todo.append(row)
+        if todo:
+            if self._tg_down or not self._telegram_ready():
+                return
+            by_owner: dict[str, list] = {}
+            for row in todo:
+                try:
+                    due = self.waits.due_for(row, now)
+                except Exception:
+                    log.exception(
+                        "kanban-empowered: could not rebuild wait %s/%s for the re-send", row["board"], row["task_id"]
+                    )
+                    return  # not done: retried on the next evaluation
+                if due is None:
+                    continue  # resolved or re-blocked since the sync: nothing to re-send
+                by_owner.setdefault(due.owner, []).append(due)
+
+            def delivered(d: Due) -> None:
+                self.store.kv_set(self._template_marker(d.board, d.task_id, d.version), "1")
+
+            for owner, group in by_owner.items():
+                if self._tg_down:
+                    break
+                self._send_group(owner, owner, group, now, counts, on_sent=delivered)
+            if any(
+                not self.store.kv_get(self._template_marker(d.board, d.task_id, d.version))
+                for group in by_owner.values() for d in group
+            ):
+                return
+        self.store.kv_set(TEMPLATE_KEY, current)
+
+    def _check_escalation_setup(self, now: float) -> None:
+        """A wait reached the escalation stage but there is nobody to escalate to: one setup alert.
+
+        The owner still gets the reminder; this tells them (once, in a message of its own) why nobody
+        else was reached. A configured contact without a chat id has its own alert (``_check_setup``).
+        """
+        if self.settings.escalate_to is not None or self.store.kv_get("setup_escalation_no_target_sent"):
+            return
+        after = self.settings.escalate_after_s
+        if not any(now - row["started_at"] >= after for row in self.store.all_waits()):
+            return
+        self._send_setup_alert(
+            "escalation_no_target", now,
+            sent_key="setup_escalation_no_target_sent", try_key="setup_escalation_no_target_try",
+        )
 
     # -- respawn guards ------------------------------------------------------------
     def _guards_step(self, now: float) -> None:
@@ -366,7 +443,7 @@ class Coordinator:
         except Exception:
             log.exception("kanban-empowered: could not record sent message %s", message_id)
 
-    def _deliver_waits(self, now: float) -> None:
+    def _deliver_waits(self, now: float, counts: Optional[dict[str, int]] = None) -> None:
         """Send ``pending_dues`` grouped by owner; ``mark_sent`` only for what was actually sent.
 
         Whatever could not be sent stays in ``pending_dues`` (and unmarked, so the next
@@ -426,7 +503,7 @@ class Coordinator:
                 return False
 
         owner_sent: set[int] = set()  # id(due): the owner has the message (now or on an earlier pass)
-        counts: dict[str, int] = {}
+        counts = {} if counts is None else counts
         try:
             by_owner: dict[str, list[Due]] = {}
             for due in dues:
@@ -466,11 +543,20 @@ class Coordinator:
                     )
                     if done:
                         self.waits.mark_sent(due, now)
+                        self._template_current(due)
                         continue
                 except Exception:
                     log.exception("kanban-empowered: could not mark a reminder as sent")
                 remaining.append(due)
             self.pending_dues = remaining
+
+    def _template_current(self, due: Due) -> None:
+        """A reminder just sent is in the current layout: a pending layout re-send must not repeat it."""
+        try:
+            if self.store.kv_get(TEMPLATE_KEY) != str(msgs.MESSAGE_TEMPLATE_VERSION):
+                self.store.kv_set(self._template_marker(due.board, due.task_id, due.version), "1")
+        except Exception:
+            log.exception("kanban-empowered: could not record the layout version of a reminder")
 
     def _send_group(
         self,

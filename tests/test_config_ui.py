@@ -18,7 +18,7 @@ PLUGIN_ID = "kanban-empowered"
 
 FORM_FLAT_KEYS = {
     "language", "mode", "telegram_owner_id", "default_owner", "reminders", "escalate_after", "digest",
-    "escalate_to", "require_structured_ask", "pin_live_panel", "guard_alert_after",
+    "blocking_digest_every", "escalate_to", "require_structured_ask", "pin_live_panel", "guard_alert_after",
     "undo_budget_count", "undo_budget_window",
 }
 
@@ -67,7 +67,7 @@ def test_valid_config_has_no_schema_warnings():
 
     settings = {
         "language": "pt", "mode": "cooperative-only", "telegram_owner_id": 123456, "default_owner": "ana",
-        "reminders": "30m,2h", "escalate_after": "8h", "digest": "daily", "escalate_to": "bob",
+        "reminders": "30m,2h", "escalate_after": "8h", "digest": "daily", "blocking_digest_every": "6h", "escalate_to": "bob",
         "require_structured_ask": True, "pin_live_panel": True, "guard_alert_after": "30m",
         "undo_budget_count": 2, "undo_budget_window": "24h",
     }

@@ -151,3 +151,4 @@ kanban_empowered.guard.template: "Use estas linhas no motivo do bloqueio; as tr�
 kanban_empowered.config.head: "⚙️ KANBAN · CONFIGURAÇÃO"
 kanban_empowered.config.veto: "👉 Reaplique o patch dos hooks de veto do kanban neste Hermes e confira com: hermes kanban-empowered doctor\nAté lá as travas rodam só em modo cooperativo."
 kanban_empowered.config.escalation_no_chat: "👉 Cadastre o chat id do Telegram do contato de escalada (telegram.owner_ids).\nEle está configurado, mas sem chat id; as escaladas não chegam a mais ninguém."
+kanban_empowered.config.escalation_no_target: "👉 Há um pedido esperando além do tempo de escalada, mas nenhum contato de escalada está configurado; ele só chega a você.\nDefina escalate_to (e o chat id dele em telegram.owner_ids) nas configurações do plugin."

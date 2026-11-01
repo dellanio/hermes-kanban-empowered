@@ -9,6 +9,10 @@ kanban for a fleet of agent profiles:
   escalation after 8 h and a daily digest after that. The owner answers the reminder on Telegram,
   naming the item (`1 — conectei`, `3 — A`, or free text), or runs
   `hermes kanban-empowered done <card>`, and the card is unblocked.
+  When the reminder layout changes in a new plugin version, every open wait is sent once more in
+  the new layout (its stage is not advanced). A wait that holds other cards can get its digest on
+  its own cadence (`waits.blocking_digest_every`), and when a wait reaches the escalation with no
+  `escalate_to` configured, the owner gets one setup alert saying so.
 - **Stuck cards.** Cards held by Hermes' respawn guard (`active_pr`, `blocker_auth`) for more than
   30 min are reported to the owner, with a one-line command to hand them to another profile.
 - **Infrastructure failures.** When Hermes' failure breaker parks a card only because the host
@@ -120,6 +124,7 @@ plugins:
 | `waits.escalate_after` | `8h` | When the escalation goes out (to the owner, plus a copy to `escalate_to`). |
 | `waits.escalate_to` | none | Owner name that receives a read-only copy of escalations. It cannot resolve them. |
 | `waits.digest` | `daily` | Repeat interval after the escalation (`hourly`, `daily`, `weekly` or a duration). |
+| `waits.blocking_digest_every` | same as `waits.digest` | Digest interval for waits that hold other cards back (`hourly`, `daily`, `weekly` or a duration like `6h`). Empty = the same as `waits.digest`. |
 | `waits.human_kinds` | `[needs_input]` | Block kinds that wait on a person (an untyped block counts too). |
 | `waits.require_structured_ask` | `true` | The worker guard requires the three-line ask. |
 | `guards.alert_after` | `30m` | How long a respawn guard may hold a card before the owner is told. |
@@ -147,6 +152,7 @@ generated from the `config_schema` in [`plugin.yaml`](plugin.yaml). It edits the
 | Reminders (`30m,2h`) | `waits.reminders` |
 | Escalate after | `waits.escalate_after` |
 | Digest every | `waits.digest` |
+| Digest every (waits that block cards) | `waits.blocking_digest_every` |
 | Escalate to | `waits.escalate_to` |
 | Require structured ask | `waits.require_structured_ask` |
 | Pin live panel | `telegram.pin_live_panel` |

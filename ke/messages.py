@@ -17,6 +17,10 @@ import time
 
 PREFIX = "kanban_empowered."
 
+# Version of the layout of the human reminders. Bump it whenever the text of a reminder changes: the
+# coordinator then re-sends every open wait once, in the new format (see Coordinator._resend_template).
+MESSAGE_TEMPLATE_VERSION = 2
+
 EN: dict[str, str] = {
     # ages
     "age.s": "{n} s",
@@ -198,6 +202,11 @@ EN: dict[str, str] = {
     "config.escalation_no_chat": (
         "👉 Add a Telegram chat id for the escalation contact (telegram.owner_ids).\n"
         "It is configured but has no chat id, so escalations reach nobody else."
+    ),
+    "config.escalation_no_target": (
+        "👉 A request has been waiting past the escalation time, but no escalation contact is set, "
+        "so it reaches only you.\n"
+        "Set escalate_to (and its chat id in telegram.owner_ids) in the plugin settings."
     ),
 }
 

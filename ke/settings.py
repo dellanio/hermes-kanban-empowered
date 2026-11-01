@@ -131,6 +131,7 @@ _FORM_ALIASES: dict[str, str] = {
     "reminders": "waits.reminders",
     "escalate_after": "waits.escalate_after",
     "digest": "waits.digest",
+    "blocking_digest_every": "waits.blocking_digest_every",
     "escalate_to": "waits.escalate_to",
     "require_structured_ask": "waits.require_structured_ask",
     "pin_live_panel": "telegram.pin_live_panel",
@@ -176,6 +177,7 @@ def _nested_value(m: Mapping[str, Any], nested: str) -> Any:
 # How to compare a flat form value with its nested twin so "30m,2h" and [30m, 2h] are not a conflict.
 _NORMALIZERS: dict[str, Any] = {
     "reminders": lambda v: _durations(v), "digest": lambda v: _parse_digest(v),
+    "blocking_digest_every": lambda v: _parse_digest(v),
     "escalate_after": parse_duration, "guard_alert_after": parse_duration,
     "undo_budget_window": parse_duration, "undo_budget_count": int,
     "pin_live_panel": lambda v: _parse_bool(v, "pin_live_panel"),
@@ -261,6 +263,8 @@ class Settings:
     reminders_s: tuple[int, ...] = (1800, 7200)
     escalate_after_s: int = 28800
     digest_every_s: int = 86400
+    # digest cadence of waits that hold other cards back; None = the same as ``digest_every_s``
+    blocking_digest_every_s: Optional[int] = None
     escalate_to: str | None = None
     human_kinds: tuple[str, ...] = ("needs_input",)
     require_structured_ask: bool = True
@@ -278,6 +282,11 @@ class Settings:
     def __post_init__(self) -> None:
         if self.shared_state_dir is None:
             object.__setattr__(self, "shared_state_dir", default_shared_state_dir(self.coordinator_profile))
+
+    @property
+    def blocking_digest_s(self) -> int:
+        """Digest period of a wait that holds other cards back (``digest_every_s`` unless set)."""
+        return self.digest_every_s if self.blocking_digest_every_s is None else self.blocking_digest_every_s
 
     def owner_for(self, board: str) -> str:
         return self.board_owner.get(board) or self.default_owner
@@ -317,6 +326,7 @@ class Settings:
             undo_count = int(budget)
 
         digest = _get(m, "waits.digest")
+        blocking_digest = _get(m, "waits.blocking_digest_every")
         reminders = _get(m, "waits.reminders")
         human_kinds = _get(m, "waits.human_kinds")
         patterns = _get(m, "infra_failures.patterns")
@@ -349,6 +359,7 @@ class Settings:
             reminders_s=_durations(reminders) if reminders is not None else defaults.reminders_s,
             escalate_after_s=dur("waits.escalate_after", "escalate_after_s"),
             digest_every_s=_parse_digest(digest) if digest is not None else defaults.digest_every_s,
+            blocking_digest_every_s=_parse_digest(blocking_digest) if blocking_digest is not None else None,
             escalate_to=str(escalate_to) if escalate_to else None,
             human_kinds=_strs(human_kinds) if human_kinds is not None else defaults.human_kinds,
             require_structured_ask=flag("waits.require_structured_ask", "require_structured_ask"),
@@ -379,6 +390,7 @@ class Settings:
             "waits.reminders",
             "waits.escalate_after",
             "waits.digest",
+            "waits.blocking_digest_every",
             "waits.escalate_to",
             "waits.human_kinds",
             "waits.require_structured_ask",

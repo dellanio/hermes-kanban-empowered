@@ -448,7 +448,7 @@ def is_technical_reason(reason) -> bool:
 
 def reason_text(reason) -> str:
     """The block reason as human text, ``""`` when it is empty, a technical marker or only ids/symbols."""
-    text = str(reason or "").strip()
+    text = str(reason or "")[:_BODY_MAX * 4].strip()
     if not text or is_technical_reason(text):
         return ""
     return text if agent_text(text) else ""
@@ -460,7 +460,7 @@ def short_action(ask, reason: str = "", title: str = "") -> str:
     A structured ask gives its ``need``. Without one the action is the block reason when it is human
     text, else the card title; with neither the "(no reason given)" line.
     """
-    raw = ask.need if ask is not None else (reason_text(reason) or title)
+    raw = ask.need if ask is not None else (reason_text(reason) or str(title or "")[:_BODY_MAX])
     text = _clip_to(sentences(agent_text(raw)), _ACTION_MAX)
     return text or t("waits.no_reason")
 
@@ -490,15 +490,54 @@ def _reply_line(ask) -> str:
     return _sentence_end(text[:1].upper() + text[1:])
 
 
-_MD_LEAD_RE = re.compile(r"^[\s#>*\-_=`]+")
+_BODY_MAX = 1000  # characters of a card body (or title/reason) ever cleaned: the rest cannot reach a message
+_MIN_CONTEXT_LETTERS = 8  # a context line with fewer letters says nothing ("ok", "TODO")
+_FENCE_RE = re.compile(r"^\s*(```|~~~)")
+_HEADING_RE = re.compile(r"^\s{0,3}#{1,6}(\s|$)")
+_RULE_RE = re.compile(r"^\s*([-*_=])(\s*\1){2,}\s*$")
+_TABLE_RE = re.compile(r"^\s*\|.*$|^[\s|:\-]+$")
+_LIST_RE = re.compile(r"^\s*(?:[-*+]|\d{1,3}[.)])\s+")
+_LINK_RE = re.compile(r"!?\[([^\]\n]*)\]\([^)\n]*\)")
+_EMPH_RE = re.compile(r"\*\*|__|`|(?<!\w)_|_(?!\w)|(?<!\w)\*|\*(?!\w)")
+
+
+def _body_blocks(raw: str):
+    """Paragraph-like blocks of a markdown body: code fences, headings, rules and table rows are dropped."""
+    block: list[str] = []
+    in_fence = False
+    for line in raw.splitlines():
+        if _FENCE_RE.match(line):
+            in_fence = not in_fence
+            continue
+        if in_fence:
+            continue
+        if not line.strip():
+            if block:
+                yield block
+            block = []
+            continue
+        if _HEADING_RE.match(line) or _RULE_RE.match(line) or _TABLE_RE.match(line):
+            continue
+        block.append(line)
+    if block:
+        yield block
+
+
+def _plain(text: str) -> str:
+    text = re.sub(r"^\s*>+\s*", "", _LIST_RE.sub("", text, count=1))
+    return _EMPH_RE.sub("", _LINK_RE.sub(r"\1", text))
 
 
 def body_context(body, action: str = "") -> str:
-    """The first sentence of a card body as a context line (ids stripped, at most ``_CONTEXT_MAX``), ``""``
-    when there is none or it only repeats ``action``."""
-    text = _MD_LEAD_RE.sub("", agent_text(body))
-    first = _clip_to(sentences(text, 1), _CONTEXT_MAX)
-    return "" if not first or first == action else first
+    """The first sentence of the first useful paragraph of a card body as a context line (markdown noise and
+    ids stripped, at most ``_CONTEXT_MAX``), ``""`` when there is none or it only repeats ``action``."""
+    raw = str(body or "")[:_BODY_MAX]  # before any cleaning: a huge body must stay cheap
+    for block in _body_blocks(raw):
+        lines = [block[0]] if _LIST_RE.match(block[0]) else block  # a list contributes its first item
+        first = _clip_to(sentences(agent_text(" ".join(_plain(line) for line in lines)), 1), _CONTEXT_MAX)
+        if len(_LETTER_RE.findall(first)) >= _MIN_CONTEXT_LETTERS:
+            return "" if first == action else first
+    return ""
 
 
 def _context_line(ask, body="", action: str = "") -> str:

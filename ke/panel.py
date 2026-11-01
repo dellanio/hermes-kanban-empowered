@@ -84,7 +84,7 @@ def _enrich_waits(store: Store, api: Any, waits: list[dict]) -> list[dict]:
                     row = store.latest_wait(board, w["task_id"])
                     out.append({
                         **w, "version": int(row["version"]) if row else 0, "need": "", "held": 0,
-                        "hint": t("waits.default_word"), "display": board_title(board),
+                        "hint": t("waits.reply.example"), "display": board_title(board),
                     })
     return out
 

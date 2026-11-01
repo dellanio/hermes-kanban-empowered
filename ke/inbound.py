@@ -55,7 +55,7 @@ from typing import Any, Callable, Optional
 
 from . import panel
 from .asks import CONFIRM_WORDS, parse_ask, reply_words
-from .messages import EN, _clip_to, active_language, board_title, branded, render_answer, short_action, t
+from .messages import EN, _clip_to, active_language, board_title, branded, render_answer, reply_hint, short_action, t
 from .waits import block_version, current_block, display_name, held_behind
 
 log = logging.getLogger(__name__)
@@ -363,12 +363,12 @@ def _act(
         _reply(telegram, int(chat), int(message), t("inbound.panel_changed"))
         return
     if selected is None:
-        _reply(telegram, int(chat), int(message), t("inbound.which_item", n=len(items), word=t("waits.default_word")))
+        _reply(telegram, int(chat), int(message), t("inbound.which_item", n=len(items), word=_first_hint(api, items)))
         return
     board, task_id, version = str(selected["board"]), str(selected["task_id"]), int(selected["version"])
     body = (event.text or "").strip() if body is None else body
     try:
-        live, ask, reason, title = _item_ask(api, board, task_id, version)
+        live, ask, reason, card_title = _item_ask(api, board, task_id, version)
     except Exception:
         log.exception("kanban-empowered: reading %s/%s for a Telegram reply failed", board, task_id)
         _reply(telegram, int(chat), int(message), t("inbound.error"))
@@ -378,7 +378,7 @@ def _act(
         return
     kind, value = classify(body, ask)
     if kind in ("empty", "placeholder"):
-        _reply(telegram, int(chat), int(message), t("reply.empty", word=t("waits.default_word")))
+        _reply(telegram, int(chat), int(message), t("reply.empty", word=reply_hint(ask)))
         return
     if kind == "unknown_option":
         if ask is not None and ask.options:
@@ -418,10 +418,20 @@ def _act(
     if not done:
         _reply(telegram, int(chat), int(message), t("inbound.changed"))
         return
-    title = board_title(board, display_name(api, board), ask.subject if ask is not None else "")
-    action = _clip_to(short_action(ask, reason, title), _ACTION_SHOWN)
+    board_label = board_title(board, display_name(api, board), ask.subject if ask is not None else "")
+    action = _clip_to(short_action(ask, reason, card_title), _ACTION_SHOWN)
     _reply(telegram, int(chat), int(message),
-           render_answer(title, action, len(held), choice=value if kind == "option" else None))
+           render_answer(board_label, action, len(held), choice=value if kind == "option" else None))
+
+
+def _first_hint(api: Any, items: list) -> str:
+    """The reply example for "which item?": the first item's own word (a neutral placeholder when it has no ask)."""
+    try:
+        item = items[0]
+        _live, ask, _reason, _title = _item_ask(api, str(item["board"]), str(item["task_id"]), int(item["version"]))
+        return reply_hint(ask) if _live else t("waits.default_word")
+    except Exception:
+        return t("waits.default_word")
 
 
 def _item_ask(api: Any, board: str, task_id: str, version: int) -> tuple[bool, Any, str, str]:

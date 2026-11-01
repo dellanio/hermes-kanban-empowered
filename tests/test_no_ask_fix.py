@@ -108,7 +108,7 @@ def test_body_first_sentence_is_the_context_line():
 def test_long_body_context_is_clipped_to_200_and_markdown_noise_dropped():
     from ke.messages import render_waits
 
-    txt = render_waits("s", [live_due(body="## " + "palavra " * 80)])
+    txt = render_waits("s", [live_due(body="palavra " * 80)])
     ctx = txt.splitlines()[-1]
     assert ctx.startswith("palavra") and len(ctx) <= 200
 
@@ -291,3 +291,106 @@ def unbranded_text(rig):
     from conftest import unbranded
 
     return unbranded(rig.tg.last_text)
+
+
+# -- fix round 2 ------------------------------------------------------------------------------
+@pytest.fixture
+def rig_ask_less(kanban_home, tmp_path, fake_tg, clock):
+    from test_msg_format import Rig
+
+    return Rig(tmp_path, fake_tg, clock, ["initial_status"])
+
+
+@pytest.fixture
+def rig_ask_less2(kanban_home, tmp_path, fake_tg, clock):
+    from test_msg_format import Rig
+
+    return Rig(tmp_path, fake_tg, clock, ["initial_status", "dependency"])
+
+
+def test_confirmation_for_an_ask_less_card_names_the_card_title_and_the_board_once(rig_ask_less):
+    rig_ask_less.reply("feito")
+    assert _status(rig_ask_less.tids[0]) != "blocked"
+    text = unbranded_text(rig_ask_less)
+    assert text.splitlines()[0] == "✅ DEFAULT: card 0"
+    assert text.count("DEFAULT") == 1 and "t_" not in text
+
+
+def test_empty_reply_guidance_for_an_ask_less_item_is_neutral(rig_ask_less):
+    rig_ask_less.reply("<your answer>")
+    text = unbranded_text(rig_ask_less)
+    assert "<your answer>" in text and "done" not in text and "feito" not in text
+    assert _status(rig_ask_less.tids[0]) == "blocked"
+
+
+def test_empty_reply_guidance_for_a_structured_item_keeps_its_word(rig1):
+    rig1.reply("<your answer>")
+    assert "conectei" in unbranded_text(rig1)
+
+
+def test_which_item_guidance_for_ask_less_items_is_neutral(rig_ask_less2):
+    rig_ask_less2.reply("qualquer coisa")
+    text = unbranded_text(rig_ask_less2)
+    assert "<your answer>" in text and "done" not in text and "feito" not in text
+
+
+def test_which_item_guidance_for_ask_less_items_in_pt(rig_ask_less2, pt_br):  # noqa: F811
+    rig_ask_less2.reply("qualquer coisa")
+    text = unbranded_text(rig_ask_less2)
+    assert "<sua resposta>" in text and "feito" not in text
+
+
+def test_panel_fallback_hint_is_the_neutral_example(kanban_home, tmp_path):
+    from ke.panel import _enrich_waits
+    from ke.store import Store
+
+    class Broken:
+        def connect(self, board):
+            raise RuntimeError("locked")
+
+    store = Store(tmp_path / "state" / "state.db")
+    (w,) = _enrich_waits(store, Broken(), [{"board": "b", "task_id": "t_00000001"}])
+    assert w["hint"] == "<your answer>"
+
+
+@pytest.mark.parametrize("body, expected", [
+    ("# Contexto\n\nValidar o relatório do SBN antes do deploy.", "Validar o relatório do SBN antes do deploy."),
+    ("## A\n### B\nTexto útil do corpo. Mais.", "Texto útil do corpo."),
+    ("**Importante:** validar o relatório antes do deploy.", "Importante: validar o relatório antes do deploy."),
+    ("__Atenção__ confira o `relatório` final.", "Atenção confira o relatório final."),
+    ("1. Validar o relatório do SBN\n2. Liberar a fila", "Validar o relatório do SBN"),
+    ("- Validar o relatório do SBN\n- Liberar a fila", "Validar o relatório do SBN"),
+    ("| col | col |\n|---|---|\n| a | b |\n\nValidar o relatório do SBN.", "Validar o relatório do SBN."),
+    ("```\ncodigo qualquer aqui dentro\n```\nValidar o relatório do SBN.", "Validar o relatório do SBN."),
+    ("Veja [o relatório](https://x.example/r?id=1) e valide.", "Veja o relatório e valide."),
+    ("---\n\nValidar o relatório do SBN.", "Validar o relatório do SBN."),
+    ("> Validar o relatório do SBN.", "Validar o relatório do SBN."),
+    ("snake_case_name stays", "snake_case_name stays"),
+])
+def test_body_context_picks_the_first_useful_line(body, expected):
+    from ke.messages import body_context
+
+    assert body_context(body) == expected
+
+
+@pytest.mark.parametrize("body", [
+    "# So um titulo", "ok", "t_1a2b3c4d", "| a | b |\n|---|---|", "```\nfoo bar baz qux quux\n```",
+    "1234567890", "**ok**", "",
+])
+def test_body_context_none_when_nothing_useful(body):
+    from ke.messages import body_context
+
+    assert body_context(body) == ""
+
+
+def test_huge_body_is_truncated_before_cleaning_so_it_is_fast():
+    import time as _t
+
+    from ke.messages import body_context
+
+    t0 = _t.time()
+    out = body_context("deadbeef" * 200000 + " fim")
+    assert _t.time() - t0 < 2.0 and len(out) <= 200
+    t0 = _t.time()
+    assert body_context("a" * 5000 + ". " + "b" * 50) != "b" * 50
+    assert _t.time() - t0 < 2.0

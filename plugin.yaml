@@ -1,7 +1,7 @@
 manifest_version: 2
 name: kanban-empowered
 label: "Kanban Empowered"
-version: 0.1.1
+version: 0.2.0
 description: "Makes the Hermes kanban work for a fleet of agent profiles and a human in the loop. A card blocked on a person gets a structured ask with an owner and a deadline, Telegram reminders, an escalation and a digest, and the owner answers by replying to an item (1 - done, 3 - A, or free text) to unblock it. Cards held by Hermes' respawn guards are reported with a one-line hand-off command. When the host (gateway, worker persistence) rather than the task fails, infrastructure-failure recovery undoes the park within a per-card budget and raises one systemic alert on a burst. A pinned live panel plus explain and status commands show why a card is not moving. A Hermes Desktop dashboard (Empowered) shows what needs you and answers it from the app. Ships an optional core patch that adds kanban veto hooks."
 author: "dellanio"
 license: MIT

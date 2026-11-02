@@ -40,6 +40,7 @@ from .messages import (
 )
 from .settings import Settings
 from .store import Store
+from .chain import explain_block  # noqa: F401  (GET /chain)
 from .waits import Due, board_active, display_name, held_behind, human_block, ladder_anchor, wait_candidates
 
 log = logging.getLogger(__name__)

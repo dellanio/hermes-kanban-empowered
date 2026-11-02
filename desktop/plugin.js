@@ -212,6 +212,15 @@ const CSS = `
 .ke-metric-value { font-size: 1.5rem; font-weight: 650; line-height: 1.2; color: var(--ke-tone, var(--ui-text-primary)); }
 .ke-metric-label { color: var(--ui-text-secondary); font-size: 0.75rem; }
 .ke-cols { display: grid; grid-template-columns: minmax(0, 1.55fr) minmax(0, 1fr); gap: 14px; align-items: start; }
+.ke-card-actions { display: inline-flex; gap: 4px; flex: none; }
+.ke-chain-summary { color: var(--ui-text-secondary); font-size: 0.75rem; line-height: 1.5; margin-bottom: 8px; }
+.ke-chain-row { display: grid; grid-template-columns: repeat(auto-fit, minmax(130px, 1fr)); gap: 8px; }
+.ke-chain-arrow { text-align: center; color: var(--ui-text-quaternary); line-height: 1; padding: 5px 0; }
+.ke-chain-node { border: 1px solid var(--ui-stroke-tertiary); border-radius: 6px; padding: 7px 9px; min-width: 0;
+  background: var(--ui-bg-quaternary); display: flex; flex-direction: column; gap: 3px; }
+.ke-chain-root { border-color: var(--ui-yellow); border-left-width: 3px; }
+.ke-chain-start { color: var(--ui-yellow); font-size: 0.6875rem; font-weight: 600; }
+.ke-chain-name { font-weight: 600; font-size: 0.8125rem; overflow-wrap: anywhere; }
 .ke-col { display: flex; flex-direction: column; gap: 14px; min-width: 0; }
 .ke-section { border: 1px solid var(--ui-stroke-tertiary); border-radius: 10px; background: var(--ui-bg-quinary); min-width: 0; }
 .ke-section-head { display: flex; align-items: center; gap: 8px; padding: 10px 12px; border-bottom: 1px solid var(--ui-stroke-tertiary); }
@@ -347,7 +356,7 @@ function StatusTag({ status, t }) {
 }
 
 // -- needs you ----------------------------------------------------------------------------------
-function NeedCard({ item, t, onOpen }) {
+function NeedCard({ item, t, onOpen, onExplain }) {
   const paused = isPaused(item.board_status)
 
   if (item.kind === 'infra_exhausted') {
@@ -378,7 +387,15 @@ function NeedCard({ item, t, onOpen }) {
           className: 'ke-card-foot',
           children: [
             jsx('span', { children: item.attempts_text }),
-            jsx(Button, { size: 'xs', variant: 'ghost', onClick: () => onOpen(item, null), children: t('ui.needs.details') })
+            jsxs('span', {
+              className: 'ke-card-actions',
+              children: [
+                item.held_behind_count && onExplain
+                  ? jsx(Button, { size: 'xs', variant: 'ghost', onClick: () => onExplain(item), children: t('ui.chain.explain') })
+                  : null,
+                jsx(Button, { size: 'xs', variant: 'ghost', onClick: () => onOpen(item, null), children: t('ui.needs.details') })
+              ]
+            })
           ]
         })
       ]
@@ -437,14 +454,22 @@ function NeedCard({ item, t, onOpen }) {
         className: 'ke-card-foot',
         children: [
           jsx('span', { children: reminder }),
-          jsx(Button, { size: 'xs', variant: 'ghost', onClick: () => onOpen(item, null), children: t('ui.needs.details') })
+          jsxs('span', {
+            className: 'ke-card-actions',
+            children: [
+              item.held_behind_count && onExplain
+                ? jsx(Button, { size: 'xs', variant: 'ghost', onClick: () => onExplain(item), children: t('ui.chain.explain') })
+                : null,
+              jsx(Button, { size: 'xs', variant: 'ghost', onClick: () => onOpen(item, null), children: t('ui.needs.details') })
+            ]
+          })
         ]
       })
     ]
   })
 }
 
-function NeedsYou({ items, t, onOpen }) {
+function NeedsYou({ items, t, onOpen, onExplain }) {
   const waits = items.filter(i => i.kind === 'human_wait').length
 
   return jsx(Section, {
@@ -452,13 +477,13 @@ function NeedsYou({ items, t, onOpen }) {
     count: waits,
     tone: 'amber',
     children: items.length
-      ? items.map(item => jsx(NeedCard, { item, t, onOpen }, item.board + '/' + item.task_id))
+      ? items.map(item => jsx(NeedCard, { item, t, onOpen, onExplain }, item.board + '/' + item.task_id))
       : jsx(Empty, { text: t('ui.needs.empty') })
   })
 }
 
 // Items of suspended / done boards: a collapsed section (the open state is remembered per viewer).
-function SuspendedProjects({ items, t, onOpen }) {
+function SuspendedProjects({ items, t, onOpen, onExplain }) {
   const [open, setOpenState] = useState(() => storageGet('suspendedOpen', false) === true)
 
   if (!items.length) {
@@ -494,7 +519,7 @@ function SuspendedProjects({ items, t, onOpen }) {
       open
         ? jsx('div', {
             className: 'ke-section-body',
-            children: items.map(item => jsx(NeedCard, { item, t, onOpen }, item.board + '/' + item.task_id))
+            children: items.map(item => jsx(NeedCard, { item, t, onOpen, onExplain }, item.board + '/' + item.task_id))
           })
         : null
     ]
@@ -682,6 +707,70 @@ function Running({ rows, t }) {
 }
 
 // -- coordinator timeline -----------------------------------------------------------------------
+// "Explain the block": where the block starts and what it holds back, in the timeline's place.
+function BlockChain({ target, t, onClose }) {
+  const chain = useQuery({
+    queryKey: [ID, 'chain', target.board, target.task_id],
+    queryFn: () =>
+      api('/chain?board=' + encodeURIComponent(target.board) + '&task_id=' + encodeURIComponent(target.task_id)),
+    refetchInterval: POLL_MS,
+    retry: false
+  })
+  const data = chain.data
+
+  const node = (n, root) =>
+    jsxs(
+      'div',
+      {
+        className: root ? 'ke-chain-node ke-chain-root' : 'ke-chain-node',
+        children: [
+          root ? jsx('span', { className: 'ke-chain-start', children: t('ui.chain.starts_here') }) : null,
+          jsx('span', { className: 'ke-chain-name', title: n.title, children: n.short }),
+          jsx('span', { className: 'ke-sub', children: [n.status, n.assignee].filter(Boolean).join(' · ') }),
+          n.also_waits_on.length
+            ? jsx('span', { className: 'ke-sub', children: t('ui.chain.also', { names: n.also_waits_on.join(', ') }) })
+            : null
+        ]
+      },
+      n.task_id
+    )
+
+  return jsx(Section, {
+    title: t('ui.chain.title'),
+    tone: 'amber',
+    extra: jsx(Button, {
+      variant: 'ghost',
+      size: 'icon-xs',
+      title: t('ui.chain.back'),
+      'aria-label': t('ui.chain.back'),
+      onClick: onClose,
+      children: jsx(Codicon, { name: 'close' })
+    }),
+    children: !data
+      ? jsx('div', { className: 'ke-muted', children: chain.isLoading ? t('ui.loading') : t('ui.chain.empty') })
+      : jsxs(Fragment, {
+          children: [
+            jsx('div', { className: 'ke-chain-summary', children: data.summary }),
+            jsx('div', {
+              children: data.levels.map((row, i) =>
+                jsxs(
+                  Fragment,
+                  {
+                    children: [
+                      i ? jsx('div', { className: 'ke-chain-arrow', children: '↓' }) : null,
+                      jsx('div', { className: 'ke-chain-row', children: row.map(n => node(n, i === 0)) })
+                    ]
+                  },
+                  i
+                )
+              )
+            }),
+            data.held_count ? null : jsx(Empty, { text: t('ui.chain.empty') })
+          ]
+        })
+  })
+}
+
 function Timeline({ entries, t, nowS }) {
   return jsx(Section, {
     title: t('ui.section.timeline'),
@@ -1083,6 +1172,7 @@ function EmpoweredPage() {
   const [board, setBoardState] = useState(() => storageGet('board', 'all'))
   const [open, setOpen] = useState(null)
   const [projectsOpen, setProjectsOpen] = useState(false)
+  const [chain, setChain] = useState(null)
   const overview = useOverview(board, POLL_MS)
   const data = overview.data
 
@@ -1198,15 +1288,17 @@ function EmpoweredPage() {
             jsxs('div', {
               className: 'ke-col',
               children: [
-                jsx(NeedsYou, { items: data.needs_you || [], t, onOpen }),
-                jsx(SuspendedProjects, { items: data.suspended || [], t, onOpen }),
+                jsx(NeedsYou, { items: data.needs_you || [], t, onOpen, onExplain: setChain }),
+                jsx(SuspendedProjects, { items: data.suspended || [], t, onOpen, onExplain: setChain }),
                 jsx(Running, { rows: data.running || [], t })
               ]
             }),
             jsxs('div', {
               className: 'ke-col',
               children: [
-                jsx(Timeline, { entries: data.timeline || [], t, nowS }),
+                chain
+                  ? jsx(BlockChain, { target: chain, t, onClose: () => setChain(null) }, chain.board + '/' + chain.task_id)
+                  : jsx(Timeline, { entries: data.timeline || [], t, nowS }),
                 jsx(Infra, { infra: data.infra, t })
               ]
             })

@@ -13,6 +13,7 @@ Routes:
     GET  /overview?board=<slug|all>    -> metrics, needs_you, running, timeline, infra, boards
     GET  /count                        -> {needs_you, generated_at} (the Kanban header button's badge)
     GET  /item?board=&task_id=         -> one needs-you entry + reminder text, conditions, comments
+    GET  /chain?board=&task_id=        -> the cards a blocked card holds back, level by level
     POST /board-status {board, status} -> {ok, status, previous, changed}; 422 bad status, 404 unknown board
     POST /answer                       -> {result, message, overview_item_removed, held_behind_count};
                                           result: resolved | noted | ambiguous | changed | not_found | error
@@ -180,6 +181,15 @@ def get_item(board: str = Query(..., max_length=64), task_id: str = Query(..., m
     dashboard, settings, store = _context()
     try:
         return dashboard.item(settings, store, time.time(), board, task_id)
+    except LookupError:
+        raise HTTPException(status_code=404, detail="not_found")
+
+
+@router.get("/chain")
+def get_chain(board: str = Query(..., max_length=64), task_id: str = Query(..., max_length=64)) -> dict:
+    dashboard, _settings, _store = _context()
+    try:
+        return dashboard.explain_block(board, task_id)
     except LookupError:
         raise HTTPException(status_code=404, detail="not_found")
 

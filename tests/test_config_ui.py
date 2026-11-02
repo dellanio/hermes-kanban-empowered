@@ -86,7 +86,7 @@ def test_manifest_parses_with_no_warnings(caplog):
     assert m is not None
     assert [r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING] == []
     assert not [r for r in caplog.records if "unknown manifest field" in r.getMessage()]
-    assert m.manifest_version == 2 and m.version == "0.1.0" and m.license == "MIT"
+    assert m.manifest_version == 2 and m.version == "0.1.1" and m.license == "MIT"
     assert m.homepage == "https://github.com/dellanio/hermes-kanban-empowered"
     assert m.author == "dellanio" and set(m.config_schema) == FORM_FLAT_KEYS
     assert {"kanban", "telegram"} <= set(m.tags)

@@ -15,7 +15,7 @@ from .board_status import label as status_label
 from .messages import human_age, t
 from .settings import Settings
 from .store import Store
-from .waits import board_active, held_behind, human_block, ladder_anchor
+from .waits import WAIT_STATUSES, board_active, held_behind, human_block, ladder_anchor, wait_candidates
 
 _CLOSED = frozenset({"done", "archived"})
 # Events that carry no news about the card itself.
@@ -234,7 +234,7 @@ def _digest_period(conn, task, settings: Settings) -> int:
 
 
 def _wait(conn, board, task, store, now, settings) -> Condition:
-    row = store.latest_wait(board, task.id) if task.status == "blocked" else None
+    row = store.latest_wait(board, task.id) if task.status in WAIT_STATUSES else None
     if row is not None:
         block = human_block(task, _events(conn, task.id), settings)
         if block is None or block.version != int(row["version"]):
@@ -339,7 +339,7 @@ def fleet_status(store: Store, now: float, settings: Optional[Settings] = None, 
                             "heartbeat_age_s": _age(now, task.last_heartbeat_at) if task.last_heartbeat_at else None,
                         }
                     )
-                for task in api.list_tasks(conn, status="blocked"):
+                for task in wait_candidates(api, conn):
                     block = human_block(task, _events(conn, task.id, api), settings)
                     if block is None:  # the one definition of a human wait (shared with WaitTracker)
                         continue

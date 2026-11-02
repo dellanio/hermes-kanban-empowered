@@ -579,3 +579,57 @@ def test_current_block_of_a_breaker_park_carries_the_breaker_error(kanban_home, 
         block = current_block(hermes_api.task(conn, tid), hermes_api.events(conn, tid))
     assert block.breaker and block.version == gu.id and block.started_at == gu.created_at
     assert block.reason == "Gateway connection failed" and block.kind is None
+
+
+# -- block loop: Hermes routes a repeated block to triage ------------------------
+def _loop_card(conn):
+    """Block, unblock and re-block one card with the same kind: Hermes sends it to ``triage``."""
+    from hermes_cli import kanban_db as kb
+
+    tid, _ = make_human_block(conn, "Preciso: a\nPor quê: b\nComo responder: c")
+    assert kb.unblock_task(conn, tid)
+    assert kb.claim_task(conn, tid) is not None
+    assert block_task(conn, tid, reason="Preciso: d\nPor quê: e\nComo responder: f", kind="needs_input")
+    assert kb.get_task(conn, tid).status == "triage"
+    return tid
+
+
+def test_block_loop_in_triage_is_a_wait_with_reminders(kanban_home, clock, tmp_path):
+    from ke import hermes_api
+
+    wt, store, _ = _tracker(tmp_path)
+    with hermes_api.connect("default") as conn:
+        tid = _loop_card(conn)
+        ev = max((e for e in hermes_api.events(conn, tid) if e.kind == "block_loop_detected"), key=lambda e: e.id)
+    _start(clock, ev)
+    wt.sync(clock.now)
+    assert store.latest_wait("default", tid)["version"] == ev.id
+    clock.advance(1800)
+    due = wt.collect_due(clock.now)
+    assert _stages(due) == ["reminder1"] and "d" in due[0].ask.need
+
+
+def test_plain_triage_card_is_not_a_wait(kanban_home, clock, tmp_path):
+    from ke import hermes_api
+
+    wt, store, _ = _tracker(tmp_path)
+    with hermes_api.connect("default") as conn:
+        tid = create_task(conn, assignee="dev", triage=True)
+    wt.sync(clock.now)
+    assert store.latest_wait("default", tid) is None
+
+
+def test_answering_a_block_loop_puts_the_card_back_to_work(kanban_home, clock, tmp_path):
+    from hermes_cli import kanban_db as kb
+    from ke import hermes_api
+    from ke.inbound import resolve_wait
+
+    wt, store, _ = _tracker(tmp_path)
+    with hermes_api.connect("default") as conn:
+        tid = _loop_card(conn)
+    wt.sync(clock.now)
+    version = store.latest_wait("default", tid)["version"]
+    done, _held = resolve_wait(hermes_api, store, "default", tid, version, "bora", clock.now, "telegram:1")
+    assert done
+    with hermes_api.connect("default") as conn:
+        assert kb.get_task(conn, tid).status == "ready"

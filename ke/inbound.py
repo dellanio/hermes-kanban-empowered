@@ -60,7 +60,7 @@ from typing import Any, Callable, Optional
 from . import panel
 from .asks import CONFIRM_WORDS, parse_ask, reply_words
 from .messages import EN, _clip_to, active_language, board_title, branded, render_answer, reply_hint, short_action, t
-from .waits import block_version, current_block, display_name, held_behind
+from .waits import WAIT_STATUSES, block_version, current_block, display_name, held_behind
 
 log = logging.getLogger(__name__)
 
@@ -253,7 +253,7 @@ def resolve_wait(
     with _resolve_lock:
         with api.connect(board) as conn:
             task = api.task(conn, task_id)
-            if task is None or task.status != "blocked":
+            if task is None or task.status not in WAIT_STATUSES:
                 return False, []
             if block_version(api.events(conn, task_id)) != int(version):
                 return False, []
@@ -474,7 +474,7 @@ def _item_ask(api: Any, board: str, task_id: str, version: int) -> tuple[bool, A
     """``(still blocked on version, its ask or None, the raw block reason, the card title)`` of a selected item."""
     with api.connect(board) as conn:
         task = api.task(conn, task_id)
-        if task is None or task.status != "blocked":
+        if task is None or task.status not in WAIT_STATUSES:
             return False, None, "", ""
         block = current_block(task, api.events(conn, task_id))
         if block is None or block.version != int(version):
@@ -489,7 +489,7 @@ def note_wait(
     with _resolve_lock:
         with api.connect(board) as conn:
             task = api.task(conn, task_id)
-            if task is None or task.status != "blocked":
+            if task is None or task.status not in WAIT_STATUSES:
                 return False
             if block_version(api.events(conn, task_id)) != int(version):
                 return False

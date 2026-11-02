@@ -162,6 +162,10 @@ def parents(conn: sqlite3.Connection, tid: str) -> list[str]:
 
 # -- writes ------------------------------------------------------------------
 def unblock(conn: sqlite3.Connection, tid: str) -> bool:
+    """Back to work: ``blocked`` through ``unblock_task``, a block loop's ``triage`` through ``specify_triage_task``."""
+    current = _kb.get_task(conn, tid)
+    if current is not None and current.status == "triage":
+        return bool(_kb.specify_triage_task(conn, tid))
     return bool(_kb.unblock_task(conn, tid))
 
 

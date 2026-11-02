@@ -1,6 +1,6 @@
 """Human wait tracker: owner, deadlines and condensed reminders for cards blocked on a person.
 
-A card's *current block* is its newest ``blocked`` or ``gave_up`` event (:func:`current_block`):
+A card's *current block* is its newest ``blocked``, ``block_loop_detected`` or ``gave_up`` event (:func:`current_block`):
 its ``version`` is that event's id and its start time the event's ``created_at``, so every new
 block (a re-block, or a park by Hermes' failure breaker) opens a new version and a reminder
 answered for an old block can never act on the new one.
@@ -12,6 +12,10 @@ NOT a human wait, whatever ``block_kind`` the card still carries from an earlier
 keeps it across an unblock): infrastructure recovery and its alerts handle it, and Hermes' own
 notifier announces the ``gave_up``. Once somebody classifies the park as a human block (Hermes
 appends a ``blocked`` event), it becomes a wait counted from that event.
+
+Hermes routes a repeated block of the same kind to ``triage`` (event ``block_loop_detected``) "for a
+human": that is a wait like any other, in ``triage`` instead of ``blocked``. A ``triage`` card with any
+other history is an unspecified idea, not a wait.
 
 Deadlines, counted from the start of the wait: one reminder per ``Settings.reminders_s``
 entry (30 min, 2 h), the escalation at ``escalate_after_s`` (8 h), then a digest every
@@ -72,12 +76,14 @@ def _payload(event: Any) -> dict:
     return p if isinstance(p, dict) else {}
 
 
-BLOCK_EVENTS = frozenset({"blocked", "gave_up"})
+LOOP_EVENT = "block_loop_detected"
+BLOCK_EVENTS = frozenset({"blocked", "gave_up", LOOP_EVENT})
+WAIT_STATUSES = ("blocked", "triage")  # the statuses a human wait can be in, see human_block
 
 
 @dataclass(frozen=True)
 class Block:
-    """A card's current block: the newest ``blocked`` / ``gave_up`` event."""
+    """A card's current block: the newest ``blocked`` / ``block_loop_detected`` / ``gave_up`` event."""
 
     version: int  # the event id
     started_at: int  # the event's created_at
@@ -92,7 +98,7 @@ def _latest_block_event(events: list) -> Any:
 
 
 def block_version(events: list) -> int:
-    """Version of a card's current block: its newest ``blocked``/``gave_up`` event id, 0 when none."""
+    """Version of a card's current block: its newest block event id, 0 when none."""
     ev = _latest_block_event(events)
     return int(ev.id) if ev is not None else 0
 
@@ -118,16 +124,26 @@ def human_block(task: Any, events: list, settings: Settings) -> Optional[Block]:
     """The block ``task`` waits on a person for, or ``None``: THE definition of a human wait.
 
     The card is ``blocked`` and its current block is a ``blocked`` event whose kind is human
-    (in ``settings.human_kinds``, or none). Breaker parks and cards with no block event are not.
+    (in ``settings.human_kinds``, or none), or in ``triage`` because Hermes detected a block loop on such
+    a kind. Breaker parks and cards with no block event are not.
     """
-    if task is None or task.status != "blocked":
+    if task is None or task.status not in WAIT_STATUSES:
         return None
+    if task.status == "triage":
+        latest = _latest_block_event(events)
+        if latest is None or latest.kind != LOOP_EVENT:
+            return None
     block = current_block(task, events)
     if block is None or block.breaker:
         return None
     if block.kind is not None and block.kind not in settings.human_kinds:
         return None
     return block
+
+
+def wait_candidates(api: Any, conn: Any) -> list:
+    """The cards :func:`human_block` has to look at: every card in a status a wait can be in."""
+    return [task for status in WAIT_STATUSES for task in api.list_tasks(conn, status=status)]
 
 
 def board_active(board: str, statuses: dict) -> bool:
@@ -260,7 +276,7 @@ class WaitTracker:
     def _human_blocks(self, board: str) -> list[tuple[str, int, int]]:
         found: list[tuple[str, int, int]] = []
         with self.api.connect(board) as conn:
-            for task in self.api.list_tasks(conn, status="blocked"):
+            for task in wait_candidates(self.api, conn):
                 block = human_block(task, self.api.events(conn, task.id), self.settings)
                 if block is not None:
                     found.append((task.id, block.version, block.started_at))
@@ -319,7 +335,7 @@ class WaitTracker:
         board, tid, version = row["board"], row["task_id"], row["version"]
         with self.api.connect(board) as conn:
             task = self.api.task(conn, tid)
-            if task is None or task.status != "blocked":
+            if task is None or task.status not in WAIT_STATUSES:
                 return None  # resolved since the last sync; the next sync removes the row
             block = human_block(task, self.api.events(conn, tid), self.settings)
             if block is None or block.version != version:

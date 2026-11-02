@@ -40,7 +40,7 @@ from .messages import (
 )
 from .settings import Settings
 from .store import Store
-from .waits import Due, board_active, display_name, held_behind, human_block, ladder_anchor
+from .waits import Due, board_active, display_name, held_behind, human_block, ladder_anchor, wait_candidates
 
 log = logging.getLogger(__name__)
 
@@ -478,7 +478,7 @@ def count(settings: Settings, now: float, api: Any = hermes_api, store: Optional
             continue
         try:
             with api.connect(board) as conn:
-                for task in api.list_tasks(conn, status="blocked"):
+                for task in wait_candidates(api, conn):
                     if human_block(task, api.events(conn, task.id), settings) is not None:
                         n += 1
         except Exception:

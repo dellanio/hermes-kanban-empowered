@@ -3,3 +3,6 @@ docs/superpowers/
 __pycache__/
 *.pyc
 .pytest_cache/
+
+# raw Desktop captures (real data); only the cleaned English set in docs/assets/screenshots is published
+docs/screenshots/

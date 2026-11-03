@@ -29,7 +29,7 @@ def test_settings_other_defaults(monkeypatch, tmp_path):
     s = Settings.from_mapping({})
     assert s.mode == "enforce" and s.coordinator_profile == "default"
     assert s.pin_live_panel is True and s.default_owner == "sponsor"
-    assert s.escalate_to is None and s.human_kinds == ("needs_input",)
+    assert s.escalate_to is None and s.human_kinds == ("needs_input", "capability")
     assert s.require_structured_ask is True and s.reply_ttl_s == 604800
     assert s.infra_alert_count == 3 and s.infra_alert_window_s == 3600
     assert s.infra_patterns == (

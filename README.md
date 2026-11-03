@@ -198,7 +198,7 @@ plugins:
           escalate_after: 8h
           escalate_to: ops
           digest: daily
-          human_kinds: [needs_input]
+          human_kinds: [needs_input, capability]
           require_structured_ask: true
         boards:
           side-project:
@@ -229,7 +229,7 @@ plugins:
 | `waits.escalate_to` | none | Owner name that receives a read-only copy of escalations. It cannot resolve them. |
 | `waits.digest` | `daily` | Repeat interval after the escalation (`hourly`, `daily`, `weekly` or a duration). |
 | `waits.blocking_digest_every` | same as `waits.digest` | Digest interval for waits that hold other cards back (`hourly`, `daily`, `weekly` or a duration like `6h`). Empty = the same as `waits.digest`. |
-| `waits.human_kinds` | `[needs_input]` | Block kinds that wait on a person (an untyped block counts too). |
+| `waits.human_kinds` | `[needs_input, capability]` | Block kinds that wait on a person (an untyped block counts too). |
 | `waits.require_structured_ask` | `true` | The worker guard requires the three-line ask. |
 | `guards.alert_after` | `30m` | How long a respawn guard may hold a card before the owner is told. |
 | `infra_failures.undo_budget` | `{count: 2, window: 24h}` | Breaker parks undone per card per window. |

@@ -441,7 +441,7 @@ def test_answer_never_resolves_a_breaker_park(client, store):
 
 
 def test_answer_never_resolves_a_non_human_block_kind(client):
-    tid, version = _waiting(ASK_WORD, kind="capability")
+    tid, version = _waiting(ASK_WORD, kind="transient")
     assert _answer(client, tid, version, text="connected").json()["result"] == "not_found"
     assert _status(tid) == "blocked"
 

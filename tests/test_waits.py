@@ -222,15 +222,26 @@ def test_non_human_kinds_are_not_tracked(kanban_home, clock, tmp_path):
     assert store.latest_wait("default", tid) is None
 
 
-def test_human_kinds_setting_is_honored(kanban_home, clock, tmp_path):
+def test_capability_block_waits_on_a_person_by_default(kanban_home, clock, tmp_path):
     from ke import hermes_api
 
-    wt, store, _ = _tracker(tmp_path, human_kinds=("needs_input", "capability"))
+    wt, store, _ = _tracker(tmp_path)
     with hermes_api.connect("default") as conn:
         tid, ev = make_human_block(conn, kind="capability")
     _start(clock, ev)
     wt.sync(clock.now)
     assert store.latest_wait("default", tid)["version"] == ev.id
+
+
+def test_human_kinds_setting_is_honored(kanban_home, clock, tmp_path):
+    from ke import hermes_api
+
+    wt, store, _ = _tracker(tmp_path, human_kinds=("needs_input",))
+    with hermes_api.connect("default") as conn:
+        tid, ev = make_human_block(conn, kind="capability")
+    _start(clock, ev)
+    wt.sync(clock.now)
+    assert store.latest_wait("default", tid) is None
 
 
 def test_owner_comes_from_board_config(kanban_home, clock, tmp_path):

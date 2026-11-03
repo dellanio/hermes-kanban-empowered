@@ -266,7 +266,7 @@ class Settings:
     # digest cadence of waits that hold other cards back; None = the same as ``digest_every_s``
     blocking_digest_every_s: Optional[int] = None
     escalate_to: str | None = None
-    human_kinds: tuple[str, ...] = ("needs_input",)
+    human_kinds: tuple[str, ...] = ("needs_input", "capability")
     require_structured_ask: bool = True
     guard_alert_after_s: int = 1800
     infra_undo_count: int = 2

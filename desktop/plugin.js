@@ -246,6 +246,15 @@ const CSS = `
 .ke-tr { display: grid; grid-template-columns: minmax(0, 1.6fr) minmax(0, 0.8fr) minmax(0, 1.4fr); gap: 10px; padding: 7px 0;
   border-bottom: 1px solid var(--ui-stroke-tertiary); align-items: start; }
 .ke-tr:last-child { border-bottom: none; }
+.ke-runs { display: flex; flex-direction: column; gap: 10px; }
+.ke-run { display: flex; flex-direction: column; gap: 10px; padding: 12px; border: 1px solid var(--ui-stroke-tertiary); border-radius: 8px; min-width: 0; }
+.ke-run-title { display: flex; align-items: baseline; gap: 8px; color: var(--ui-text-primary); font-weight: 600; overflow-wrap: anywhere; }
+.ke-run-fields { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1.6fr) minmax(0, 1fr); gap: 10px; }
+.ke-run-field { min-width: 0; }
+.ke-run-value { color: var(--ui-text-secondary); display: flex; flex-wrap: wrap; align-items: center; gap: 6px; overflow-wrap: anywhere; }
+.ke-run-label { color: var(--ui-text-tertiary); font-size: 0.6875rem; text-transform: uppercase; letter-spacing: 0.04em; margin-bottom: 2px; }
+.ke-run-now { padding: 8px 10px; border-left: 3px solid var(--ui-green); border-radius: 4px; background: color-mix(in srgb, var(--ui-green) 8%, transparent); }
+.ke-run-text { color: var(--ui-text-primary); overflow-wrap: anywhere; }
 .ke-th { color: var(--ui-text-tertiary); font-size: 0.6875rem; text-transform: uppercase; letter-spacing: 0.04em; padding-top: 0; }
 .ke-cell { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 .ke-cell-main { display: flex; gap: 6px; align-items: baseline; min-width: 0; }
@@ -636,71 +645,65 @@ function Projects({ boards, t, onClose }) {
 }
 
 // -- running ------------------------------------------------------------------------------------
-function Running({ rows, t }) {
-  const head = jsxs('div', {
-    className: 'ke-tr ke-th',
-    children: [
-      jsx('span', { children: t('ui.running.card') }),
-      jsx('span', { children: t('ui.running.board') }),
-      jsx('span', { children: t('ui.running.activity') })
-    ]
+function RunField({ label, children }) {
+  return jsxs('div', {
+    className: 'ke-run-field',
+    children: [jsx('div', { className: 'ke-run-label', children: label }), jsx('div', { className: 'ke-run-value', children })]
   })
+}
 
+function Running({ rows, t }) {
   return jsx(Section, {
     title: t('ui.section.running'),
     count: rows.length,
     tone: 'green',
     children: rows.length
-      ? jsxs('div', {
-          className: 'ke-table',
-          children: [
-            head,
-            ...rows.map(r =>
-              jsxs(
-                'div',
-                {
-                  className: 'ke-tr',
-                  children: [
-                    jsxs('div', {
-                      className: 'ke-cell',
-                      children: [
-                        jsxs('div', {
-                          className: 'ke-cell-main',
-                          children: [
-                            jsx('span', { className: 'ke-dot ke-dot-green' }),
-                            jsx('span', { className: 'ke-ellipsis', title: r.title, children: r.title })
-                          ]
-                        }),
-                        jsx('div', { className: 'ke-sub ke-ellipsis', children: r.profile || '—' })
-                      ]
-                    }),
-                    jsxs('div', {
-                      className: 'ke-cell ke-cell-main ke-muted',
-                      children: [
-                        jsx('span', { className: 'ke-ellipsis', title: r.board_name, children: r.board_name }),
-                        jsx(StatusTag, { status: r.board_status, t })
-                      ]
-                    }),
-                    jsxs('div', {
-                      className: 'ke-cell',
-                      children: [
-                        jsx('div', { className: 'ke-ellipsis', title: r.last_activity.text, children: r.last_activity.text }),
-                        jsx('div', {
-                          className: 'ke-sub',
-                          children:
-                            t('ui.needs.ago', { age: ageText(t, r.last_activity.age_s) }) +
-                            (r.last_activity.heartbeat_age_s !== null && r.last_activity.heartbeat_age_s !== undefined
-                              ? ' · ' + t('ui.activity.heartbeat', { age: ageText(t, r.last_activity.heartbeat_age_s) })
-                              : '')
-                        })
-                      ]
-                    })
-                  ]
-                },
-                r.board + '/' + r.task_id
-              )
+      ? jsx('div', {
+          className: 'ke-runs',
+          children: rows.map(r => {
+            const now = r.current_task || { text: r.last_activity.text, ai: false, age_s: null }
+            const age = now.age_s !== null && now.age_s !== undefined ? now.age_s : r.last_activity.age_s
+            return jsxs(
+              'div',
+              {
+                className: 'ke-run',
+                children: [
+                  jsxs('div', {
+                    className: 'ke-run-title',
+                    children: [jsx('span', { className: 'ke-dot ke-dot-green' }), jsx('span', { children: r.title })]
+                  }),
+                  jsxs('div', {
+                    className: 'ke-run-fields',
+                    children: [
+                      jsx(RunField, { label: t('ui.running.profile'), children: r.profile || '—' }),
+                      jsx(RunField, {
+                        label: t('ui.running.board'),
+                        children: [r.board_name, jsx(StatusTag, { status: r.board_status, t }, 'status')]
+                      }),
+                      jsx(RunField, { label: t('ui.running.since'), children: ageText(t, r.since_s) })
+                    ]
+                  }),
+                  jsxs('div', {
+                    className: 'ke-run-now',
+                    children: [
+                      jsx('div', { className: 'ke-run-label', children: t('ui.running.task') }),
+                      jsx('div', { className: 'ke-run-text', children: now.text }),
+                      now.ai ? null : jsx('div', { className: 'ke-sub', children: t('ui.now.raw') })
+                    ]
+                  }),
+                  jsx('div', {
+                    className: 'ke-sub',
+                    children:
+                      t('ui.running.activity', { age: ageText(t, age) }) +
+                      (r.last_activity.heartbeat_age_s !== null && r.last_activity.heartbeat_age_s !== undefined
+                        ? ' · ' + t('ui.activity.heartbeat', { age: ageText(t, r.last_activity.heartbeat_age_s) })
+                        : '')
+                  })
+                ]
+              },
+              r.board + '/' + r.task_id
             )
-          ]
+          })
         })
       : jsx(Empty, { text: t('ui.running.empty') })
   })

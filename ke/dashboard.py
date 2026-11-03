@@ -41,6 +41,7 @@ from .messages import (
 from .settings import Settings
 from .store import Store
 from .chain import explain_block  # noqa: F401  (GET /chain)
+from .now_doing import summaries
 from .waits import Due, board_active, display_name, held_behind, human_block, ladder_anchor, wait_candidates
 
 log = logging.getLogger(__name__)
@@ -309,6 +310,7 @@ def _running(api: Any, now: float, rows: list, statuses: Optional[dict] = None) 
                     task = api.task(conn, r["task_id"])
                     if task is None:
                         continue
+                    activity = _last_activity(api, conn, task, now)
                     out.append({
                         "board": board,
                         "board_name": name or board,
@@ -317,7 +319,11 @@ def _running(api: Any, now: float, rows: list, statuses: Optional[dict] = None) 
                         "title": _clean(r.get("title"), TITLE_MAX),
                         "profile": r.get("assignee") or "",
                         "since_s": int(r.get("age_s", 0)),
-                        "last_activity": _last_activity(api, conn, task, now),
+                        "last_activity": activity,
+                        "current_task": summaries.current(
+                            api, board, r["task_id"], r.get("title") or "", r.get("assignee") or "",
+                            getattr(task, "started_at", None), now, activity["text"],
+                        ),
                     })
         except Exception:
             log.exception("kanban-empowered: dashboard could not read running cards of %s", board)

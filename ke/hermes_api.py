@@ -7,7 +7,9 @@ Hermes upgrade only ever needs fixes here.
 from __future__ import annotations
 
 import contextlib
+import json
 import logging
+import re
 import sqlite3
 from pathlib import Path
 from typing import Iterator
@@ -122,6 +124,70 @@ def events(conn: sqlite3.Connection, tid: str) -> list:
 
 def comments(conn: sqlite3.Connection, tid: str) -> list:
     return _kb.list_comments(conn, tid)
+
+
+def _worker_session(db: sqlite3.Connection, title: str, since) -> str | None:
+    """The newest kanban session for a card: Hermes titles them "<clipped card title>… #N" on each restart."""
+    rows = db.execute(
+        "SELECT id, title FROM sessions WHERE source = 'kanban' AND started_at >= ? ORDER BY started_at DESC LIMIT 50",
+        (since or 0,),
+    )
+    for sid, session_title in rows:
+        prefix = re.sub(r"\s*#\d+$", "", session_title or "").rstrip("…").strip()
+        if prefix and title.startswith(prefix):
+            return sid
+    return None
+
+
+def worker_activity(profile: str, title: str, since=None, limit: int = 12) -> list[dict]:
+    """What a card's worker did last, oldest first: ``{ts, text, tools}``, read-only from its profile.
+
+    ``text`` is what the agent wrote (reply and reasoning) with secrets redacted; ``tools`` only the tool
+    names. Commands and tool output are never read, since they carry tokens and keys.
+    """
+    from agent.redact import redact_sensitive_text
+    from hermes_cli.profiles import get_profile_dir, profile_exists
+
+    if not profile or not profile_exists(profile):
+        return []
+    path = Path(get_profile_dir(profile)) / "state.db"
+    if not path.exists():
+        return []
+    db = sqlite3.connect(f"{path.as_uri()}?mode=ro", uri=True, timeout=2)
+    try:
+        sid = _worker_session(db, title, since)
+        if sid is None:
+            return []
+        rows = db.execute(
+            "SELECT timestamp, content, reasoning, tool_calls FROM messages WHERE session_id = ? AND role = 'assistant' "
+            "ORDER BY id DESC LIMIT ?",
+            (sid, limit),
+        ).fetchall()
+    finally:
+        db.close()
+    out = []
+    for ts, content, reasoning, calls in reversed(rows):
+        said = " ".join(str(p).strip() for p in (content, reasoning) if p and str(p).strip())
+        try:
+            tools = [c["function"]["name"] for c in json.loads(calls or "[]")]
+        except (ValueError, KeyError, TypeError):
+            tools = []
+        out.append({"ts": ts, "text": redact_sensitive_text(said, force=True) if said else "", "tools": tools})
+    return out
+
+
+def summarize(system: str, text: str) -> str:
+    """One short text from the Hermes auxiliary model (``auxiliary.kanban_empowered`` in config.yaml, else auto)."""
+    from agent.auxiliary_client import call_llm, extract_content_or_reasoning
+    from agent.redact import redact_sensitive_text
+
+    response = call_llm(
+        task="kanban_empowered",
+        messages=[{"role": "system", "content": system}, {"role": "user", "content": text}],
+        max_tokens=160,
+        timeout=30,
+    )
+    return redact_sensitive_text(extract_content_or_reasoning(response) or "", force=True).strip()
 
 
 def runs(conn: sqlite3.Connection, tid: str) -> list:

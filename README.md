@@ -2,10 +2,43 @@
 
 ![Kanban Empowered](docs/assets/banner.jpg)
 
-A plugin for [Hermes Agent](https://github.com/NousResearch/hermes-agent) that extends the native
-kanban for a fleet of agent profiles. Its job is that no card stays silently stuck: when a card
-waits on a person, the person hears about it with a clear ask and can answer in one line; when a
-card is stuck for a technical reason, the plugin either fixes what is safe to fix or says exactly why.
+**A redesign for the Hermes kanban.** Stop digging through card comments to find out what's going on. Kanban Empowered gives every board its own project status, a dashboard that actually explains what's happening across your boards, a live plain-language summary of what each agent is doing right now, and a fast way out when the kanban needs you: a clear ask, answered in one line from Telegram or Desktop. Blocked? It shows you exactly where the block starts and what it's holding back. Stuck for a technical reason? It fixes what's safe to fix and tells you why about the rest. **No card stays silently stuck.**
+
+## Screenshots
+
+Hermes Desktop page (*Empowered*). Captured from a live install; the sidebar is cropped, private details are blurred and the Portuguese UI text was redrawn in English, so some wording may differ slightly from the app.
+
+**See what each agent is doing right now**
+
+![See what each agent is doing right now](docs/assets/screenshots/06-current-task.jpg)
+
+**Explain the block: where it starts and what it holds back**
+
+![Explain the block: where it starts and what it holds back](docs/assets/screenshots/07-explain-block.jpg)
+
+**Overview: what needs you, what is running, the coordinator's timeline**
+
+![Overview: what needs you, what is running, the coordinator's timeline](docs/assets/screenshots/01-overview.png)
+
+**Infrastructure health**
+
+![Infrastructure health](docs/assets/screenshots/01b-infrastructure.png)
+
+**Detail of a card waiting on a person (reply box)**
+
+![Detail of a card waiting on a person (reply box)](docs/assets/screenshots/02-detail.png)
+
+**Suspended projects**
+
+![Suspended projects](docs/assets/screenshots/03-suspended.png)
+
+**Project status: Active / Suspended / Done**
+
+![Project status: Active / Suspended / Done](docs/assets/screenshots/04-projects.png)
+
+**The Empowered button on the native Kanban page**
+
+![The Empowered button on the native Kanban page](docs/assets/screenshots/05-kanban-button.png)
 
 ## Features at a glance
 
@@ -45,7 +78,7 @@ Details:
 The plugin coexists with Hermes' own notifier: it never repeats the native completed, blocked,
 gave_up, crashed, review or block_loop_detected messages.
 
-**Status:** v0.1.
+**Status:** v0.3.0.
 
 ## Requirements
 
@@ -68,15 +101,25 @@ What the plugin does beyond its own data, for review before installing:
   Hermes' own IPv4 fallback path (`plugins.platforms.telegram.telegram_network`), as Hermes' Telegram
   adapter does: IPv4 literals of `api.telegram.org` with Host/SNI kept, discovered (unless
   `TELEGRAM_FALLBACK_IPS` is set) with DNS-over-HTTPS lookups of `api.telegram.org` at `dns.google` and
-  `cloudflare-dns.com`, and the proxy Hermes resolves (`TELEGRAM_PROXY` / system proxy). Nothing else; no
-  telemetry or usage reporting.
+  `cloudflare-dns.com`, and the proxy Hermes resolves (`TELEGRAM_PROXY` / system proxy). The "Current task"
+  line also calls the Hermes auxiliary model (see "Running cards" below), through Hermes' own client and the
+  provider you configured. Nothing else; no telemetry or usage reporting.
 - **Long-running work.** No extra process and no daemon. The coordinator runs inside the gateway's kanban
   dispatch tick (`on_kanban_dispatch_tick`, evaluating at most every 30 s), in the coordinator profile only,
-  behind a leader lock in `shared_state_dir`; short-lived helper threads bound each Telegram call and DNS lookup.
+  behind a leader lock in `shared_state_dir`; short-lived helper threads bound each Telegram call, DNS lookup and running-card summary.
 - **Reads outside its own data.** Every live board's kanban database and board metadata, through Hermes'
   kanban functions (read-only except the writes below); the Telegram bot token, through Hermes' secret scope
   (`agent.secret_scope.get_secret`; see "Configuration"); for `doctor` only, each profile's `config.yaml`
-  (is the plugin enabled there) and the Hermes checkout's git `HEAD` files (installed revision).
+  (is the plugin enabled there) and the Hermes checkout's git `HEAD` files (installed revision). The state
+  store lives under the coordinator profile and is read by the plugin in every other profile.
+- **Telegram replies.** Replies from the configured owners to the plugin's own messages are consumed by the
+  plugin before they reach the agent (`pre_gateway_dispatch`). Everything else passes through untouched.
+- **Running cards.** To show what a running card is doing, the Desktop backend reads the worker's recent
+  session from its profile's `state.db`, read-only: what the agent wrote, including its reasoning, and the
+  tool names; never commands or tool output. It redacts secrets (`agent.redact`) and sends that to the Hermes
+  auxiliary model (`agent.auxiliary_client`; `auxiliary.kanban_empowered` in `config.yaml`, else auto), only
+  when the session changed and at most once a minute per card. This consumes tokens from that provider.
+  Redaction is pattern-based, so a secret an agent wrote in an unusual form could reach the provider.
 - **Writes.** On kanban cards, only through Hermes' kanban domain functions, never by writing `kanban.db`:
   comments, unblocking a card waiting on a person when its owner answers (Telegram, Desktop or the `done`
   command), undoing a park caused by an infrastructure failure (within the per-card budget), and reassigning
@@ -88,7 +131,8 @@ What the plugin does beyond its own data, for review before installing:
   validate` lists them as a rule 9 warning): `hermes_cli.kanban_db`, `kanban_db_boards` and
   `kanban_db_connect` (board and card reads and writes), `agent.i18n` and `agent.i18n_layers` (the Hermes
   language and the plugin's locale packs), `plugins.platforms.telegram.telegram_network` and
-  `agent.ssl_verify` (the Telegram fallback path and its trust store), `tui_gateway.launch_profile_policy`
+  `agent.ssl_verify` (the Telegram fallback path and its trust store), `agent.auxiliary_client` and
+  `agent.redact` (the running-card summary), `tui_gateway.launch_profile_policy`
   (the launch profile's secret scope inside the gateway tick), `hermes_cli.profiles` (profile names and
   homes), `hermes_cli.plugins` (veto-hook detection), `hermes_yaml` (reading `config.yaml` for `doctor`) and
   `hermes_cli` itself (locating the checkout for `doctor`). A seam request for these will be filed upstream.
@@ -380,7 +424,7 @@ Human-facing text follows the Hermes language (English by default; `pt` and `pt-
 The optional top-level setting `language` (e.g. `language: pt`) overrides it for this plugin's
 messages only. Telegram messages never show card ids, hashes or role names; the CLI keeps the ids.
 
-## What v0.1 does not do yet
+## What it does not do yet
 
 - The veto hooks are used only to hold claims on Suspended/Done projects. There is no refusal at
   completion time, no resource locks or quota groups (`quota`, `held` commands), no gate verdicts
@@ -395,15 +439,6 @@ messages only. Telegram messages never show card ids, hashes or role names; the 
   out condensed into one message per owner.
 - Telegram is the only messaging channel; the Desktop dashboard is the other way to answer.
 - The Desktop dashboard does not check per-board owners (see "Desktop dashboard").
-
-## Roadmap
-
-- **v0.2 — gates and flow.** Review rounds and gate verdicts through `kanban_pre_complete`
-  (evidence before a card can complete, four-eyes review), resource locks for cards that share a
-  scarce resource, a *Flow* view in the dashboard, and the core patch update (hook review-lane
-  claims, pass the claiming board to the hook) proposed upstream.
-- **v0.3 — quota awareness.** A provider/quota breaker: pause dispatch when a provider is out of
-  quota, detect when it comes back and resume with evidence, shown in the dashboard.
 
 ## License
 

@@ -25,9 +25,10 @@ from typing import Any, Optional
 from . import conditions, hermes_api, messages, telegram
 from .asks import parse_ask
 from .inbound import apply_answer
-from .infra import InfraRecovery
+from .infra import OWNER_PATTERNS, InfraRecovery
 from .messages import (
     _clip_to,
+    _guard_reason_text,
     agent_text,
     board_title,
     natural_age,
@@ -50,6 +51,8 @@ PLUGIN_ID = "kanban-empowered"
 TIMELINE_MAX = 20
 COMMENTS_MAX = 5
 TITLE_MAX = 120
+ERROR_MAX = 240
+INCIDENT_QUIET_S = 600  # no infrastructure failure for this long: the incident is no longer "happening"
 WHY_MAX = 200
 COMMENT_BODY_MAX = 600
 ACTIVITY_MAX = 120
@@ -244,7 +247,41 @@ def _infra_entry(api: Any, conn: Any, now: float, row: dict, statuses: Optional[
         "failures": int(row.get("failures", 0)),
         "patterns": list(row.get("patterns") or []),
         "last_error_class": row.get("last_error_class") or "infra",
-        "need": t("ui.needs.exhausted_text"),
+        "retained": bool(row.get("retained")),
+        "need": t("ui.needs.retained_text" if row.get("retained") else "ui.needs.exhausted_text"),
+    }
+
+
+def _guard_entry(api: Any, conn: Any, now: float, row: dict, statuses: Optional[dict] = None) -> Optional[dict]:
+    """The "needs you" entry of a card Hermes' respawn guard keeps from running, or ``None`` when the
+    card is gone or no longer waiting to be dispatched."""
+    board = row["board"]
+    task = api.task(conn, row["task_id"])
+    if task is None or task.status not in ("ready", "review"):
+        return None
+    name = display_name(api, board)
+    age = _age(now, row.get("first_seen"))
+    try:
+        held = len(held_behind(api, conn, row["task_id"]))
+    except Exception:
+        held = 0
+    error = _clean(getattr(api, "redact", hermes_api.redact)(str(getattr(task, "last_failure_error", "") or "")), ERROR_MAX)
+    return {
+        "kind": "guard_held",
+        "board": board,
+        "board_status": _status_of(board, statuses or {}),
+        "board_name": name or board,
+        "board_title": board_title(board, name),
+        "task_id": row["task_id"],
+        "title": _clean(task.title, TITLE_MAX),
+        "assignee": task.assignee or "",
+        "age_s": age,
+        "age_text": natural_age(age),
+        "held_behind_count": held,
+        "reason": row["reason"],
+        "need": t("ui.needs.guard_text", reason=_guard_reason_text(row["reason"])),
+        "last_error": error,
+        "release": t("guards.item.release", id=row["task_id"]),
     }
 
 
@@ -254,13 +291,15 @@ def _sort_key(entry: dict) -> tuple:
 
 
 def _needs_you(api: Any, store: Store, settings: Settings, now: float, waits: list, exhausted: list,
-               statuses: Optional[dict] = None) -> list:
+               statuses: Optional[dict] = None, guards: Optional[list] = None) -> list:
     statuses = store.board_statuses() if statuses is None else statuses
     by_board: dict[str, list] = {}
     for w in waits:
         by_board.setdefault(w["board"], []).append(("wait", w))
     for row in exhausted:
         by_board.setdefault(row["board"], []).append(("infra", row))
+    for row in guards or ():
+        by_board.setdefault(row["board"], []).append(("guard", row))
     out: list[dict] = []
     for board, group in by_board.items():
         try:
@@ -269,6 +308,11 @@ def _needs_you(api: Any, store: Store, settings: Settings, now: float, waits: li
                     try:
                         if kind == "infra":
                             out.append(_infra_entry(api, conn, now, data, statuses))
+                            continue
+                        if kind == "guard":
+                            entry = _guard_entry(api, conn, now, data, statuses)
+                            if entry is not None:
+                                out.append(entry)
                             continue
                         task = api.task(conn, data["task_id"])
                         block = human_block(task, api.events(conn, data["task_id"]), settings)
@@ -403,7 +447,64 @@ def _timeline(api: Any, store: Store, boards: list, only: Optional[str]) -> list
 
 
 # -- infrastructure -----------------------------------------------------------------------------
-def _infra(store: Store, settings: Settings, now: float, exhausted: list) -> dict:
+def _last_run_error(api: Any, conn: Any, task_id: str) -> str:
+    """The newest run error of a card, redacted and clipped (``""`` when none)."""
+    for run in reversed(list(api.runs(conn, task_id) or ())):
+        error = getattr(run, "error", None)
+        if error:
+            return _clean(getattr(api, "redact", hermes_api.redact)(str(error)), ERROR_MAX)
+    return ""
+
+
+def _incident(api: Any, store: Store, settings: Settings, now: float) -> Optional[dict]:
+    """What the "failures in a row" incident is about, in plain terms, or ``None`` when it is not active.
+
+    The cards whose workers stopped for infrastructure reasons in the alert window, each with its count,
+    newest failure, current status and last error; whether it is still happening (a failure within
+    ``INCIDENT_QUIET_S``) or already settled (every card involved is done, archived or running again);
+    and when it clears by itself (when fewer than ``infra_alert_count`` exits remain in the window).
+    """
+    window = settings.infra_alert_window_s
+    exits = [a for a in store.actions_since(int(now - window))
+             if a["kind"] == "infra_exit" and str(a["detail"] or "").startswith("infra:")]
+    if settings.infra_alert_count <= 0 or len(exits) < settings.infra_alert_count:
+        return None
+    by_card: dict[tuple, list] = {}
+    for a in exits:
+        by_card.setdefault((a["board"], a["task_id"]), []).append(int(a["ts"]))
+    cards = []
+    for (board, task_id), stamps in by_card.items():
+        card = {"board": board, "board_title": board_title(board, display_name(api, board)), "task_id": task_id,
+                "title": "", "status": "", "count": len(stamps), "last_s": _age(now, max(stamps)),
+                "last_error": "", "retained": False}
+        try:
+            with api.connect(board) as conn:
+                task = api.task(conn, task_id)
+                if task is not None:
+                    card.update(title=_clean(task.title, TITLE_MAX), status=task.status)
+                card["last_error"] = _last_run_error(api, conn, task_id)
+        except Exception:
+            log.exception("kanban-empowered: could not read %s/%s for the incident", board, task_id)
+        low = card["last_error"].lower()
+        card["retained"] = any(p in low for p in OWNER_PATTERNS)
+        cards.append(card)
+    cards.sort(key=lambda c: (c["last_s"], c["board"], c["task_id"]))
+    stamps = sorted(ts for group in by_card.values() for ts in group)
+    last_s = _age(now, stamps[-1])
+    clears_at = stamps[len(stamps) - settings.infra_alert_count] + window
+    return {
+        "exits": len(stamps),
+        "window_s": int(window),
+        "window_text": natural_age(int(window)),
+        "cards": cards,
+        "last_s": last_s,
+        "ongoing": last_s < INCIDENT_QUIET_S,
+        "resolved": all(c["status"] in ("done", "archived", "running") for c in cards),
+        "clears_in_s": max(0, int(clears_at - now)),
+    }
+
+
+def _infra(store: Store, settings: Settings, now: float, exhausted: list, api: Any = hermes_api) -> dict:
     recent = store.count_actions_since("infra_exit", int(now - INFRA_WINDOW_S), "infra:")
     in_window = store.count_actions_since("infra_exit", int(now - settings.infra_alert_window_s), "infra:")
     systemic = settings.infra_alert_count > 0 and in_window >= settings.infra_alert_count
@@ -424,6 +525,7 @@ def _infra(store: Store, settings: Settings, now: float, exhausted: list) -> dic
         "telegram_path": kind,
         "telegram_token": token,
         "telegram_ok": bool(token and kind in ("host", "ip")),
+        "incident": _incident(api, store, settings, now) if systemic else None,
     }
 
 
@@ -440,10 +542,12 @@ def overview(settings: Settings, store: Store, now: float, board: Optional[str] 
     waits = [w for w in fs["human_waits"] if w["board"] in scope]
     running_rows = [r for r in fs["running"] if r["board"] in scope]
     exhausted = InfraRecovery(settings, store, api).exhausted(now, scope)
-    items = _needs_you(api, store, settings, now, waits, exhausted, statuses)
+    guards = [r for r in store.guard_alerts() if r["board"] in scope
+              and now - r["first_seen"] >= settings.guard_alert_after_s]
+    items = _needs_you(api, store, settings, now, waits, exhausted, statuses, guards)
     needs = [e for e in items if board_active(e["board"], statuses)]
     suspended = [{**e, "status": e["board_status"]} for e in items if not board_active(e["board"], statuses)]
-    infra = _infra(store, settings, now, exhausted)
+    infra = _infra(store, settings, now, exhausted, api)
     impacted = {(e["board"], tid) for e in needs for tid in e.pop("_held", ())}
     for e in suspended:
         e.pop("_held", None)

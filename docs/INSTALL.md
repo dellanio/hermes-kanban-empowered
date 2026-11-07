@@ -11,10 +11,11 @@ is repeated for each profile that runs kanban workers and for the coordinator pr
   atomic renames; network shares and sync folders do not provide them.
 - Python standard library plus modules already shipped with Hermes (`httpx`, `hermes_yaml`); nothing to install into the Hermes venv.
 
-## 1. Apply the core patch (optional, inert in v0.1)
+## 1. Apply the core patch (optional)
 
-The patch adds the `kanban_pre_claim` / `kanban_pre_complete` veto hooks. v0.1 has no consumer for
-them, so skipping it changes nothing except `doctor` showing `veto_hooks: missing`.
+The patch adds the `kanban_pre_claim` / `kanban_pre_complete` veto hooks. The plugin uses only
+`kanban_pre_claim`, to hold new claims on a Suspended or Done project; skipping the patch changes
+nothing else, and `doctor` shows `veto_hooks: missing`.
 
 ```
 git -C <hermes-agent> apply --check <repo>/patches/0001-kanban-veto-hooks.patch
@@ -78,7 +79,7 @@ Expected rows:
 | Row | Expected |
 |---|---|
 | `hermes_compat` / `hermes_head` | `bf0203a794` / the installed revision |
-| `veto_hooks` | `present` if the patch is applied, else `missing` (harmless in v0.1) |
+| `veto_hooks` | `present` if the patch is applied, else `missing` (then Suspended/Done projects do not hold new claims) |
 | `coordinator` | a PID once the coordinator gateway is running, else `none` |
 | `active_profile` / `coordinator_profile` | the profile you ran it in / the configured coordinator |
 | `shared_state_dir` | a local path |

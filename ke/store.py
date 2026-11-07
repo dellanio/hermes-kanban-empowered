@@ -382,13 +382,14 @@ class Store:
             rows = self.conn.execute(sql + " ORDER BY board, first_seen, task_id", args).fetchall()
         return [dict(r) for r in rows]
 
-    def due_guard_alerts(self, first_seen_before: float) -> list[dict]:
-        """Rows never alerted whose ``first_seen`` is at or before ``first_seen_before``."""
+    def due_guard_alerts(self, first_seen_before: float, alerted_before: Optional[float] = None) -> list[dict]:
+        """Rows whose ``first_seen`` is at or before ``first_seen_before`` and never alerted, or last
+        alerted at or before ``alerted_before`` (the repeat)."""
         with self.lock:
             rows = self.conn.execute(
                 f"SELECT {self._GUARD_COLS} FROM guard_alerts "
-                "WHERE alerted_at IS NULL AND first_seen <= ? ORDER BY board, first_seen, task_id",
-                (first_seen_before,),
+                "WHERE first_seen <= ? AND (alerted_at IS NULL OR alerted_at <= ?) ORDER BY board, first_seen, task_id",
+                (first_seen_before, -1 if alerted_before is None else alerted_before),
             ).fetchall()
         return [dict(r) for r in rows]
 

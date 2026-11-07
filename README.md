@@ -1,46 +1,102 @@
-# kanban-empowered
+<div align="center">
+
+# 🗂️ Kanban Empowered
+
+**A redesign for the Hermes kanban: clear asks, live status and recovery, so no card stays silently stuck.**
+
+[![Hermes plugin](https://img.shields.io/badge/Hermes-Plugin-7F52FF.svg?style=flat)](https://github.com/NousResearch/hermes-agent)
+[![Version](https://img.shields.io/badge/Version-0.3.1-blue.svg?style=flat)](plugin.yaml)
+[![Python](https://img.shields.io/badge/Python-Standard%20library%20only-3776AB.svg?style=flat&logo=python&logoColor=white)](https://www.python.org)
+[![Telegram](https://img.shields.io/badge/Telegram-Two--way%20replies-26A5E4.svg?style=flat&logo=telegram&logoColor=white)](https://core.telegram.org/bots/api)
+[![Languages](https://img.shields.io/badge/Languages-en%20%7C%20pt%20%7C%20pt--BR-green.svg?style=flat)](locales)
+[![License](https://img.shields.io/badge/License-MIT-yellow.svg?style=flat)](LICENSE)
+
+*Every board gets its own project status, a dashboard that explains what is happening, a live summary of what each agent is doing, and a one-line way to answer what the kanban needs from you, from Telegram or Desktop.*
 
 ![Kanban Empowered](docs/assets/banner.jpg)
 
-**A redesign for the Hermes kanban.** Stop digging through card comments to find out what's going on. Kanban Empowered gives every board its own project status, a dashboard that actually explains what's happening across your boards, a live plain-language summary of what each agent is doing right now, and a fast way out when the kanban needs you: a clear ask, answered in one line from Telegram or Desktop. Blocked? It shows you exactly where the block starts and what it's holding back. Stuck for a technical reason? It fixes what's safe to fix and tells you why about the rest. **No card stays silently stuck.**
+</div>
 
-## Screenshots
+---
+
+## 💡 The Problem
+
+Stop digging through card comments to find out what's going on. With a fleet of agent profiles on the Hermes kanban, a card can stop moving for many reasons: it waits on a person who never saw the question, a guard keeps it from respawning, or the host failed and Hermes parked it. Each of these looks the same from the board: a card that silently does not move.
+
+---
+
+## ⚡ The Solution: Kanban Empowered
+
+**Kanban Empowered** gives every board its own project status, a dashboard that actually explains what's happening across your boards, a live plain-language summary of what each agent is doing right now, and a fast way out when the kanban needs you: a clear ask, answered in one line from Telegram or Desktop.
+
+1. **Blocked?** It shows you exactly where the block starts and what it's holding back.
+2. **Waiting on you?** A structured ask, reminders that escalate, and a one-line reply.
+3. **Stuck for a technical reason?** It fixes what's safe to fix and tells you why about the rest.
+
+**No card stays silently stuck.**
+
+---
+
+## 📸 Screenshots
 
 Hermes Desktop page (*Empowered*). Captured from a live install; the sidebar is cropped, private details are blurred and the Portuguese UI text was redrawn in English, so some wording may differ slightly from the app.
 
-**See what each agent is doing right now**
+<div align="center">
+  <table>
+    <tr>
+      <td align="center"><b>See what each agent is doing right now</b></td>
+      <td align="center"><b>Explain the block: where it starts and what it holds back</b></td>
+    </tr>
+    <tr>
+      <td align="center">
+        <img src="docs/assets/screenshots/06-current-task.jpg" alt="See what each agent is doing right now" width="420" />
+      </td>
+      <td align="center">
+        <img src="docs/assets/screenshots/07-explain-block.jpg" alt="Explain the block: where it starts and what it holds back" width="420" />
+      </td>
+    </tr>
+    <tr>
+      <td align="center"><b>Overview: what needs you, what is running, the coordinator's timeline</b></td>
+      <td align="center"><b>Infrastructure health</b></td>
+    </tr>
+    <tr>
+      <td align="center">
+        <img src="docs/assets/screenshots/01-overview.png" alt="Overview: what needs you, what is running, the coordinator's timeline" width="420" />
+      </td>
+      <td align="center">
+        <img src="docs/assets/screenshots/01b-infrastructure.png" alt="Infrastructure health" width="420" />
+      </td>
+    </tr>
+    <tr>
+      <td align="center"><b>Detail of a card waiting on a person (reply box)</b></td>
+      <td align="center"><b>Suspended projects</b></td>
+    </tr>
+    <tr>
+      <td align="center">
+        <img src="docs/assets/screenshots/02-detail.png" alt="Detail of a card waiting on a person (reply box)" width="420" />
+      </td>
+      <td align="center">
+        <img src="docs/assets/screenshots/03-suspended.png" alt="Suspended projects" width="420" />
+      </td>
+    </tr>
+    <tr>
+      <td align="center"><b>Project status: Active / Suspended / Done</b></td>
+      <td align="center"><b>The Empowered button on the native Kanban page</b></td>
+    </tr>
+    <tr>
+      <td align="center">
+        <img src="docs/assets/screenshots/04-projects.png" alt="Project status: Active / Suspended / Done" width="420" />
+      </td>
+      <td align="center">
+        <img src="docs/assets/screenshots/05-kanban-button.png" alt="The Empowered button on the native Kanban page" width="420" />
+      </td>
+    </tr>
+  </table>
+</div>
 
-![See what each agent is doing right now](docs/assets/screenshots/06-current-task.jpg)
+---
 
-**Explain the block: where it starts and what it holds back**
-
-![Explain the block: where it starts and what it holds back](docs/assets/screenshots/07-explain-block.jpg)
-
-**Overview: what needs you, what is running, the coordinator's timeline**
-
-![Overview: what needs you, what is running, the coordinator's timeline](docs/assets/screenshots/01-overview.png)
-
-**Infrastructure health**
-
-![Infrastructure health](docs/assets/screenshots/01b-infrastructure.png)
-
-**Detail of a card waiting on a person (reply box)**
-
-![Detail of a card waiting on a person (reply box)](docs/assets/screenshots/02-detail.png)
-
-**Suspended projects**
-
-![Suspended projects](docs/assets/screenshots/03-suspended.png)
-
-**Project status: Active / Suspended / Done**
-
-![Project status: Active / Suspended / Done](docs/assets/screenshots/04-projects.png)
-
-**The Empowered button on the native Kanban page**
-
-![The Empowered button on the native Kanban page](docs/assets/screenshots/05-kanban-button.png)
-
-## Features at a glance
+## ✨ Features at a glance
 
 | Area | What you get |
 |---|---|
@@ -67,7 +123,8 @@ Details:
   its own cadence (`waits.blocking_digest_every`), and when a wait reaches the escalation with no
   `escalate_to` configured, the owner gets one setup alert saying so.
 - **Stuck cards.** Cards held by Hermes' respawn guard (`active_pr`, `blocker_auth`) for more than
-  30 min are reported to the owner, with a one-line command to hand them to another profile.
+  30 min are reported to the owner, again every `waits.digest` while the guard lasts, and listed in
+  *Needs you* with the reason and the last error, with a one-line command to hand them to another profile.
 - **Infrastructure failures.** When Hermes' failure breaker parks a card only because the host
   failed (gateway, worker persistence), the plugin undoes the park, within a budget of 2 undos per
   card per 24 h. A burst of 3 infrastructure exits within 1 h raises one systemic alert.
@@ -78,21 +135,60 @@ Details:
 The plugin coexists with Hermes' own notifier: it never repeats the native completed, blocked,
 gave_up, crashed, review or block_loop_detected messages.
 
-**Status:** v0.3.0.
+**Status:** v0.3.1.
 
-## Requirements
+---
+
+## 🛠️ Architecture
+
+```mermaid
+flowchart TD
+    subgraph Workers ["Every worker profile"]
+        Guard["Worker guard (pre_tool_call)"] -->|"structured ask on kanban_block"| Board[("Hermes kanban boards")]
+    end
+
+    subgraph Coord ["Coordinator profile (gateway)"]
+        Tick["on_kanban_dispatch_tick"] --> Coordinator["Coordinator (leader lock)"]
+        Exit["on_kanban_worker_exited"] --> Coordinator
+        Coordinator --> Store[("Plugin state (SQLite)")]
+        Coordinator -->|"comments, unblock, undo, release"| Board
+        Inbound["pre_gateway_dispatch"] -->|"owner replies"| Coordinator
+    end
+
+    subgraph Desktop ["Hermes Desktop"]
+        Page["Empowered page (desktop/plugin.js)"] <--> Backend["Backend (dashboard/plugin_api.py)"]
+    end
+
+    Coordinator -->|"reminders, pinned panel"| Telegram["Telegram Bot API"]
+    Telegram -.->|"replies"| Inbound
+    Backend --> Store
+    Backend --> Board
+    Backend -->|"running-card summary"| Aux["Hermes auxiliary model"]
+```
+
+- **Runtime:** inside the Hermes gateway; no extra process or daemon.
+- **Language:** Python, standard library only.
+- **State:** the plugin's own SQLite store and leader lock under `plugin-data/kanban-empowered`.
+- **Kanban access:** Hermes' kanban domain functions only; the plugin never writes `kanban.db`.
+- **UI:** Hermes Desktop plugin SDK, plus a settings form generated from `plugin.yaml`.
+
+---
+
+## 📋 Requirements
 
 - Hermes Agent at revision `bf0203a794` (the revision this version was written and tested
   against; `doctor` prints both `hermes_compat` and the installed `hermes_head`), with the kanban
   enabled.
 - Optional: the core patch [`patches/0001-kanban-veto-hooks.patch`](patches/README.md). It adds the
-  `kanban_pre_claim` and `kanban_pre_complete` veto hooks. v0.1 uses only `kanban_pre_claim`, to hold
+  `kanban_pre_claim` and `kanban_pre_complete` veto hooks. The plugin uses only `kanban_pre_claim`, to hold
   new claims on a Suspended or Done project (see "Project status"); everything else behaves the same
   with or without the patch. Without it, `doctor` reports `veto_hooks: missing` and the coordinator
   warns once (log and Telegram).
 - Python standard library only (no extra dependencies).
 
-## Disclosures
+---
+
+## 🔒 Disclosures
 
 What the plugin does beyond its own data, for review before installing:
 
@@ -142,9 +238,11 @@ What the plugin does beyond its own data, for review before installing:
   validate` reports it as an undeclared hook, by design (it is not in `provides_hooks` because a stock build
   does not know it).
 
-## Install
+---
 
-Step-by-step guide with verification and rollback: [`docs/INSTALL.md`](docs/INSTALL.md). Live acceptance results of v0.1: [`docs/ACCEPTANCE-v0.1.md`](docs/ACCEPTANCE-v0.1.md).
+## 🚀 Install
+
+Step-by-step guide with verification and rollback: [`docs/INSTALL.md`](docs/INSTALL.md). Live acceptance results of the first release (v0.1): [`docs/ACCEPTANCE-v0.1.md`](docs/ACCEPTANCE-v0.1.md).
 
 Plugins, their state and their settings are per Hermes profile. Install and enable the plugin in
 **every profile that runs kanban workers** (builder, devops, reviewer, ...) and in the profile of
@@ -175,7 +273,9 @@ What runs where:
   records worker exits. A leader lock in `shared_state_dir` makes sure only one coordinator
   process acts at a time; a second one stays passive.
 
-## Configuration
+---
+
+## ⚙️ Configuration
 
 Settings live under `plugins.entries.kanban-empowered.settings`:
 
@@ -215,7 +315,7 @@ plugins:
 
 | Key | Default | Meaning |
 |---|---|---|
-| `mode` | `enforce` | `enforce` or `cooperative-only`. Validated, but without effect in v0.1 (it is for the veto hooks). |
+| `mode` | `enforce` | `enforce` or `cooperative-only`. Validated, but without effect for now (reserved for the veto hooks). |
 | `language` | none | Language of the plugin's messages (`pt`, `en`, ...). None follows the Hermes language. |
 | `coordinator_profile` | `default` | The profile whose process acts as the coordinator. |
 | `shared_state_dir` | the coordinator profile's `plugin-data/kanban-empowered` | The plugin's SQLite state and leader lock, shared by all profiles. Default: `<hermes root>/plugin-data/kanban-empowered` when `coordinator_profile` is `default`, else `<hermes root>/profiles/<coordinator_profile>/plugin-data/kanban-empowered`. **Must be on a local NTFS (or other local) disk**: the leader lock relies on hard links and atomic renames, which network shares and some sync folders do not provide. |
@@ -231,7 +331,7 @@ plugins:
 | `waits.blocking_digest_every` | same as `waits.digest` | Digest interval for waits that hold other cards back (`hourly`, `daily`, `weekly` or a duration like `6h`). Empty = the same as `waits.digest`. |
 | `waits.human_kinds` | `[needs_input, capability]` | Block kinds that wait on a person (an untyped block counts too). |
 | `waits.require_structured_ask` | `true` | The worker guard requires the three-line ask. |
-| `guards.alert_after` | `30m` | How long a respawn guard may hold a card before the owner is told. |
+| `guards.alert_after` | `30m` | How long a respawn guard may hold a card before the owner is told (repeated every `waits.digest`). |
 | `infra_failures.undo_budget` | `{count: 2, window: 24h}` | Breaker parks undone per card per window. |
 | `infra_failures.alert_count` / `alert_window` | `3` / `1h` | Systemic alert threshold. |
 | `infra_failures.patterns` | see above | Error substrings that mark a worker failure as the host's. |
@@ -245,7 +345,9 @@ there the plugin takes the launch profile's own value from Hermes' launch-profil
 serving another profile it gets no token (one warning) rather than borrowing one. The plugin only calls
 `sendMessage`, `editMessageText` and `pinChatMessage`; it never polls the bot.
 
-## Settings screen
+---
+
+## 🎛️ Settings screen
 
 In Hermes Desktop the plugin has a settings form (Capabilities, plugin gear, or Settings > Plugins),
 generated from the `config_schema` in [`plugin.yaml`](plugin.yaml). It edits the common keys:
@@ -304,7 +406,9 @@ Keys the form cannot express stay in `config.yaml`: `coordinator_profile`,
 [`docs/catalog/kanban-empowered.yaml`](docs/catalog/kanban-empowered.yaml) is the draft entry for the
 Hermes plugin catalog (the card image comes from there, not from `plugin.yaml`).
 
-## Desktop dashboard (Empowered)
+---
+
+## 🖥️ Desktop dashboard (Empowered)
 
 The package also ships a Hermes Desktop half (`desktop/plugin.js`) and its backend
 (`dashboard/plugin_api.py`, mounted by Hermes at `/api/plugins/kanban-empowered/`). Two switches,
@@ -363,7 +467,9 @@ stuck" warning every few minutes (nothing was spawned although cards are ready);
 Back to **Active**, claims flow again and the open waits restart their reminder ladder from that moment
 (first reminder one first stage later, no burst of the stages missed meanwhile).
 
-## Commands
+---
+
+## 💻 Commands
 
 | Command | What it does |
 |---|---|
@@ -406,7 +512,7 @@ with its author.
 |---|---|
 | `hermes_compat` | Hermes revision this plugin version targets. |
 | `hermes_head` | Installed Hermes revision (`unknown` if it cannot be read). |
-| `veto_hooks` | `present` / `missing` (the core patch; v0.1 uses `kanban_pre_claim` to hold claims on suspended/done projects). |
+| `veto_hooks` | `present` / `missing` (the core patch; the plugin uses `kanban_pre_claim` to hold claims on suspended/done projects). |
 | `coordinator` | PID of the process holding the leader lock, or `none`. |
 | `active_profile` | Profile of the process running `doctor`. |
 | `coordinator_profile` | Configured coordinator profile. |
@@ -424,7 +530,9 @@ Human-facing text follows the Hermes language (English by default; `pt` and `pt-
 The optional top-level setting `language` (e.g. `language: pt`) overrides it for this plugin's
 messages only. Telegram messages never show card ids, hashes or role names; the CLI keeps the ids.
 
-## What it does not do yet
+---
+
+## 🚧 What it does not do yet
 
 - The veto hooks are used only to hold claims on Suspended/Done projects. There is no refusal at
   completion time, no resource locks or quota groups (`quota`, `held` commands), no gate verdicts
@@ -440,6 +548,8 @@ messages only. Telegram messages never show card ids, hashes or role names; the 
 - Telegram is the only messaging channel; the Desktop dashboard is the other way to answer.
 - The Desktop dashboard does not check per-board owners (see "Desktop dashboard").
 
-## License
+---
 
-MIT, see `LICENSE`.
+## 📄 License
+
+This project is open-source under the MIT License. See [LICENSE](LICENSE) for details.

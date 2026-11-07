@@ -14,7 +14,9 @@ narrow, and when in doubt it does NOT undo. A block is undone only if ALL of the
   run (or is NULL), and no live worker pid on the card or on the runs involved;
 * the assessment still holds when it is repeated right before the unblock (same ``gave_up``
   event, same runs): a card touched in between is left alone;
-* the card's own budget is not used up (``infra_undo_count`` per ``infra_undo_window_s``).
+* the card's own budget is not used up (``infra_undo_count`` per ``infra_undo_window_s``). When every
+  failure is Hermes refusing the run because an older session still owns the card
+  (:data:`OWNER_PATTERNS`), the budget is ONE undo: a second refusal shows a retry will not free it.
 
 Hermes' ``unblock_task`` resets the card's failure counter, so undoing without a limit would
 neutralise the breaker for good. The budget is the safeguard: once it is used up the card
@@ -50,6 +52,16 @@ _NOT_FAILURES = frozenset({"blocked", "review_requested", "changes_requested", "
 # gave_up payload flags of trips a retry cannot heal, or that Hermes holds for an operator
 # (``sticky``: systemic same-error bursts and force_trip): never undone, whatever the error says.
 _UNHEALABLE_FLAGS = ("sticky", "terminal_provider", "protocol_violation", "protocol_violations")
+
+
+# Hermes refuses the run because an older session still owns the card: one retry may clear it, more will not.
+OWNER_PATTERNS = frozenset({"kanban execution unknown", "retained by owner"})
+
+
+def owner_retained(patterns) -> bool:
+    """True when every matched pattern is an ownership refusal (see :data:`OWNER_PATTERNS`)."""
+    found = [str(p).lower() for p in patterns or ()]
+    return bool(found) and all(p in OWNER_PATTERNS for p in found)
 
 
 def matched_pattern(error_text: Optional[str], patterns) -> Optional[str]:
@@ -207,9 +219,10 @@ class InfraRecovery:
         if first is None:
             return
         s = self.settings
+        budget = self.budget(first[2])
         used = self.store.infra_undos_since(board, task.id, now - s.infra_undo_window_s)
-        if used >= s.infra_undo_count:
-            alert = self._budget_alert(board, task, used, now)
+        if used >= budget:
+            alert = self._budget_alert(board, task, used, now, owner_retained(first[2]))
             if alert is not None:
                 alerts.append(alert)
             return
@@ -221,7 +234,7 @@ class InfraRecovery:
         # Then count again: a second coordinator (leader handover) may have spent in between, and
         # whoever sees more undos than the budget gives its own row back and does nothing.
         row_id = self.store.add_infra_undo(board, task.id, int(now))
-        if self.store.infra_undos_since(board, task.id, now - s.infra_undo_window_s) > s.infra_undo_count:
+        if self.store.infra_undos_since(board, task.id, now - s.infra_undo_window_s) > budget:
             self.store.delete_infra_undo(row_id)
             return
         if not self.api.unblock(conn, task.id):
@@ -311,7 +324,7 @@ class InfraRecovery:
                             if first is None:
                                 continue
                             used = self.store.infra_undos_since(board, task.id, now - s.infra_undo_window_s)
-                            if used < s.infra_undo_count:
+                            if used < self.budget(first[2]):
                                 continue
                             trip_id, failures, patterns = first
                             since = next(
@@ -320,7 +333,7 @@ class InfraRecovery:
                             out.append({
                                 "board": board, "task_id": task.id, "title": task.title, "attempts": used,
                                 "failures": failures, "patterns": list(patterns), "last_error_class": INFRA,
-                                "since": since,
+                                "since": since, "retained": owner_retained(patterns),
                             })
                         except Exception:
                             log.exception("kanban-empowered: could not assess %s/%s", board, task.id)
@@ -329,13 +342,18 @@ class InfraRecovery:
         return out
 
     # -- alerts ------------------------------------------------------------------
-    def _budget_alert(self, board: str, task: Any, used: int, now: float) -> Optional[dict]:
+    def budget(self, patterns) -> int:
+        """Undos a card gets per window: one when every failure is an ownership refusal."""
+        return min(1, self.settings.infra_undo_count) if owner_retained(patterns) else self.settings.infra_undo_count
+
+    def _budget_alert(self, board: str, task: Any, used: int, now: float, retained: bool = False) -> Optional[dict]:
         key = f"infra_budget_alert:{board}:{task.id}"
         if not self._alert_due(key, now, self.settings.infra_undo_window_s):
             return None
         return {
             "kind": "budget", "key": key, "board": board, "task_id": task.id,
             "title": task.title, "count": used, "window_s": self.settings.infra_undo_window_s,
+            "retained": retained,
         }
 
     def _systemic_alert(self, now: float) -> Optional[dict]:

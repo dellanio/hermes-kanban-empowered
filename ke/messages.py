@@ -162,6 +162,8 @@ EN: dict[str, str] = {
     "infra.budget.action": "👉 Check the infrastructure (gateway, workers), then unblock this card yourself.",
     "infra.budget.detail": "Blocked again by infrastructure failures. The automatic undo budget ({count} in {window}) is used up; I will not retry.",
     "infra.budget.how": "Details: hermes kanban-empowered explain {id} --board {board}",
+    "infra.budget.retained": "Hermes keeps refusing to run it: an older session still owns this card, so retrying will not help. I undid it once and will not retry.",
+    "infra.budget.retained_action": "👉 Close or finish the Hermes session that still owns this card, then unblock it yourself.",
     "infra.systemic": "👉 Check the host (gateway, persistence): {n} workers exited for infrastructure reasons in {window}, not because of their work.",
     # live panel (pinned Telegram message, terminal watch)
     "panel.title": "📋 KANBAN NOW · {time}",
@@ -229,6 +231,17 @@ EN: dict[str, str] = {
     "ui.section.needs_you": "Needs you",
     "ui.section.running": "Running now",
     "ui.section.timeline": "Coordinator at work",
+    "ui.needs.retained_text": "Hermes keeps refusing to run it: an older session still owns this card, so retrying will not help. Close or finish that session, then unblock the card.",
+    "ui.incident.title": "Incident: failures in a row",
+    "ui.incident.text": "{n} workers stopped for infrastructure reasons in the last {window}, not because of their work.",
+    "ui.incident.card": "{count} failures · last {age} ago",
+    "ui.incident.retained": "Hermes refused to run it: an older session still owns the card.",
+    "ui.incident.error": "Last error: {error}",
+    "ui.incident.ongoing": "Still happening: the last failure was {age} ago. Check the gateway and the workers.",
+    "ui.incident.resolved": "Already settled: the cards involved are done or moving again. Nothing to do.",
+    "ui.incident.quiet": "No new failure for {age}.",
+    "ui.incident.clears": "This incident clears by itself in {age} if nothing else fails.",
+    "ui.incident.status": "now {status}",
     "ui.section.infra": "Infrastructure",
     "ui.needs.ago": "{age} ago",
     "ui.needs.blocks.one": "Blocks {n} card",
@@ -245,6 +258,9 @@ EN: dict[str, str] = {
     "ui.needs.reminder_next": "First reminder in {age}",
     "ui.needs.reminder_overdue": "Reminder due now",
     "ui.needs.empty": "Nothing needs you right now.",
+    "ui.needs.guard": "Stuck behind a respawn guard",
+    "ui.needs.guard_text": "Hermes will not start this card: {reason}. Clear the cause, or hand it to another profile:",
+    "ui.needs.guard_error": "Last error: {error}",
     "ui.needs.exhausted": "Retries exhausted",
     "ui.needs.exhausted_text": "Parked by infrastructure failures; the automatic undo budget is used up. Check the gateway and workers, then unblock it yourself.",
     "ui.running.profile": "Profile",
@@ -269,7 +285,7 @@ EN: dict[str, str] = {
     "ui.timeline.panel_updated": "Telegram panel updated",
     "ui.timeline.empty": "No coordinator action yet.",
     "ui.infra.recent": "Infrastructure failures (last hour)",
-    "ui.infra.systemic": "Systemic alert",
+    "ui.infra.systemic": "Failures in a row",
     "ui.infra.systemic.on": "active",
     "ui.infra.systemic.off": "none",
     "ui.infra.telegram": "Telegram path",
@@ -945,9 +961,10 @@ def render_infra_alert(alert: dict) -> str:
         ])
     return "\n".join([
         t("infra.head"),
-        t("infra.budget.action"),
+        t("infra.budget.retained_action" if alert.get("retained") else "infra.budget.action"),
         "",
         _card_line(0, alert),
-        t("infra.budget.detail", count=alert.get("count", 0), window=natural_age(alert.get("window_s", 0))),
+        t("infra.budget.retained") if alert.get("retained")
+        else t("infra.budget.detail", count=alert.get("count", 0), window=natural_age(alert.get("window_s", 0))),
         t("infra.budget.how", board=alert["board"], id=alert["task_id"]),  # the action itself needs the id
     ])

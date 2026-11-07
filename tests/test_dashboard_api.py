@@ -569,3 +569,45 @@ def test_board_filtered_timeline_reaches_older_history(client, store):
     timeline = client.get(PREFIX + "/overview", params={"board": "quiet"}).json()["timeline"]
     assert [e["kind"] for e in timeline] == ["reminder_sent", "human_done", "human_done", "human_done"]
     assert all(e["board"] == "quiet" for e in timeline)
+
+
+def test_overview_lists_a_card_held_by_a_respawn_guard(client, store):
+    from ke import hermes_api
+
+    with _conn() as conn:
+        tid = create_task(conn, title="Gate", assignee="revisor")
+        conn.execute("UPDATE tasks SET last_failure_error = ? WHERE id = ?", ("provider said: billing", tid))
+    now = int(time.time())
+    store.upsert_guard_alert("default", tid, "blocker_auth", now - 3600)
+    store.upsert_guard_alert("default", tid, "blocker_auth", now)
+    item = _item(client.get(PREFIX + "/overview").json(), tid)
+    assert item["kind"] == "guard_held" and item["assignee"] == "revisor" and item["age_s"] >= 3600
+    assert "billing" in item["last_error"] and tid in item["release"]
+
+
+def test_overview_waits_the_alert_delay_before_listing_a_guard(client, store):
+    with _conn() as conn:
+        tid = create_task(conn, title="Gate", assignee="revisor")
+    store.upsert_guard_alert("default", tid, "blocker_auth", int(time.time()) - 60)
+    body = client.get(PREFIX + "/overview").json()
+    assert all(e["task_id"] != tid for e in body["needs_you"])
+
+
+def test_overview_explains_the_failures_in_a_row_incident(client, store):
+    with _conn() as conn:
+        tid = create_task(conn, title="Reconcile", assignee="diretor")
+    now = int(time.time())
+    for n, ago in enumerate((900, 800, 700)):
+        store.log_action("default", tid, "infra_exit", f"infra:{n}", now - ago)
+    body = client.get(PREFIX + "/overview").json()
+    incident = body["infra"]["incident"]
+    assert incident["exits"] == 3 and not incident["ongoing"]
+    (card,) = incident["cards"]
+    assert card["task_id"] == tid and card["count"] == 3 and card["title"] == "Reconcile"
+    assert 2600 <= incident["clears_in_s"] <= 2700  # the oldest exit leaves the 1 h window
+    assert body["metrics"]["incidents"] == 1
+
+
+def test_overview_has_no_incident_below_the_threshold(client, store):
+    store.log_action("default", "t_00000001", "infra_exit", "infra:1", int(time.time()) - 60)
+    assert client.get(PREFIX + "/overview").json()["infra"]["incident"] is None

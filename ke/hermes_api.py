@@ -176,6 +176,16 @@ def worker_activity(profile: str, title: str, since=None, limit: int = 12) -> li
     return out
 
 
+def redact(text: str) -> str:
+    """``text`` with secrets masked by Hermes' redactor (``""`` when it cannot run)."""
+    try:
+        from agent.redact import redact_sensitive_text
+
+        return redact_sensitive_text(text, force=True) if text else ""
+    except Exception:
+        return ""
+
+
 def summarize(system: str, text: str) -> str:
     """One short text from the Hermes auxiliary model (``auxiliary.kanban_empowered`` in config.yaml, else auto)."""
     from agent.auxiliary_client import call_llm, extract_content_or_reasoning

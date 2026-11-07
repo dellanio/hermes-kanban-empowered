@@ -126,8 +126,22 @@ def test_same_reason_keeps_first_seen_and_alerted_state(tmp_path, clock):
     gw.observe("tw", [("t1", "active_pr")], clock.now)
     row = store.get_guard_alert("tw", "t1")
     assert row["first_seen"] == t0 and row["last_seen"] == int(clock.now) and row["alerted_at"] == t0 + 1800
-    clock.advance(86400)
-    assert gw.due_alerts(clock.now) == []  # one alert per guard episode
+    clock.advance(86400 - 61)
+    assert gw.due_alerts(clock.now) == []
+    clock.advance(1)
+    assert [x["task_id"] for x in gw.due_alerts(clock.now)] == ["t1"]  # repeated while the guard lasts
+
+
+def test_repeat_follows_the_digest_setting(tmp_path, clock):
+    gw, _ = _gw(tmp_path, digest_every_s=3600)
+    gw.observe("tw", [("t1", "blocker_auth")], clock.now)
+    clock.advance(1800)
+    (a,) = gw.due_alerts(clock.now)
+    gw.mark_alerted(a, clock.now)
+    clock.advance(3599)
+    assert gw.due_alerts(clock.now) == []
+    clock.advance(1)
+    assert len(gw.due_alerts(clock.now)) == 1
 
 
 def test_mark_alerted_ignores_a_changed_reason(tmp_path, clock):

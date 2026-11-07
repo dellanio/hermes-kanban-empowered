@@ -328,10 +328,11 @@ function Section({ title, count, tone, children, extra }) {
   })
 }
 
-function Metric({ label, value, tone }) {
+function Metric({ label, value, tone, onClick }) {
   return jsxs('div', {
     className: 'ke-metric',
-    style: TONE[tone] || TONE.neutral,
+    style: Object.assign({}, TONE[tone] || TONE.neutral, onClick ? { cursor: 'pointer' } : null),
+    onClick,
     children: [
       jsx('div', { className: 'ke-metric-value', children: String(value ?? 0) }),
       jsx('div', { className: 'ke-metric-label', children: label })
@@ -367,6 +368,48 @@ function StatusTag({ status, t }) {
 // -- needs you ----------------------------------------------------------------------------------
 function NeedCard({ item, t, onOpen, onExplain }) {
   const paused = isPaused(item.board_status)
+
+  if (item.kind === 'guard_held') {
+    return jsxs('div', {
+      className: 'ke-card',
+      style: paused ? TONE.neutral : TONE.red,
+      children: [
+        jsxs('div', {
+          className: 'ke-card-top',
+          children: [
+            jsx('span', { className: 'ke-card-title', title: item.title, children: item.title || item.board_title }),
+            jsx('span', { className: 'ke-muted', children: t('ui.needs.ago', { age: item.age_text || ageText(t, item.age_s) }) })
+          ]
+        }),
+        jsxs('div', {
+          className: 'ke-chips',
+          children: [
+            jsx('span', { className: 'ke-chip', children: item.board_title }),
+            jsx(StatusTag, { status: item.board_status, t }),
+            jsx('span', { className: 'ke-chip ke-chip-tone', children: t('ui.needs.guard') }),
+            item.assignee ? jsx('span', { className: 'ke-chip', children: item.assignee }) : null,
+            item.held_behind_count
+              ? jsx('span', { className: 'ke-chip', children: plural(t, 'ui.needs.blocks', item.held_behind_count) })
+              : null
+          ]
+        }),
+        jsx('div', { className: 'ke-need', title: item.need, children: item.need }),
+        jsx('div', { className: 'ke-sub', children: jsx('code', { children: item.release }) }),
+        item.last_error
+          ? jsx('div', { className: 'ke-sub', title: item.last_error, children: t('ui.needs.guard_error', { error: item.last_error }) })
+          : null,
+        item.held_behind_count && onExplain
+          ? jsx('div', {
+              className: 'ke-card-foot',
+              children: jsx('span', {
+                className: 'ke-card-actions',
+                children: jsx(Button, { size: 'xs', variant: 'ghost', onClick: () => onExplain(item), children: t('ui.chain.explain') })
+              })
+            })
+          : null
+      ]
+    })
+  }
 
   if (item.kind === 'infra_exhausted') {
     return jsxs('div', {
@@ -813,6 +856,45 @@ function Timeline({ entries, t, nowS }) {
 }
 
 // -- infrastructure -----------------------------------------------------------------------------
+function Incident({ incident, t }) {
+  const state = incident.resolved
+    ? t('ui.incident.resolved')
+    : incident.ongoing
+      ? t('ui.incident.ongoing', { age: ageText(t, incident.last_s) })
+      : t('ui.incident.quiet', { age: ageText(t, incident.last_s) })
+  const cards = incident.cards.map(c =>
+    jsxs(
+      'div',
+      {
+        className: 'ke-sub',
+        children: [
+          jsx('div', {
+            children:
+              [c.board_title, c.title].filter(Boolean).join(' · ') +
+              ' — ' +
+              t('ui.incident.card', { count: c.count, age: ageText(t, c.last_s) }) +
+              (c.status ? ' · ' + t('ui.incident.status', { status: c.status }) : '')
+          }),
+          c.retained ? jsx('div', { children: t('ui.incident.retained') }) : null,
+          c.last_error ? jsx('div', { title: c.last_error, children: t('ui.incident.error', { error: c.last_error }) }) : null
+        ]
+      },
+      c.board + '/' + c.task_id
+    )
+  )
+  return jsxs('div', {
+    className: 'ke-card',
+    style: incident.resolved ? TONE.neutral : TONE.red,
+    children: [
+      jsx('div', { className: 'ke-card-title', children: t('ui.incident.title') }),
+      jsx('div', { className: 'ke-need', children: t('ui.incident.text', { n: incident.exits, window: incident.window_text }) }),
+      jsx('div', { children: cards }),
+      jsx('div', { className: 'ke-need', children: state }),
+      jsx('div', { className: 'ke-sub', children: t('ui.incident.clears', { age: ageText(t, incident.clears_in_s) }) })
+    ]
+  })
+}
+
 function Infra({ infra, t }) {
   const path = infra.telegram_path
   const pathText = !infra.telegram_token
@@ -831,6 +913,7 @@ function Infra({ infra, t }) {
     tone: infra.systemic_alert_active || infra.budget_exhausted.length ? 'red' : 'neutral',
     children: jsxs(Fragment, {
       children: [
+        infra.incident ? jsx(Incident, { incident: infra.incident, t }) : null,
         kv(t('ui.infra.recent'), String(infra.recent_infra_exits_1h), infra.recent_infra_exits_1h ? 'ke-tone-red' : ''),
         kv(
           t('ui.infra.systemic'),
@@ -1170,6 +1253,7 @@ function BoardFilter({ boards, names, statuses, value, onChange, t }) {
 }
 
 function EmpoweredPage() {
+  const infraRef = useRef(null)
   const t = useStrings()
   const now = useClock()
   const [board, setBoardState] = useState(() => storageGet('board', 'all'))
@@ -1282,7 +1366,16 @@ function EmpoweredPage() {
             jsx(Metric, { label: t('ui.metric.needs_you'), value: m.needs_you, tone: 'amber' }),
             jsx(Metric, { label: t('ui.metric.impacted'), value: m.impacted_cards, tone: 'amber' }),
             jsx(Metric, { label: t('ui.metric.workers'), value: m.workers_running, tone: 'green' }),
-            jsx(Metric, { label: t('ui.metric.incidents'), value: m.incidents, tone: m.incidents ? 'red' : 'neutral' })
+            jsx(Metric, {
+              label: t('ui.metric.incidents'),
+              value: m.incidents,
+              tone: m.incidents ? 'red' : 'neutral',
+              onClick: m.incidents
+                ? () => {
+                    if (infraRef.current) infraRef.current.scrollIntoView({ behavior: 'smooth', block: 'start' })
+                  }
+                : undefined
+            })
           ]
         }),
         jsxs('div', {
@@ -1302,7 +1395,7 @@ function EmpoweredPage() {
                 chain
                   ? jsx(BlockChain, { target: chain, t, onClose: () => setChain(null) }, chain.board + '/' + chain.task_id)
                   : jsx(Timeline, { entries: data.timeline || [], t, nowS }),
-                jsx(Infra, { infra: data.infra, t })
+                jsx('div', { ref: infraRef, children: jsx(Infra, { infra: data.infra, t }) })
               ]
             })
           ]

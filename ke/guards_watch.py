@@ -3,7 +3,8 @@
 Hermes' dispatcher reports, on every tick of a board, which ready/review cards it refused to
 respawn (``DispatchResult.respawn_guarded``: ``(task_id, reason)``). The coordinator feeds each of
 those observations to :meth:`GuardWatch.observe`; a card that stays guarded for the same reason
-for ``guard_alert_after_s`` (30 min) is due ONE alert per guard episode.
+for ``guard_alert_after_s`` (30 min) is due an alert, repeated every ``digest_every_s`` while the
+guard lasts (one message is easy to miss, and the card never moves on its own).
 
 Counting absences. ``observe`` is called once per tick of a board, and ``evaluate`` is throttled
 to 30 s across all boards, so absence is counted per *observation* of that board (one tick of
@@ -90,8 +91,11 @@ class GuardWatch:
 
     # -- alerts ----------------------------------------------------------------
     def due_alerts(self, now: float) -> list[dict]:
-        """Rows guarded for at least ``guard_alert_after_s`` and not alerted yet (``age_s`` added)."""
-        rows = self.store.due_guard_alerts(now - self.settings.guard_alert_after_s)
+        """Rows guarded for at least ``guard_alert_after_s`` and not alerted in the last ``digest_every_s``
+        (``age_s`` added)."""
+        rows = self.store.due_guard_alerts(
+            now - self.settings.guard_alert_after_s, now - self.settings.digest_every_s
+        )
         return [{**row, "age_s": max(0, int(now - row["first_seen"]))} for row in rows]
 
     def mark_alerted(self, alert: dict, now: float) -> bool:

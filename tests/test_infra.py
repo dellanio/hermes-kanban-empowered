@@ -11,7 +11,8 @@ from test_conditions import _raw_event
 from test_waits import pt_br  # noqa: F401 (pt_br is a fixture)
 
 OWNER_CHAT = 6802889854
-INFRA_ERR = "Kanban execution unknown; retained by owner"
+INFRA_ERR = "Gateway connection failed: connection reset"
+OWNER_ERR = "Kanban owner refused: Kanban execution unknown; retained by owner"
 CONTENT_ERR = "AssertionError in tests"
 DEFAULT = (
     "Kanban execution unknown",
@@ -156,7 +157,7 @@ def test_undo_when_all_failures_are_infra(kanban_home, tmp_path, clock):
     assert _undo_count(store, tid) == 1
     (comment,) = [c for c in _comments(tid) if "infrastructure" in c]
     assert comment.startswith("kanban-empowered: ")
-    assert "2 infrastructure failures" in comment and "Kanban execution unknown" in comment
+    assert "2 infrastructure failures" in comment and "Gateway connection failed" in comment
     (action,) = [a for a in store.actions_since(0) if a["kind"] == "infra_undo"]
     assert (action["board"], action["task_id"], action["ts"]) == ("default", tid, int(clock.now))
 
@@ -713,3 +714,37 @@ def test_worker_exited_hook_keeps_the_reported_board_when_the_card_is_there(kanb
     ir.on_worker_exited(task_id=tid, board="side", run_id=run_id, exit_kind="nonzero_exit")
     (row,) = [a for a in store.actions_since(0) if a["kind"] == "infra_exit"]
     assert (row["board"], row["detail"]) == ("side", f"content:{run_id}")
+
+
+# -- ownership refusals: one undo, then the owner is told ------------------------------
+def test_owner_refusal_gets_a_single_undo(kanban_home, tmp_path, clock):
+    ir, store = _ir(tmp_path, clock)
+    tid = gave_up_with_runs(["owner", "owner"], errors={"owner": OWNER_ERR})
+    ir.evaluate(clock.now)
+    assert _status(tid) == "ready" and _undo_count(store, tid) == 1
+    gave_up_with_runs(["owner", "owner"], tid=tid, errors={"owner": OWNER_ERR})
+    clock.advance(60)
+    alerts = ir.evaluate(clock.now)
+    assert _status(tid) == "blocked" and _undo_count(store, tid) == 1
+    (alert,) = [a for a in alerts if a["kind"] == "budget"]
+    assert alert["retained"] is True
+    (row,) = ir.exhausted(clock.now)
+    assert row["task_id"] == tid and row["retained"] is True
+
+
+def test_mixed_failures_keep_the_normal_budget(kanban_home, tmp_path, clock):
+    ir, store = _ir(tmp_path, clock)
+    tid = gave_up_with_runs(["owner", "infra"], errors={"owner": OWNER_ERR})
+    ir.evaluate(clock.now)
+    gave_up_with_runs(["owner", "infra"], tid=tid, errors={"owner": OWNER_ERR})
+    clock.advance(60)
+    ir.evaluate(clock.now)
+    assert _status(tid) == "ready" and _undo_count(store, tid) == 2
+
+
+def test_owner_refusal_alert_text_says_retrying_will_not_help(tmp_path):
+    from ke.messages import render_infra_alert
+
+    text = render_infra_alert({"kind": "budget", "board": "b", "task_id": "t_1", "title": "card", "count": 1,
+                               "window_s": 86400, "retained": True})
+    assert "older session still owns" in text and "t_1" in text
